@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
+use anyhow::Context;
 use eframe::egui;
 
 use crate::db::timeline_schema::setup_timeline_schema;
@@ -8,6 +9,8 @@ use crate::model::log_entry::LogEntry;
 use crate::parsers::aul::AulParser;
 use crate::parsers::text_config::TextConfigParser;
 use crate::parsers::{LogParser, ParserConfig, parse_source};
+use crate::tagging::engine::apply_import_time;
+use crate::tagging::rule::Rule;
 use crate::ui::timeline_view::TimelineView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,13 +20,16 @@ enum SourceKind {
 }
 
 enum LoadOutcome {
-    Done(Result<usize, String>),
+    Done(Result<(usize, usize), String>),
 }
 
 enum LoadState {
     Idle,
     Loading,
-    Done { inserted: usize },
+    Done {
+        inserted: usize,
+        tags_applied: usize,
+    },
     Failed(String),
 }
 
@@ -32,6 +38,7 @@ pub struct PeachApp {
     source_kind: SourceKind,
     source_path: Option<PathBuf>,
     parser_config_path: Option<PathBuf>,
+    rule_paths: Vec<PathBuf>,
     load_state: LoadState,
     load_rx: Option<mpsc::Receiver<LoadOutcome>>,
     timeline: TimelineView,
@@ -51,6 +58,7 @@ impl PeachApp {
             source_kind: SourceKind::Aul,
             source_path: None,
             parser_config_path: None,
+            rule_paths: Vec::new(),
             load_state: LoadState::Idle,
             load_rx: None,
             timeline: TimelineView::new(db_path),
@@ -68,12 +76,14 @@ impl PeachApp {
         let db_path = self.db_path.clone();
         let source_kind = self.source_kind;
         let parser_config_path = self.parser_config_path.clone();
+        let rule_paths = self.rule_paths.clone();
 
         std::thread::spawn(move || {
             let result = run_load(
                 source_kind,
                 &source_path,
                 parser_config_path.as_deref(),
+                &rule_paths,
                 &db_path,
             )
             .map_err(|err| format!("{err:#}"));
@@ -88,8 +98,11 @@ impl eframe::App for PeachApp {
             match rx.try_recv() {
                 Ok(LoadOutcome::Done(result)) => {
                     match result {
-                        Ok(inserted) => {
-                            self.load_state = LoadState::Done { inserted };
+                        Ok((inserted, tags_applied)) => {
+                            self.load_state = LoadState::Done {
+                                inserted,
+                                tags_applied,
+                            };
                             self.timeline.refresh();
                         }
                         Err(err) => self.load_state = LoadState::Failed(err),
@@ -152,6 +165,23 @@ impl eframe::App for PeachApp {
                 });
             }
 
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Choose tagging rules (TOML, optional)...")
+                    .clicked()
+                    && let Some(picked) = rfd::FileDialog::new()
+                        .add_filter("TOML", &["toml"])
+                        .pick_files()
+                {
+                    self.rule_paths = picked;
+                }
+                if self.rule_paths.is_empty() {
+                    ui.label("(none selected — import-time tagging skipped)");
+                } else {
+                    ui.label(format!("{} rule file(s) selected", self.rule_paths.len()));
+                }
+            });
+
             let can_load = !matches!(self.load_state, LoadState::Loading)
                 && self.source_path.is_some()
                 && (self.source_kind != SourceKind::Text || self.parser_config_path.is_some());
@@ -169,8 +199,13 @@ impl eframe::App for PeachApp {
                         ui.spinner();
                         ui.label("Loading...");
                     }
-                    LoadState::Done { inserted } => {
-                        ui.label(format!("Loaded {inserted} entries"));
+                    LoadState::Done {
+                        inserted,
+                        tags_applied,
+                    } => {
+                        ui.label(format!(
+                            "Loaded {inserted} entries, applied {tags_applied} tags"
+                        ));
                     }
                     LoadState::Failed(err) => {
                         ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
@@ -193,8 +228,9 @@ fn run_load(
     source_kind: SourceKind,
     source_path: &Path,
     parser_config_path: Option<&Path>,
+    rule_paths: &[PathBuf],
     db_path: &Path,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<(usize, usize)> {
     let conn = duckdb::Connection::open(db_path)?;
     setup_timeline_schema(&conn)?;
 
@@ -213,13 +249,18 @@ fn run_load(
             )
         }
     };
+    // The config's sourcetype is authoritative, not `parser.sourcetype()`:
+    // TextConfigParser serves many different sourcetypes (nginx, syslog,
+    // ...) depending on which config is loaded, so its own sourcetype() is
+    // just a generic marker (see parsers/mod.rs doc comment).
+    let sourcetype = config.parser.sourcetype.clone();
 
     let entries: Vec<LogEntry> = parse_source(parser, source_path, &config)?;
     if entries.is_empty() {
-        return Ok(0);
+        return Ok((0, 0));
     }
 
-    insert_source_record(&conn, &entries[0], source_path, parser.sourcetype())?;
+    insert_source_record(&conn, &entries[0], source_path, &sourcetype)?;
 
     let mut appender = conn.appender("log_entries")?;
     for entry in &entries {
@@ -235,7 +276,18 @@ fn run_load(
     }
     drop(appender);
 
-    Ok(entries.len())
+    let rules = rule_paths
+        .iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read rule file {}", path.display()))?;
+            Rule::from_toml_str(&text)
+                .with_context(|| format!("invalid rule file {}", path.display()))
+        })
+        .collect::<anyhow::Result<Vec<Rule>>>()?;
+    let tags_applied = apply_import_time(&conn, &rules, &entries, &sourcetype)?;
+
+    Ok((entries.len(), tags_applied))
 }
 
 fn insert_source_record(
