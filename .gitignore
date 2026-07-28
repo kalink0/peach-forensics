@@ -1,0 +1,42 @@
+# --- Internal / never publish ---
+# Bootstrap-Arbeitsauftrag für Claude Code - bleibt lokal, landet nie im Repo.
+CLAUDE.md
+
+# --- Rust ---
+# Cargo.lock is committed on purpose (peach is a binary application, not a library).
+/target/
+*.pdb
+
+# --- Peach runtime artifacts (forensic data, never versioned) ---
+# DuckDB bulk-timeline files
+*.duckdb
+*.duckdb.wal
+# SQLite session-DB files
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+# Session state / case exports
+/sessions/
+/cases/
+
+# Evidence/test fixtures that may contain real acquisitions (allow curated
+# fixtures under tests/fixtures/ explicitly if committed on purpose)
+*.logarchive/
+*.evtx.local
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Local env / secrets ---
+.env
+.env.local
+
