@@ -6,6 +6,7 @@ use crate::model::event_id::{EventId, SequenceCounter, SourceFileId};
 use crate::model::log_entry::{LogEntry, ParsedRecord};
 
 pub mod aul;
+pub mod evtx;
 pub mod text_config;
 
 /// Configuration for one parser instance, deserialized from a parser TOML

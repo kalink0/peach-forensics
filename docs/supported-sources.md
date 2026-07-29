@@ -29,10 +29,23 @@ Any line-oriented text log describable with a regex + timestamp format — syslo
 Apache/nginx access logs, logcat, etc. One TOML config = one sourcetype. See
 [user-guide.md](user-guide.md#text-parser-configs) for the config format.
 
+### EVTX (Windows Event Log, `.evtx`)
+
+Single `.evtx` file. Wraps the `evtx` crate.
+
+- `level` is the raw `Event.System.Level` JSON value verbatim (usually a small
+  integer per the Windows Event Schema, e.g. 2=Error, 3=Warning,
+  4=Informational) — not remapped, same reasoning as AUL's `LogType`.
+- `message` is always empty: the crate doesn't render human-readable event text
+  (that needs the OS's message-resource DLLs/templates, which it deliberately
+  doesn't ship). `EventData` is preserved in full in `raw`/`fields` instead.
+- No config-driven field-mapping, like AUL.
+- A single unparseable record aborts the whole parse (the crate's per-record
+  error carries no partial data — not even a timestamp — so there's nothing to
+  show as a visible-but-broken entry the way AUL's oversize failures work).
+
 ## Planned, not yet implemented
 
-- **EVTX** (Windows Event Log) — `evtx` crate already vendored as a dependency,
-  parser not written yet.
 - **journald** (systemd Journal, binary format) — not started.
 
 ## Explicitly out of scope

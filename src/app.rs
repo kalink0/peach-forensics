@@ -9,6 +9,7 @@ use crate::db::timeline_queries::Query;
 use crate::db::timeline_schema::setup_timeline_schema;
 use crate::model::log_entry::LogEntry;
 use crate::parsers::aul::AulParser;
+use crate::parsers::evtx::EvtxFileParser;
 use crate::parsers::text_config::TextConfigParser;
 use crate::parsers::{LogParser, ParserConfig, parse_source};
 use crate::session::persist::{self, LoadedSource, SessionPaths};
@@ -20,6 +21,7 @@ use crate::ui::timeline_view::TimelineView;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
     Aul,
+    Evtx,
     Text,
 }
 
@@ -68,23 +70,33 @@ pub struct PeachApp {
 }
 
 /// Pops the first `--add-source` path (if any) to pre-fill, determining its
-/// sourcetype structurally (a directory can only be AUL — the only
-/// directory-based sourcetype — not a guess about which text format it is),
-/// and keeps the rest queued for after each load succeeds.
+/// sourcetype structurally rather than guessing a text format: a directory
+/// can only be AUL (the only directory-based sourcetype), and `.evtx` is an
+/// unambiguous, well-known extension. Everything else defaults to Text.
+/// Keeps the rest queued for after each load succeeds.
 fn queue_from_cli_sources(
     add_sources: Vec<PathBuf>,
 ) -> (Option<PathBuf>, SourceKind, VecDeque<PathBuf>) {
     let mut queue: VecDeque<PathBuf> = add_sources.into();
     match queue.pop_front() {
         Some(path) => {
-            let kind = if path.is_dir() {
-                SourceKind::Aul
-            } else {
-                SourceKind::Text
-            };
+            let kind = source_kind_for_path(&path);
             (Some(path), kind, queue)
         }
         None => (None, SourceKind::Aul, queue),
+    }
+}
+
+fn source_kind_for_path(path: &Path) -> SourceKind {
+    if path.is_dir() {
+        SourceKind::Aul
+    } else if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("evtx"))
+    {
+        SourceKind::Evtx
+    } else {
+        SourceKind::Text
     }
 }
 
@@ -211,11 +223,7 @@ impl eframe::App for PeachApp {
                                 let _ = persist::save_loaded_sources(&conn, &self.loaded_sources);
                             }
                             if let Some(next) = self.pending_cli_sources.pop_front() {
-                                self.source_kind = if next.is_dir() {
-                                    SourceKind::Aul
-                                } else {
-                                    SourceKind::Text
-                                };
+                                self.source_kind = source_kind_for_path(&next);
                                 self.source_path = Some(next);
                                 self.parser_config_path = None;
                             }
@@ -279,6 +287,7 @@ impl eframe::App for PeachApp {
             ui.horizontal(|ui| {
                 ui.label("Sourcetype:");
                 ui.selectable_value(&mut self.source_kind, SourceKind::Aul, "AUL (.logarchive)");
+                ui.selectable_value(&mut self.source_kind, SourceKind::Evtx, "EVTX");
                 ui.selectable_value(
                     &mut self.source_kind,
                     SourceKind::Text,
@@ -295,11 +304,15 @@ impl eframe::App for PeachApp {
             ui.horizontal(|ui| {
                 let pick_label = match self.source_kind {
                     SourceKind::Aul => "Choose .logarchive folder...",
+                    SourceKind::Evtx => "Choose .evtx file...",
                     SourceKind::Text => "Choose log file...",
                 };
                 if ui.button(pick_label).clicked() {
                     let picked = match self.source_kind {
                         SourceKind::Aul => rfd::FileDialog::new().pick_folder(),
+                        SourceKind::Evtx => rfd::FileDialog::new()
+                            .add_filter("EVTX", &["evtx"])
+                            .pick_file(),
                         SourceKind::Text => rfd::FileDialog::new().pick_file(),
                     };
                     if let Some(picked) = picked {
@@ -435,6 +448,10 @@ fn run_load(
         SourceKind::Aul => (
             &AulParser,
             ParserConfig::from_toml_str("[parser]\nname = \"aul\"\nsourcetype = \"aul\"\n")?,
+        ),
+        SourceKind::Evtx => (
+            &EvtxFileParser,
+            ParserConfig::from_toml_str("[parser]\nname = \"evtx\"\nsourcetype = \"evtx\"\n")?,
         ),
         SourceKind::Text => {
             let config_path = parser_config_path
