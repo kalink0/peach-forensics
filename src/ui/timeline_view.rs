@@ -4,28 +4,26 @@ use duckdb::Connection;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
+use crate::db::timeline_queries::{self, DisplayRow, Query};
+
 /// How many rows to fetch per DuckDB query when the visible scroll window
 /// moves. Keeps memory bounded (never holds the full result set — section
 /// "nicht im RAM halten") while avoiding a query per visible row.
 const WINDOW_SIZE: usize = 200;
-
-struct DisplayRow {
-    timestamp_utc: String,
-    level: String,
-    message: String,
-}
 
 struct RowCache {
     offset: usize,
     rows: Vec<DisplayRow>,
 }
 
-/// Virtualized timeline table: reads only the currently visible window of
-/// rows from the on-disk DuckDB file via `LIMIT`/`OFFSET`, never the full
-/// `log_entries` table into memory at once.
+/// Virtualized, filterable timeline table: reads only the currently visible
+/// window of rows matching the current [`Query`] from the on-disk DuckDB
+/// file via `LIMIT`/`OFFSET`, never the full `log_entries` table into
+/// memory at once.
 pub struct TimelineView {
     db_path: PathBuf,
     conn: Option<Connection>,
+    query: Query,
     total_rows: usize,
     cache: Option<RowCache>,
 }
@@ -35,25 +33,45 @@ impl TimelineView {
         Self {
             db_path,
             conn: None,
+            query: Query::default(),
             total_rows: 0,
             cache: None,
         }
     }
 
-    /// Re-reads the row count from DuckDB and drops the window cache. Call
-    /// after a load finishes.
+    pub fn total_rows(&self) -> usize {
+        self.total_rows
+    }
+
+    /// Re-reads the row count for the current query and drops the window
+    /// cache. Call after a load finishes.
     pub fn refresh(&mut self) {
+        self.recount();
+    }
+
+    /// Sets the active search query. Filters apply immediately (no separate
+    /// "search" action) — see `filter_bar.rs`.
+    pub fn set_query(&mut self, query: Query) {
+        if query == self.query {
+            return;
+        }
+        self.query = query;
+        self.recount();
+    }
+
+    fn recount(&mut self) {
         self.cache = None;
+        let query = self.query.clone();
         self.total_rows = self
             .connection()
-            .and_then(|conn| {
-                conn.query_row("SELECT COUNT(*) FROM log_entries", [], |row| {
-                    row.get::<_, i64>(0)
-                })
-                .ok()
-            })
-            .map(|count| count as usize)
+            .and_then(|conn| timeline_queries::count_matching(conn, &query).ok())
             .unwrap_or(0);
+    }
+
+    pub fn distinct_levels(&mut self) -> Vec<String> {
+        self.connection()
+            .and_then(|conn| timeline_queries::distinct_levels(conn).ok())
+            .unwrap_or_default()
     }
 
     fn connection(&mut self) -> Option<&Connection> {
@@ -71,40 +89,17 @@ impl TimelineView {
             return;
         }
         let offset = row_index.saturating_sub(WINDOW_SIZE / 4);
-        if let Some(rows) = self.fetch_window(offset, WINDOW_SIZE) {
+        let query = self.query.clone();
+        if let Some(conn) = self.connection()
+            && let Ok(rows) = timeline_queries::fetch_window(conn, &query, offset, WINDOW_SIZE)
+        {
             self.cache = Some(RowCache { offset, rows });
         }
     }
 
-    fn fetch_window(&mut self, offset: usize, limit: usize) -> Option<Vec<DisplayRow>> {
-        let conn = self.connection()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT timestamp_utc, level, message FROM log_entries
-                 ORDER BY timestamp_utc, event_id_source, event_id_seq
-                 LIMIT ? OFFSET ?",
-            )
-            .ok()?;
-        let rows = stmt
-            .query_map(duckdb::params![limit as i64, offset as i64], |row| {
-                let timestamp_utc: chrono::NaiveDateTime = row.get(0)?;
-                let level: Option<String> = row.get(1)?;
-                let message: Option<String> = row.get(2)?;
-                Ok(DisplayRow {
-                    timestamp_utc: timestamp_utc.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
-                    level: level.unwrap_or_default(),
-                    message: message.unwrap_or_default(),
-                })
-            })
-            .ok()?
-            .collect::<Result<Vec<_>, _>>()
-            .ok()?;
-        Some(rows)
-    }
-
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         if self.total_rows == 0 {
-            ui.label("No entries loaded yet.");
+            ui.label("No entries match.");
             return;
         }
 

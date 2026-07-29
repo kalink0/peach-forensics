@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-use crate::model::log_entry::LogEntry;
-
 /// A tagging rule, deserialized from a rule TOML file (section 6 of
 /// CLAUDE.md). `match` can contain a mix of normalized fields
 /// (`sourcetype`, `level`, `message`) and source-specific fields (e.g. AUL
@@ -37,24 +35,25 @@ impl Rule {
         Ok(toml::from_str(s)?)
     }
 
-    /// `sourcetype` is passed in separately since [`LogEntry`] doesn't
-    /// carry it — the parser/config that produced the entry knows it.
-    pub fn matches(&self, entry: &LogEntry, sourcetype: &str) -> bool {
+    /// Takes the pieces of an entry that matching actually needs, rather
+    /// than a full `LogEntry` — re-tagging streams rows straight out of
+    /// DuckDB and shouldn't have to materialize `raw`/`timestamp_utc`/
+    /// `event_id` just to call this.
+    pub fn matches(
+        &self,
+        sourcetype: &str,
+        level: Option<&str>,
+        message: Option<&str>,
+        fields: &serde_json::Value,
+    ) -> bool {
         self.rule
             .match_fields
             .iter()
             .all(|(key, expected)| match key.as_str() {
                 "sourcetype" => expected.as_str() == Some(sourcetype),
-                "level" => entry
-                    .level
-                    .as_deref()
-                    .is_some_and(|actual| expected.as_str() == Some(actual)),
-                "message" => entry
-                    .message
-                    .as_deref()
-                    .is_some_and(|actual| expected.as_str() == Some(actual)),
-                other => entry
-                    .fields
+                "level" => level.is_some_and(|actual| expected.as_str() == Some(actual)),
+                "message" => message.is_some_and(|actual| expected.as_str() == Some(actual)),
+                other => fields
                     .get(other)
                     .is_some_and(|actual| toml_matches_json(expected, actual)),
             })
@@ -74,26 +73,6 @@ fn toml_matches_json(expected: &toml::Value, actual: &serde_json::Value) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::event_id::{EventId, SequenceNumber, SourceFileId};
-    use chrono::Utc;
-
-    fn sample_entry(
-        level: Option<&str>,
-        message: Option<&str>,
-        fields: serde_json::Value,
-    ) -> LogEntry {
-        LogEntry {
-            event_id: EventId {
-                source_file_id: SourceFileId::new_random(),
-                sequence_number: SequenceNumber::from_raw(0),
-            },
-            timestamp_utc: Utc::now(),
-            level: level.map(str::to_string),
-            message: message.map(str::to_string),
-            raw: "raw".to_string(),
-            fields,
-        }
-    }
 
     #[test]
     fn parses_the_evtx_style_example_from_claude_md() {
@@ -155,13 +134,10 @@ value = "error"
         )
         .unwrap();
 
-        let matching = sample_entry(Some("ERROR"), None, serde_json::Value::Null);
-        let non_matching = sample_entry(Some("INFO"), None, serde_json::Value::Null);
-        let missing = sample_entry(None, None, serde_json::Value::Null);
-
-        assert!(rule.matches(&matching, "text_config"));
-        assert!(!rule.matches(&non_matching, "text_config"));
-        assert!(!rule.matches(&missing, "text_config"));
+        let null = serde_json::Value::Null;
+        assert!(rule.matches("text_config", Some("ERROR"), None, &null));
+        assert!(!rule.matches("text_config", Some("INFO"), None, &null));
+        assert!(!rule.matches("text_config", None, None, &null));
     }
 
     #[test]
@@ -170,10 +146,10 @@ value = "error"
             "[rule]\nname = \"e\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"t\"\n",
         )
         .unwrap();
-        let entry = sample_entry(None, None, serde_json::Value::Null);
+        let null = serde_json::Value::Null;
 
-        assert!(rule.matches(&entry, "aul"));
-        assert!(!rule.matches(&entry, "evtx"));
+        assert!(rule.matches("aul", None, None, &null));
+        assert!(!rule.matches("evtx", None, None, &null));
     }
 
     #[test]
@@ -183,13 +159,13 @@ value = "error"
         )
         .unwrap();
 
-        let matching = sample_entry(None, None, serde_json::json!({"event_id": 4625}));
-        let wrong_id = sample_entry(None, None, serde_json::json!({"event_id": 4624}));
-        let missing_field = sample_entry(None, None, serde_json::json!({}));
+        let matching = serde_json::json!({"event_id": 4625});
+        let wrong_id = serde_json::json!({"event_id": 4624});
+        let missing_field = serde_json::json!({});
 
-        assert!(rule.matches(&matching, "evtx"));
-        assert!(!rule.matches(&wrong_id, "evtx"));
-        assert!(!rule.matches(&missing_field, "evtx"));
+        assert!(rule.matches("evtx", None, None, &matching));
+        assert!(!rule.matches("evtx", None, None, &wrong_id));
+        assert!(!rule.matches("evtx", None, None, &missing_field));
     }
 
     #[test]
@@ -198,11 +174,9 @@ value = "error"
             "[rule]\nname = \"e\"\n[rule.match]\nsourcetype = \"evtx\"\nlevel = \"ERROR\"\n[rule.tag]\nvalue = \"t\"\n",
         )
         .unwrap();
+        let null = serde_json::Value::Null;
 
-        let both_match = sample_entry(Some("ERROR"), None, serde_json::Value::Null);
-        let only_level_matches = sample_entry(Some("ERROR"), None, serde_json::Value::Null);
-
-        assert!(rule.matches(&both_match, "evtx"));
-        assert!(!rule.matches(&only_level_matches, "text_config"));
+        assert!(rule.matches("evtx", Some("ERROR"), None, &null));
+        assert!(!rule.matches("text_config", Some("ERROR"), None, &null));
     }
 }
