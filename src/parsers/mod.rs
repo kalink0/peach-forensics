@@ -50,6 +50,29 @@ impl ParserConfig {
 pub trait LogParser {
     fn sourcetype(&self) -> &str;
     fn parse(&self, path: &Path, config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>>;
+
+    /// Streams parsed records to `sink` one at a time instead of collecting
+    /// them all into memory first. The default implementation just calls
+    /// [`Self::parse`] and replays its result through `sink` — fine for
+    /// sourcetypes that haven't shown a memory problem in practice.
+    ///
+    /// AUL overrides this: a real device's `.logarchive` can resolve into
+    /// millions of entries, and materializing all of them (each carrying a
+    /// serialized `raw`/`fields` JSON copy) in one `Vec` before the first
+    /// row reaches DuckDB is what drove a 219 MB source past 45 GB of RSS
+    /// during testing — DuckDB, not the Rust heap, is supposed to hold the
+    /// bulk timeline (see CLAUDE.md's "nicht im RAM halten" principle).
+    fn parse_streaming(
+        &self,
+        path: &Path,
+        config: &ParserConfig,
+        sink: &mut dyn FnMut(ParsedRecord) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        for record in self.parse(path, config)? {
+            sink(record)?;
+        }
+        Ok(())
+    }
 }
 
 /// Parses `path` with `parser` and assigns each resulting record a stable
@@ -80,6 +103,38 @@ pub fn parse_source(
             fields: record.fields,
         })
         .collect())
+}
+
+/// Streaming counterpart to [`parse_source`]: hands each [`LogEntry`] to
+/// `sink` as soon as its [`EventId`] is assigned, rather than collecting a
+/// `Vec<LogEntry>` first. Returns the [`SourceFileId`] assigned for this
+/// parse run (generated up front, independent of how many records — if
+/// any — `sink` ends up seeing), so callers can still record a `sources`
+/// row without needing to hold onto a first entry.
+pub fn parse_source_streaming(
+    parser: &dyn LogParser,
+    path: &Path,
+    config: &ParserConfig,
+    mut sink: impl FnMut(LogEntry) -> anyhow::Result<()>,
+) -> anyhow::Result<SourceFileId> {
+    let source_file_id = SourceFileId::new_random();
+    let mut sequence_counter = SequenceCounter::new();
+
+    parser.parse_streaming(path, config, &mut |record| {
+        sink(LogEntry {
+            event_id: EventId {
+                source_file_id,
+                sequence_number: sequence_counter.next_sequence_number(),
+            },
+            timestamp_utc: record.timestamp_utc,
+            level: record.level,
+            message: record.message,
+            raw: record.raw,
+            fields: record.fields,
+        })
+    })?;
+
+    Ok(source_file_id)
 }
 
 #[cfg(test)]
@@ -146,6 +201,56 @@ mod tests {
         assert_eq!(entries[0].event_id.sequence_number.value(), 0);
         assert_eq!(entries[1].event_id.sequence_number.value(), 1);
         assert_eq!(entries[2].event_id.sequence_number.value(), 2);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn parse_source_streaming_assigns_the_same_ids_as_the_collecting_version() {
+        let path = write_temp_file("b", b"dummy source content");
+        let parser = DummyParser { record_count: 3 };
+        let config = dummy_config();
+
+        let mut streamed = Vec::new();
+        let source_file_id = parse_source_streaming(&parser, &path, &config, |entry| {
+            streamed.push(entry);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(streamed.len(), 3);
+        for entry in &streamed {
+            assert_eq!(entry.event_id.source_file_id, source_file_id);
+        }
+        assert_eq!(streamed[0].event_id.sequence_number.value(), 0);
+        assert_eq!(streamed[1].event_id.sequence_number.value(), 1);
+        assert_eq!(streamed[2].event_id.sequence_number.value(), 2);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn default_parse_streaming_replays_parse_results_in_order() {
+        let path = write_temp_file("c", b"dummy source content");
+        let parser = DummyParser { record_count: 3 };
+        let config = dummy_config();
+
+        let mut seen = Vec::new();
+        parser
+            .parse_streaming(&path, &config, &mut |record| {
+                seen.push(record.message.clone());
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            seen,
+            vec![
+                Some("entry 0".to_string()),
+                Some("entry 1".to_string()),
+                Some("entry 2".to_string()),
+            ]
+        );
 
         std::fs::remove_file(path).unwrap();
     }

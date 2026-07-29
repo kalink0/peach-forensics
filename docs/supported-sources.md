@@ -5,11 +5,27 @@ so it never drifts from what's actually implemented.
 
 ## Implemented
 
-### AUL (Apple Unified Log, `.logarchive`)
+### AUL (Apple Unified Log)
 
-Whole `.logarchive` directory as produced by `log collect` or extracted from a
-device. Wraps the `macos-unifiedlogs` crate.
+Wraps the `macos-unifiedlogs` crate. Two source layouts are recognized —
+selecting either just works, no manual restructuring needed:
 
+- A flattened `.logarchive` directory as produced by `log collect`
+  (`Persist`/`Special`/`Signpost`/`HighVolume`/`dsc`/uuidtext hex directories
+  all directly under one folder).
+- A raw filesystem extraction (the common case for mobile acquisitions), where
+  the tracev3 data (`diagnostics/`) and the uuidtext/dsc string-resolution data
+  (`uuidtext/`) sit as two separate directory trees, mirroring their layout on
+  the live device. Select either the `diagnostics` folder itself (with
+  `uuidtext` next to it as a sibling) or their common parent folder — both are
+  detected automatically. Selecting `diagnostics` alone, with no `uuidtext`
+  anywhere nearby, fails fast with an explicit error rather than silently
+  producing a timeline where almost every message is an unresolved
+  placeholder (which is what happened before this detection existed — a
+  219 MB real-device export came back ~98% unresolved, because
+  `LogarchiveProvider`'s string-lookup paths assume the flattened bundle
+  layout and silently look in the wrong place for a raw extraction's split
+  layout).
 - `level` is the raw `LogType` variant name (`Error`, `Info`,
   `ProcessSignpostStart`, …) — not remapped into an INFO/WARN/ERROR scheme.
 - `raw` and `fields` both hold the complete extracted record as JSON — there's no
@@ -20,6 +36,12 @@ device. Wraps the `macos-unifiedlogs` crate.
   resolution attempt (no cross-file second pass yet). Unresolved ones still show
   up, with an explicit "Failed to get string message..." message rather than
   being dropped.
+- **Known limitation:** if the device's `uuidtext`/`dsc` reference data has
+  moved on since a log entry was written (app updated/removed, OS's shared
+  cache regenerated), that entry's format string is gone for good — no
+  extraction can recover it. Expect a meaningful fraction of unresolved
+  messages on any real device history, independent of the layout-detection
+  above.
 - No config-driven field-mapping — the mapping above is fixed, not
   TOML-configurable like the text parser.
 

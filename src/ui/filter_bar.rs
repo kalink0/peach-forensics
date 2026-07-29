@@ -54,7 +54,7 @@ impl FilterBar {
         });
 
         if !available_levels.is_empty() {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Level:");
                 for level in available_levels {
                     let active = self.has_level_term(level);

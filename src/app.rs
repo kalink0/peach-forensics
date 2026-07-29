@@ -7,12 +7,13 @@ use eframe::egui;
 
 use crate::db::timeline_queries::Query;
 use crate::db::timeline_schema::setup_timeline_schema;
+use crate::model::event_id::SourceFileId;
 use crate::model::log_entry::LogEntry;
 use crate::parsers::aul::AulParser;
 use crate::parsers::evtx::EvtxFileParser;
 use crate::parsers::journald::JournaldFileParser;
 use crate::parsers::text_config::TextConfigParser;
-use crate::parsers::{LogParser, ParserConfig, parse_source};
+use crate::parsers::{LogParser, ParserConfig, parse_source_streaming};
 use crate::session::persist::{self, LoadedSource, SessionPaths};
 use crate::tagging::engine::{apply_import_time, re_tag};
 use crate::tagging::rule::Rule;
@@ -442,10 +443,24 @@ impl eframe::App for PeachApp {
     }
 }
 
+/// Rows held in memory at once between flushes to DuckDB. Bounds peak RSS
+/// to O(batch), not O(source size) — see the module doc on `run_load` for
+/// why that distinction actually matters here.
+const LOAD_BATCH_SIZE: usize = 10_000;
+
 /// Runs on a background thread so the UI stays responsive — this can mean
 /// parsing and inserting millions of rows for a large AUL source. Opens its
 /// own DuckDB connection (`Connection` isn't `Send`) and bulk-inserts via
 /// the DuckDB Appender rather than row-by-row `INSERT` statements.
+///
+/// Streams entries out of the parser in batches of [`LOAD_BATCH_SIZE`]
+/// (`parse_source_streaming`, not `parse_source`) rather than collecting
+/// the whole source into one `Vec<LogEntry>` before writing anything to
+/// DuckDB: a real AUL `.logarchive` can resolve into millions of entries,
+/// and holding all of them — each carrying its own `raw`/`fields` JSON —
+/// in the Rust heap at once is what drove a 219 MB source past 45 GB of
+/// RSS during testing. DuckDB, not the process heap, is meant to hold the
+/// bulk timeline (CLAUDE.md's "nicht im RAM halten" principle).
 fn run_load(
     source_kind: SourceKind,
     source_path: &Path,
@@ -486,35 +501,21 @@ fn run_load(
     // ...) depending on which config is loaded, so its own sourcetype() is
     // just a generic marker (see parsers/mod.rs doc comment).
     let sourcetype = config.parser.sourcetype.clone();
-
-    let entries: Vec<LogEntry> = parse_source(parser, source_path, &config)?;
-    if entries.is_empty() {
-        let loaded_source = LoadedSource {
-            path: source_path.display().to_string(),
-            sourcetype: sourcetype.clone(),
-            parser_config_path: parser_config_path.map(|p| p.display().to_string()),
-        };
-        return Ok((0, 0, loaded_source));
-    }
-
-    insert_source_record(&conn, &entries[0], source_path, &sourcetype)?;
-
-    let mut appender = conn.appender("log_entries")?;
-    for entry in &entries {
-        appender.append_row(duckdb::params![
-            entry.event_id.source_file_id.to_string(),
-            entry.event_id.sequence_number.value() as i64,
-            entry.timestamp_utc.naive_utc(),
-            entry.level,
-            entry.message,
-            entry.raw,
-            entry.fields,
-        ])?;
-    }
-    drop(appender);
-
     let rules = load_rules(rule_paths)?;
-    let tags_applied = apply_import_time(&conn, &rules, &entries, &sourcetype)?;
+
+    let mut batch: Vec<LogEntry> = Vec::with_capacity(LOAD_BATCH_SIZE);
+    let mut inserted = 0usize;
+    let mut tags_applied = 0usize;
+
+    let source_file_id = parse_source_streaming(parser, source_path, &config, |entry| {
+        inserted += 1;
+        batch.push(entry);
+        if batch.len() >= LOAD_BATCH_SIZE {
+            tags_applied += flush_batch(&conn, &mut batch, &rules, &sourcetype)?;
+        }
+        Ok(())
+    })?;
+    tags_applied += flush_batch(&conn, &mut batch, &rules, &sourcetype)?;
 
     let loaded_source = LoadedSource {
         path: source_path.display().to_string(),
@@ -522,7 +523,48 @@ fn run_load(
         parser_config_path: parser_config_path.map(|p| p.display().to_string()),
     };
 
-    Ok((entries.len(), tags_applied, loaded_source))
+    if inserted == 0 {
+        return Ok((0, 0, loaded_source));
+    }
+    insert_source_record(&conn, source_file_id, source_path, &sourcetype)?;
+
+    Ok((inserted, tags_applied, loaded_source))
+}
+
+/// Appends `batch` to `log_entries` via the DuckDB Appender, applies
+/// import-time tagging for exactly those rows, then empties `batch` —
+/// called every [`LOAD_BATCH_SIZE`] entries plus once more for the
+/// remainder. The appender is dropped (flushed) before tagging: DuckDB
+/// doesn't allow an open Appender and other statements on the same
+/// connection at once.
+fn flush_batch(
+    conn: &duckdb::Connection,
+    batch: &mut Vec<LogEntry>,
+    rules: &[Rule],
+    sourcetype: &str,
+) -> anyhow::Result<usize> {
+    if batch.is_empty() {
+        return Ok(0);
+    }
+
+    {
+        let mut appender = conn.appender("log_entries")?;
+        for entry in batch.iter() {
+            appender.append_row(duckdb::params![
+                entry.event_id.source_file_id.to_string(),
+                entry.event_id.sequence_number.value() as i64,
+                entry.timestamp_utc.naive_utc(),
+                entry.level,
+                entry.message,
+                entry.raw,
+                entry.fields,
+            ])?;
+        }
+    }
+
+    let tags_applied = apply_import_time(conn, rules, batch, sourcetype)?;
+    batch.clear();
+    Ok(tags_applied)
 }
 
 /// Runs on a background thread, like [`run_load`] — re-evaluating rules
@@ -548,7 +590,7 @@ fn load_rules(rule_paths: &[PathBuf]) -> anyhow::Result<Vec<Rule>> {
 
 fn insert_source_record(
     conn: &duckdb::Connection,
-    first_entry: &LogEntry,
+    source_file_id: SourceFileId,
     source_path: &Path,
     sourcetype: &str,
 ) -> anyhow::Result<()> {
@@ -556,7 +598,7 @@ fn insert_source_record(
         "INSERT INTO sources (source_file_id, path, sourcetype, original_tz, parser_config)
          VALUES (?, ?, ?, ?, ?)",
         duckdb::params![
-            first_entry.event_id.source_file_id.to_string(),
+            source_file_id.to_string(),
             source_path.display().to_string(),
             sourcetype,
             Option::<String>::None,
