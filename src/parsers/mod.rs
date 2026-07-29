@@ -7,10 +7,11 @@ use crate::model::log_entry::{LogEntry, ParsedRecord};
 
 pub mod aul;
 pub mod evtx;
+pub mod journald;
 pub mod text_config;
 
 /// Configuration for one parser instance, deserialized from a parser TOML
-/// file (section 5 of CLAUDE.md). `name`/`sourcetype` are typed since every
+/// file. `name`/`sourcetype` are typed since every
 /// parser needs them (e.g. for onboarding/registry lookups); everything
 /// else stays as a raw [`toml::Table`] because the shape differs sharply
 /// between text-based parsers (regex + capture-group mapping,
@@ -150,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_config_round_trips_the_claude_md_example() {
+    fn parser_config_round_trips_the_nginx_example() {
         let toml_text = r#"
 [parser]
 name = "nginx_access"

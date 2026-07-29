@@ -1,12 +1,12 @@
 use duckdb::{Connection, Result};
 
-/// Creates the bulk-timeline tables (section 4.2 of CLAUDE.md) if they don't
-/// already exist: `log_entries`, `sources`, `import_tags`.
+/// Creates the bulk-timeline tables if they don't already exist:
+/// `log_entries`, `sources`, `import_tags`.
 ///
 /// `event_id_source` / `source_file_id` are `VARCHAR` holding the string
-/// form of the UUID from [`crate::model::event_id::SourceFileId`], not the
-/// `BIGINT` originally sketched in CLAUDE.md. `raw` carries `NOT NULL`: per
-/// section 0.1, normalization must never lose the original source data.
+/// form of the UUID from [`crate::model::event_id::SourceFileId`], not a
+/// `BIGINT` as originally sketched. `raw` carries `NOT NULL`: normalization
+/// must never lose the original source data.
 pub fn setup_timeline_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "

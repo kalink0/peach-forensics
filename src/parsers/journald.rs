@@ -1,0 +1,593 @@
+use std::path::Path;
+
+use anyhow::{Context, anyhow, bail};
+use chrono::{DateTime, Utc};
+
+use crate::model::log_entry::ParsedRecord;
+use crate::parsers::{LogParser, ParserConfig};
+
+/// Hand-rolled reader for the systemd journal binary file format.
+///
+/// Unlike EVTX and AUL, there is no dependency-safe crate to wrap here: the
+/// only pure-Rust, cross-platform reader for the raw binary format
+/// (`systemd-journal-sdk`) is GPL-3.0-or-later, which would pull peach's
+/// Apache-2.0-licensed, statically-linked binary under GPL copyleft on
+/// distribution — a project-wide licensing decision, not a parser
+/// implementation detail, so it was rejected in favor of implementing the
+/// format directly. The alternative `journald` crate binds against
+/// `libsystemd`, which is Linux-only and would break the Windows/macOS
+/// legs of the CI matrix (section 9, milestone 1).
+///
+/// Format reference: <https://systemd.io/JOURNAL_FILE_FORMAT/>. Rather than
+/// following the hash-table/entry-array linked lists real `libsystemd`
+/// uses for keyed lookups (which we don't need — we want every entry, in
+/// order, not a keyed query), this reads the file as a flat arena: walk
+/// object headers sequentially from `header_size` to `tail_object_offset`,
+/// picking out `OBJECT_ENTRY` objects as we go. This is simpler *and* more
+/// forensically robust: it doesn't depend on the hash-table/array chains
+/// being intact, so it still finds every entry in a journal whose index
+/// structures are partially corrupted — the linked-list-following approach
+/// real journald read tooling uses would silently stop early in that case.
+///
+/// `level` is the raw `PRIORITY` field value verbatim (syslog priority
+/// digit `"0"`-`"7"`) — not remapped, same convention as EVTX's `Level` and
+/// AUL's `LogType`. `message` is the `MESSAGE` field, since journald (unlike
+/// EVTX) stores literal message text rather than a template + parameters.
+/// `raw`/`fields` hold every field on the entry (including synthesized
+/// `__REALTIME_TIMESTAMP`/`__MONOTONIC_TIMESTAMP`/`__SEQNUM`, matching real
+/// sd-journal's own naming for these — they come from the `ENTRY` object's
+/// header, not a stored field, in both implementations).
+///
+/// Known limitations, surfaced rather than silently worked around:
+/// - The "compact" entry format (systemd 254+, `HEADER_INCOMPATIBLE_COMPACT`)
+///   uses a different, narrower entry-item encoding and is not implemented —
+///   parsing such a file fails with a clear error rather than misreading it.
+/// - Only LZ4-compressed field values are decompressed (journald's default
+///   compression since systemd ~246). XZ/ZSTD-compressed fields are left
+///   visible with a placeholder value noting the unsupported algorithm,
+///   rather than being silently dropped — consistent with how AUL surfaces
+///   unresolved oversize strings instead of dropping them.
+/// - Only little-endian journal files are supported (universal on modern
+///   Linux since systemd unified the on-disk format around v246; older
+///   big-endian archives are out of scope).
+/// - A single corrupt/truncated object aborts the whole parse, consistent
+///   with the EVTX parser — an opt-in "skip and log bad records" mode is
+///   tracked separately (see the `parser-error-handling-roadmap` project
+///   note) and needs a `LogParser`-wide change, not a one-off here.
+///
+/// No config-driven field-mapping, like EVTX/AUL — `ParserConfig.extra` is
+/// unused.
+pub struct JournaldFileParser;
+
+impl LogParser for JournaldFileParser {
+    fn sourcetype(&self) -> &str {
+        "journald"
+    }
+
+    fn parse(&self, path: &Path, _config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read journal file {}", path.display()))?;
+        parse_bytes(&bytes)
+    }
+}
+
+const SIGNATURE: [u8; 8] = *b"LPKSHHRH";
+
+const OBJECT_HEADER_SIZE: u64 = 16;
+const DATA_OBJECT_FIXED_SIZE: u64 = 48;
+const ENTRY_FIXED_SIZE: u64 = 48;
+const ENTRY_ITEM_SIZE: u64 = 16;
+
+const OBJECT_TYPE_DATA: u8 = 1;
+const OBJECT_TYPE_ENTRY: u8 = 3;
+
+const OBJECT_COMPRESSED_XZ: u8 = 1 << 0;
+const OBJECT_COMPRESSED_LZ4: u8 = 1 << 1;
+const OBJECT_COMPRESSED_ZSTD: u8 = 1 << 2;
+
+const INCOMPATIBLE_COMPRESSED_XZ: u32 = 1 << 0;
+const INCOMPATIBLE_COMPRESSED_LZ4: u32 = 1 << 1;
+const INCOMPATIBLE_KEYED_HASH: u32 = 1 << 2;
+const INCOMPATIBLE_COMPRESSED_ZSTD: u32 = 1 << 3;
+const INCOMPATIBLE_COMPACT: u32 = 1 << 4;
+const KNOWN_INCOMPATIBLE_FLAGS: u32 = INCOMPATIBLE_COMPRESSED_XZ
+    | INCOMPATIBLE_COMPRESSED_LZ4
+    | INCOMPATIBLE_KEYED_HASH
+    | INCOMPATIBLE_COMPRESSED_ZSTD
+    | INCOMPATIBLE_COMPACT;
+
+/// Minimum header length we need to read (through `tail_object_offset` at
+/// byte 144) — the header grew over successive systemd versions but only by
+/// appending fields, so every real journal file is at least this long.
+const MIN_HEADER_LEN: usize = 144;
+
+struct Header {
+    header_size: u64,
+    tail_object_offset: u64,
+}
+
+fn parse_header(bytes: &[u8]) -> anyhow::Result<Header> {
+    if bytes.len() < MIN_HEADER_LEN {
+        bail!(
+            "file too small to contain a journal header ({} bytes, need at least {MIN_HEADER_LEN})",
+            bytes.len()
+        );
+    }
+    if bytes[0..8] != SIGNATURE {
+        bail!("not a systemd journal file: signature mismatch");
+    }
+
+    let incompatible_flags = read_u32(bytes, 12);
+    if incompatible_flags & INCOMPATIBLE_COMPACT != 0 {
+        bail!(
+            "journal file uses the compact entry format (systemd 254+), which is not supported yet"
+        );
+    }
+    let unknown_flags = incompatible_flags & !KNOWN_INCOMPATIBLE_FLAGS;
+    if unknown_flags != 0 {
+        bail!(
+            "journal file uses unrecognized incompatible feature flags ({unknown_flags:#x}) — refusing to guess at the format rather than risk misreading it"
+        );
+    }
+
+    let header_size = read_u64(bytes, 88);
+    let tail_object_offset = read_u64(bytes, 136);
+
+    if (header_size as usize) < MIN_HEADER_LEN {
+        bail!("journal header reports an implausibly small header_size ({header_size})");
+    }
+    if (header_size as usize) > bytes.len() {
+        bail!(
+            "journal header_size ({header_size}) is larger than the file itself ({} bytes)",
+            bytes.len()
+        );
+    }
+
+    Ok(Header {
+        header_size,
+        tail_object_offset,
+    })
+}
+
+struct ObjectHeader {
+    object_type: u8,
+    flags: u8,
+    size: u64,
+}
+
+fn read_object_header(bytes: &[u8], offset: u64) -> anyhow::Result<ObjectHeader> {
+    let offset_usize = usize::try_from(offset).context("object offset overflows usize")?;
+    if offset_usize + OBJECT_HEADER_SIZE as usize > bytes.len() {
+        bail!("object at offset {offset} is truncated (file ends before its header)");
+    }
+    let object_type = bytes[offset_usize];
+    let flags = bytes[offset_usize + 1];
+    let size = read_u64(bytes, offset_usize + 8);
+    if size < OBJECT_HEADER_SIZE {
+        bail!("object at offset {offset} reports an impossible size ({size} bytes)");
+    }
+    if offset + size > bytes.len() as u64 {
+        bail!("object at offset {offset} (size {size}) extends past the end of the file");
+    }
+    Ok(ObjectHeader {
+        object_type,
+        flags,
+        size,
+    })
+}
+
+fn align8(n: u64) -> u64 {
+    n.div_ceil(8) * 8
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+fn parse_bytes(bytes: &[u8]) -> anyhow::Result<Vec<ParsedRecord>> {
+    let header = parse_header(bytes)?;
+    let mut records = Vec::new();
+
+    if header.tail_object_offset == 0 {
+        return Ok(records);
+    }
+
+    let mut offset = align8(header.header_size);
+    while offset <= header.tail_object_offset {
+        let object = read_object_header(bytes, offset)
+            .with_context(|| format!("failed to read object at offset {offset}"))?;
+        if object.object_type == OBJECT_TYPE_ENTRY {
+            let record = parse_entry_object(bytes, offset, object.size)
+                .with_context(|| format!("failed to parse ENTRY object at offset {offset}"))?;
+            records.push(record);
+        }
+        offset = align8(offset + object.size);
+    }
+
+    Ok(records)
+}
+
+fn parse_entry_object(bytes: &[u8], offset: u64, size: u64) -> anyhow::Result<ParsedRecord> {
+    let fixed_start = offset + OBJECT_HEADER_SIZE;
+    let items_start = fixed_start + ENTRY_FIXED_SIZE;
+    if items_start > offset + size {
+        bail!("ENTRY object is smaller than the fixed entry header ({size} bytes)");
+    }
+
+    let seqnum = read_u64(bytes, fixed_start as usize);
+    let realtime = read_u64(bytes, (fixed_start + 8) as usize);
+    let monotonic = read_u64(bytes, (fixed_start + 16) as usize);
+
+    let items_end = offset + size;
+    let item_area = items_end - items_start;
+    if !item_area.is_multiple_of(ENTRY_ITEM_SIZE) {
+        bail!("ENTRY object item area ({item_area} bytes) isn't a whole number of entry items");
+    }
+    let n_items = item_area / ENTRY_ITEM_SIZE;
+
+    let mut fields = serde_json::Map::new();
+    let mut message = None;
+    let mut level = None;
+
+    for i in 0..n_items {
+        let item_offset = (items_start + i * ENTRY_ITEM_SIZE) as usize;
+        let data_object_offset = read_u64(bytes, item_offset);
+        let (key, value) =
+            read_data_object_field(bytes, data_object_offset).with_context(|| {
+                format!("entry item {i}: failed to resolve DATA object at {data_object_offset}")
+            })?;
+        if key == "MESSAGE" {
+            message = Some(value.clone());
+        }
+        if key == "PRIORITY" {
+            level = Some(value.clone());
+        }
+        fields.insert(key, serde_json::Value::String(value));
+    }
+
+    fields.insert(
+        "__REALTIME_TIMESTAMP".to_string(),
+        serde_json::Value::String(realtime.to_string()),
+    );
+    fields.insert(
+        "__MONOTONIC_TIMESTAMP".to_string(),
+        serde_json::Value::String(monotonic.to_string()),
+    );
+    fields.insert(
+        "__SEQNUM".to_string(),
+        serde_json::Value::String(seqnum.to_string()),
+    );
+
+    let timestamp_utc = realtime_micros_to_utc(realtime)
+        .with_context(|| format!("entry seqnum {seqnum}: invalid __REALTIME_TIMESTAMP"))?;
+    let fields = serde_json::Value::Object(fields);
+    let raw = serde_json::to_string(&fields).context("failed to serialize journald entry")?;
+
+    Ok(ParsedRecord {
+        timestamp_utc,
+        level,
+        message,
+        raw,
+        fields,
+    })
+}
+
+/// Resolves a `DATA` object to its `(field_name, value)` pair, decompressing
+/// the payload if needed. Journald payloads are `FIELD=VALUE` bytes.
+fn read_data_object_field(bytes: &[u8], offset: u64) -> anyhow::Result<(String, String)> {
+    let object = read_object_header(bytes, offset)?;
+    if object.object_type != OBJECT_TYPE_DATA {
+        bail!(
+            "expected a DATA object at offset {offset}, found type {}",
+            object.object_type
+        );
+    }
+
+    let payload_start = offset + OBJECT_HEADER_SIZE + DATA_OBJECT_FIXED_SIZE;
+    let payload_end = offset + object.size;
+    if payload_start > payload_end {
+        bail!("DATA object at offset {offset} is smaller than its fixed header");
+    }
+    let payload_start = payload_start as usize;
+    let payload_end = payload_end as usize;
+    let raw_payload = &bytes[payload_start..payload_end];
+
+    if object.flags & OBJECT_COMPRESSED_LZ4 != 0 {
+        let decompressed = decompress_lz4(raw_payload)
+            .with_context(|| format!("DATA object at offset {offset}: LZ4 decompression"))?;
+        return split_field(&decompressed);
+    }
+    if object.flags & (OBJECT_COMPRESSED_XZ | OBJECT_COMPRESSED_ZSTD) != 0 {
+        let algorithm = if object.flags & OBJECT_COMPRESSED_XZ != 0 {
+            "XZ"
+        } else {
+            "ZSTD"
+        };
+        // The field name itself lives inside the compressed payload, so
+        // there's no real key to report — a synthetic, offset-qualified key
+        // keeps the gap visible instead of silently swallowing the field.
+        return Ok((
+            format!("_UNSUPPORTED_COMPRESSED_FIELD@{offset}"),
+            format!(
+                "<{algorithm}-compressed field, {} bytes, not decompressed>",
+                raw_payload.len()
+            ),
+        ));
+    }
+
+    split_field(raw_payload)
+}
+
+fn split_field(payload: &[u8]) -> anyhow::Result<(String, String)> {
+    let text = String::from_utf8_lossy(payload);
+    let (key, value) = text
+        .split_once('=')
+        .ok_or_else(|| anyhow!("field payload has no '=' separator: {text:?}"))?;
+    Ok((key.to_string(), value.to_string()))
+}
+
+/// journald compresses individual field payloads by prefixing the
+/// uncompressed size as a little-endian u64, then the raw LZ4 block (not
+/// the LZ4 frame format) — matching `LZ4_compress`/`LZ4_decompress_safe` as
+/// used by `journal-file.c`'s `compress_blob`.
+fn decompress_lz4(payload: &[u8]) -> anyhow::Result<Vec<u8>> {
+    if payload.len() < 8 {
+        bail!("LZ4-compressed payload too short to contain a size prefix");
+    }
+    let uncompressed_size = read_u64(payload, 0);
+    let uncompressed_size =
+        usize::try_from(uncompressed_size).context("uncompressed size overflows usize")?;
+    let block = &payload[8..];
+    lz4_flex::block::decompress(block, uncompressed_size)
+        .map_err(|err| anyhow!("LZ4 block decompression failed: {err}"))
+}
+
+fn realtime_micros_to_utc(realtime: u64) -> anyhow::Result<DateTime<Utc>> {
+    let micros = i64::try_from(realtime).context("realtime timestamp overflows i64")?;
+    DateTime::<Utc>::from_timestamp_micros(micros)
+        .ok_or_else(|| anyhow!("realtime timestamp {micros} microseconds is out of range"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a minimal, valid journal file byte-for-byte, so these tests
+    /// exercise the real binary parsing logic rather than a stand-in.
+    struct FakeJournalBuilder {
+        bytes: Vec<u8>,
+    }
+
+    impl FakeJournalBuilder {
+        fn new() -> Self {
+            let mut bytes = vec![0u8; 208];
+            bytes[0..8].copy_from_slice(&SIGNATURE);
+            bytes[88..96].copy_from_slice(&208u64.to_le_bytes());
+            Self { bytes }
+        }
+
+        fn set_incompatible_flags(&mut self, flags: u32) -> &mut Self {
+            self.bytes[12..16].copy_from_slice(&flags.to_le_bytes());
+            self
+        }
+
+        fn push_data_object(&mut self, field: &str) -> u64 {
+            self.push_data_object_raw(field.as_bytes(), 0)
+        }
+
+        fn push_data_object_lz4(&mut self, field: &str) -> u64 {
+            let uncompressed = field.as_bytes();
+            let compressed_block = lz4_flex::block::compress(uncompressed);
+            let mut payload = Vec::with_capacity(8 + compressed_block.len());
+            payload.extend_from_slice(&(uncompressed.len() as u64).to_le_bytes());
+            payload.extend_from_slice(&compressed_block);
+            self.push_data_object_raw(&payload, OBJECT_COMPRESSED_LZ4)
+        }
+
+        fn push_data_object_raw(&mut self, payload: &[u8], flags: u8) -> u64 {
+            let offset = self.bytes.len() as u64;
+            let size = OBJECT_HEADER_SIZE + DATA_OBJECT_FIXED_SIZE + payload.len() as u64;
+            self.bytes.push(OBJECT_TYPE_DATA);
+            self.bytes.push(flags);
+            self.bytes.extend_from_slice(&[0u8; 6]);
+            self.bytes.extend_from_slice(&size.to_le_bytes());
+            self.bytes
+                .extend_from_slice(&[0u8; DATA_OBJECT_FIXED_SIZE as usize]);
+            self.bytes.extend_from_slice(payload);
+            self.pad_align8();
+            offset
+        }
+
+        fn push_entry_object(&mut self, seqnum: u64, realtime: u64, item_offsets: &[u64]) -> u64 {
+            let offset = self.bytes.len() as u64;
+            let size =
+                OBJECT_HEADER_SIZE + ENTRY_FIXED_SIZE + item_offsets.len() as u64 * ENTRY_ITEM_SIZE;
+            self.bytes.push(OBJECT_TYPE_ENTRY);
+            self.bytes.push(0);
+            self.bytes.extend_from_slice(&[0u8; 6]);
+            self.bytes.extend_from_slice(&size.to_le_bytes());
+            self.bytes.extend_from_slice(&seqnum.to_le_bytes());
+            self.bytes.extend_from_slice(&realtime.to_le_bytes());
+            self.bytes.extend_from_slice(&0u64.to_le_bytes()); // monotonic
+            self.bytes.extend_from_slice(&[0u8; 16]); // boot_id
+            self.bytes.extend_from_slice(&0u64.to_le_bytes()); // xor_hash
+            for &item_offset in item_offsets {
+                self.bytes.extend_from_slice(&item_offset.to_le_bytes());
+                self.bytes.extend_from_slice(&0u64.to_le_bytes()); // hash, unused
+            }
+            self.pad_align8();
+            self.bytes[136..144].copy_from_slice(&offset.to_le_bytes());
+            offset
+        }
+
+        fn pad_align8(&mut self) {
+            while !self.bytes.len().is_multiple_of(8) {
+                self.bytes.push(0);
+            }
+        }
+
+        fn finish(self) -> Vec<u8> {
+            self.bytes
+        }
+    }
+
+    #[test]
+    fn parses_a_single_uncompressed_entry_with_two_fields() {
+        let mut builder = FakeJournalBuilder::new();
+        let message_offset = builder.push_data_object("MESSAGE=hello world");
+        let priority_offset = builder.push_data_object("PRIORITY=6");
+        // 2024-01-01T00:00:00Z in microseconds since the epoch.
+        builder.push_entry_object(1, 1_704_067_200_000_000, &[message_offset, priority_offset]);
+        let bytes = builder.finish();
+
+        let records = parse_bytes(&bytes).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message.as_deref(), Some("hello world"));
+        assert_eq!(records[0].level.as_deref(), Some("6"));
+        assert_eq!(
+            records[0].timestamp_utc,
+            DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(
+            records[0].fields.get("__SEQNUM").and_then(|v| v.as_str()),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn decompresses_lz4_field_values() {
+        let mut builder = FakeJournalBuilder::new();
+        let message_offset =
+            builder.push_data_object_lz4("MESSAGE=this value was lz4-compressed on disk");
+        builder.push_entry_object(1, 0, &[message_offset]);
+        let bytes = builder.finish();
+
+        let records = parse_bytes(&bytes).unwrap();
+
+        assert_eq!(
+            records[0].message.as_deref(),
+            Some("this value was lz4-compressed on disk")
+        );
+    }
+
+    #[test]
+    fn xz_compressed_field_is_visible_but_marked_unsupported_not_dropped() {
+        let mut builder = FakeJournalBuilder::new();
+        let data_offset = builder.push_data_object_raw(b"whatever bytes", OBJECT_COMPRESSED_XZ);
+        builder.push_entry_object(1, 0, &[data_offset]);
+        let bytes = builder.finish();
+
+        let records = parse_bytes(&bytes).unwrap();
+
+        let fields = records[0].fields.as_object().unwrap();
+        let (key, value) = fields
+            .iter()
+            .find(|(k, _)| k.starts_with("_UNSUPPORTED_COMPRESSED_FIELD"))
+            .expect("unsupported field should still be present, just marked");
+        assert!(key.contains('@'));
+        assert!(value.as_str().unwrap().contains("XZ"));
+    }
+
+    #[test]
+    fn compact_format_flag_is_rejected_with_a_clear_error() {
+        let mut builder = FakeJournalBuilder::new();
+        builder.set_incompatible_flags(INCOMPATIBLE_COMPACT);
+        let bytes = builder.finish();
+
+        let result = parse_bytes(&bytes);
+
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("compact"));
+    }
+
+    #[test]
+    fn unknown_incompatible_flag_is_rejected_rather_than_guessed_at() {
+        let mut builder = FakeJournalBuilder::new();
+        builder.set_incompatible_flags(1 << 30);
+        let bytes = builder.finish();
+
+        let result = parse_bytes(&bytes);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn bad_signature_is_rejected() {
+        let bytes = vec![0u8; 208];
+
+        let result = parse_bytes(&bytes);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("signature"));
+    }
+
+    #[test]
+    fn truncated_file_is_rejected_not_panicking() {
+        let bytes = vec![0u8; 10];
+
+        let result = parse_bytes(&bytes);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_journal_with_no_entries_parses_to_an_empty_list() {
+        let builder = FakeJournalBuilder::new();
+        let bytes = builder.finish();
+
+        let records = parse_bytes(&bytes).unwrap();
+
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn object_claiming_to_extend_past_end_of_file_is_rejected() {
+        let mut builder = FakeJournalBuilder::new();
+        let offset = builder.bytes.len() as u64;
+        builder.bytes.push(OBJECT_TYPE_ENTRY);
+        builder.bytes.push(0);
+        builder.bytes.extend_from_slice(&[0u8; 6]);
+        // Claim a size far larger than the actual remaining file content.
+        builder.bytes.extend_from_slice(&10_000u64.to_le_bytes());
+        builder.bytes[136..144].copy_from_slice(&offset.to_le_bytes());
+        let bytes = builder.finish();
+
+        let result = parse_bytes(&bytes);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn multiple_entries_are_returned_in_scan_order() {
+        let mut builder = FakeJournalBuilder::new();
+        let first_offset = builder.push_data_object("MESSAGE=first");
+        builder.push_entry_object(1, 100, &[first_offset]);
+        let second_offset = builder.push_data_object("MESSAGE=second");
+        builder.push_entry_object(2, 200, &[second_offset]);
+        let bytes = builder.finish();
+
+        let records = parse_bytes(&bytes).unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].message.as_deref(), Some("first"));
+        assert_eq!(records[1].message.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn parse_rejects_a_nonexistent_path() {
+        let config = ParserConfig::from_toml_str(
+            "[parser]\nname = \"journald\"\nsourcetype = \"journald\"\n",
+        )
+        .unwrap();
+        let result = JournaldFileParser.parse(Path::new("/nonexistent/path.journal"), &config);
+
+        assert!(result.is_err());
+    }
+}

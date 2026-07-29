@@ -75,8 +75,8 @@ impl SequenceCounter {
     }
 }
 
-/// Stable composite key for a single timeline entry, per section 4.1 of
-/// CLAUDE.md: `(source_file_id, sequence_number)`.
+/// Stable composite key for a single timeline entry:
+/// `(source_file_id, sequence_number)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EventId {
     pub source_file_id: SourceFileId,

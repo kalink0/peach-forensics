@@ -7,8 +7,7 @@ use evtx::{EvtxParser as EvtxCrateParser, SerializedEvtxRecord};
 use crate::model::log_entry::ParsedRecord;
 use crate::parsers::{LogParser, ParserConfig};
 
-/// Wraps the `evtx` crate to parse Windows Event Log (`.evtx`) files —
-/// section 5/9 of CLAUDE.md.
+/// Wraps the `evtx` crate to parse Windows Event Log (`.evtx`) files.
 ///
 /// `level` is the raw `Event.System.Level` JSON value verbatim (usually a
 /// small integer per the Windows Event Schema, e.g. 2=Error, 3=Warning,

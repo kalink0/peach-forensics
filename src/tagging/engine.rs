@@ -7,7 +7,7 @@ use crate::tagging::rule::Rule;
 
 /// Evaluates `rules` against `entries` and persists matches into
 /// `import_tags` via the DuckDB Appender (bulk insert) — the import-time
-/// mode from section 6 of CLAUDE.md.
+/// tagging mode.
 pub fn apply_import_time(
     conn: &Connection,
     rules: &[Rule],

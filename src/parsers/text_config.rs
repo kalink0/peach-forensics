@@ -28,7 +28,7 @@ struct TextParserFields {
 }
 
 /// Fully TOML-configurable parser for text-based sources (Apache/Nginx,
-/// Syslog, Logcat, unrecognized user formats) — section 5 of CLAUDE.md.
+/// Syslog, Logcat, unrecognized user formats).
 ///
 /// One `TextConfigParser` instance serves every text sourcetype; which
 /// concrete sourcetype a given file is depends entirely on the

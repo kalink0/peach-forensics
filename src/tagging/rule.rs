@@ -1,7 +1,7 @@
 use thiserror::Error;
 
-/// A tagging rule, deserialized from a rule TOML file (section 6 of
-/// CLAUDE.md). `match` can contain a mix of normalized fields
+/// A tagging rule, deserialized from a rule TOML file. `match` can contain
+/// a mix of normalized fields
 /// (`sourcetype`, `level`, `message`) and source-specific fields (e.g. AUL
 /// `subsystem`, EVTX `event_id`) — anything not recognized as normalized is
 /// looked up in the entry's `fields` JSON. All conditions in one rule must
@@ -75,7 +75,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_the_evtx_style_example_from_claude_md() {
+    fn parses_the_evtx_style_example() {
         let toml_text = r#"
 [rule]
 name = "failed_logon"
@@ -102,7 +102,7 @@ value = "auth_failure"
     }
 
     #[test]
-    fn parses_the_generic_level_example_from_claude_md() {
+    fn parses_the_generic_level_example() {
         let toml_text = r#"
 [rule]
 name = "generic_error"

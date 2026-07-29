@@ -1,7 +1,7 @@
 use rusqlite::{Connection, Result};
 
-/// Creates the session-DB tables (section 4.3 of CLAUDE.md) if they don't
-/// already exist: `analyst_tags`, `session_state`.
+/// Creates the session-DB tables if they don't already exist:
+/// `analyst_tags`, `session_state`.
 ///
 /// `event_id_source` is `TEXT` holding the string form of the UUID from
 /// [`crate::model::event_id::SourceFileId`] — same reasoning as the DuckDB

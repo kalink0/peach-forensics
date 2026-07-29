@@ -1,5 +1,5 @@
 # --- Internal / never publish ---
-# Bootstrap-Arbeitsauftrag für Claude Code - bleibt lokal, landet nie im Repo.
+# Bootstrap work-order document - stays local, never lands in the repo.
 CLAUDE.md
 
 # --- Rust ---

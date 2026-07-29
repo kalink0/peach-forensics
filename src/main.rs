@@ -3,8 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 /// Peach — forensic multi-log viewer. Can be started standalone or handed
-/// evidence paths by crush; runs fully independently afterward (no IPC,
-/// section 8 of CLAUDE.md).
+/// evidence paths by crush; runs fully independently afterward (no IPC).
 #[derive(Parser, Debug)]
 #[command(name = "peach")]
 struct Cli {

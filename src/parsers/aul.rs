@@ -11,7 +11,7 @@ use crate::model::log_entry::ParsedRecord;
 use crate::parsers::{LogParser, ParserConfig};
 
 /// Wraps the `macos-unifiedlogs` crate to parse Apple Unified Log
-/// `.logarchive` bundles — section 5/9 of CLAUDE.md.
+/// `.logarchive` bundles.
 ///
 /// Unlike the other sourcetypes, an AUL source is a whole **directory**
 /// (`Persist`/`Special`/`Signpost`/`HighVolume` subfolders holding

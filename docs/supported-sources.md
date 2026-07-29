@@ -44,9 +44,36 @@ Single `.evtx` file. Wraps the `evtx` crate.
   error carries no partial data — not even a timestamp — so there's nothing to
   show as a visible-but-broken entry the way AUL's oversize failures work).
 
-## Planned, not yet implemented
+### journald (systemd Journal, `.journal`)
 
-- **journald** (systemd Journal, binary format) — not started.
+Single `.journal` file. Hand-rolled binary reader — see
+[src/parsers/journald.rs](../src/parsers/journald.rs) for why no external crate
+is used (the only pure-Rust cross-platform option is GPL-3.0-or-later, which
+would pull peach's Apache-2.0 binary under GPL copyleft on static linking; the
+alternative binds against `libsystemd`, Linux-only).
+
+- `level` is the raw `PRIORITY` field verbatim (syslog priority digit
+  `"0"`-`"7"`) — not remapped, same convention as EVTX/AUL.
+- `message` is the `MESSAGE` field — unlike EVTX, journald stores literal
+  message text, so this is populated directly.
+- `raw`/`fields` hold every field on the entry, including the synthesized
+  `__REALTIME_TIMESTAMP`/`__MONOTONIC_TIMESTAMP`/`__SEQNUM` fields (same
+  naming as real sd-journal, which also derives these from the entry header
+  rather than storing them).
+- Entries are found by scanning the file's object arena sequentially rather
+  than following the hash-table/entry-array chains real `libsystemd` uses for
+  keyed lookups — simpler, and more robust against a journal whose index
+  structures are partially corrupted.
+- **Known limitations:**
+  - The "compact" entry format (systemd 254+) is not implemented; such files
+    fail to parse with an explicit error rather than being misread.
+  - Only LZ4-compressed field values are decompressed (journald's default).
+    XZ/ZSTD-compressed fields stay visible with a placeholder value noting the
+    unsupported algorithm, rather than being silently dropped.
+  - Only little-endian journal files are supported (universal on modern
+    Linux).
+  - A single corrupt/truncated object aborts the whole parse, same as EVTX.
+- No config-driven field-mapping, like AUL/EVTX.
 
 ## Explicitly out of scope
 

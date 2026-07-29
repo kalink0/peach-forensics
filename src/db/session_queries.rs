@@ -3,9 +3,9 @@ use rusqlite::{Connection, Result, params};
 
 use crate::model::event_id::{EventId, SequenceNumber, SourceFileId};
 
-/// A manually-set analyst tag (section 6 of CLAUDE.md: the fourth,
-/// analyst-driven tagging layer — not rule-based, lives in the SQLite
-/// session-DB rather than `import_tags`).
+/// A manually-set analyst tag (the fourth, analyst-driven tagging layer —
+/// not rule-based, lives in the SQLite session-DB rather than
+/// `import_tags`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnalystTag {
     pub event_id: EventId,

@@ -2,11 +2,10 @@ use chrono::{DateTime, Utc};
 
 use crate::model::event_id::EventId;
 
-/// A single normalized timeline entry, per section 4.2 of CLAUDE.md.
+/// A single normalized timeline entry.
 ///
-/// `raw` is mandatory, never optional: peach's forensic principle (section
-/// 0.1) is that normalization must never lose or overwrite the original
-/// source data.
+/// `raw` is mandatory, never optional: peach's forensic principle is that
+/// normalization must never lose or overwrite the original source data.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogEntry {
     pub event_id: EventId,

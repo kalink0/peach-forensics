@@ -10,6 +10,7 @@ use crate::db::timeline_schema::setup_timeline_schema;
 use crate::model::log_entry::LogEntry;
 use crate::parsers::aul::AulParser;
 use crate::parsers::evtx::EvtxFileParser;
+use crate::parsers::journald::JournaldFileParser;
 use crate::parsers::text_config::TextConfigParser;
 use crate::parsers::{LogParser, ParserConfig, parse_source};
 use crate::session::persist::{self, LoadedSource, SessionPaths};
@@ -22,6 +23,7 @@ use crate::ui::timeline_view::TimelineView;
 enum SourceKind {
     Aul,
     Evtx,
+    Journald,
     Text,
 }
 
@@ -71,9 +73,9 @@ pub struct PeachApp {
 
 /// Pops the first `--add-source` path (if any) to pre-fill, determining its
 /// sourcetype structurally rather than guessing a text format: a directory
-/// can only be AUL (the only directory-based sourcetype), and `.evtx` is an
-/// unambiguous, well-known extension. Everything else defaults to Text.
-/// Keeps the rest queued for after each load succeeds.
+/// can only be AUL (the only directory-based sourcetype), and `.evtx`/
+/// `.journal` are unambiguous, well-known extensions. Everything else
+/// defaults to Text. Keeps the rest queued for after each load succeeds.
 fn queue_from_cli_sources(
     add_sources: Vec<PathBuf>,
 ) -> (Option<PathBuf>, SourceKind, VecDeque<PathBuf>) {
@@ -95,6 +97,11 @@ fn source_kind_for_path(path: &Path) -> SourceKind {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("evtx"))
     {
         SourceKind::Evtx
+    } else if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("journal"))
+    {
+        SourceKind::Journald
     } else {
         SourceKind::Text
     }
@@ -288,6 +295,7 @@ impl eframe::App for PeachApp {
                 ui.label("Sourcetype:");
                 ui.selectable_value(&mut self.source_kind, SourceKind::Aul, "AUL (.logarchive)");
                 ui.selectable_value(&mut self.source_kind, SourceKind::Evtx, "EVTX");
+                ui.selectable_value(&mut self.source_kind, SourceKind::Journald, "journald");
                 ui.selectable_value(
                     &mut self.source_kind,
                     SourceKind::Text,
@@ -305,6 +313,7 @@ impl eframe::App for PeachApp {
                 let pick_label = match self.source_kind {
                     SourceKind::Aul => "Choose .logarchive folder...",
                     SourceKind::Evtx => "Choose .evtx file...",
+                    SourceKind::Journald => "Choose .journal file...",
                     SourceKind::Text => "Choose log file...",
                 };
                 if ui.button(pick_label).clicked() {
@@ -312,6 +321,9 @@ impl eframe::App for PeachApp {
                         SourceKind::Aul => rfd::FileDialog::new().pick_folder(),
                         SourceKind::Evtx => rfd::FileDialog::new()
                             .add_filter("EVTX", &["evtx"])
+                            .pick_file(),
+                        SourceKind::Journald => rfd::FileDialog::new()
+                            .add_filter("journald", &["journal"])
                             .pick_file(),
                         SourceKind::Text => rfd::FileDialog::new().pick_file(),
                     };
@@ -452,6 +464,12 @@ fn run_load(
         SourceKind::Evtx => (
             &EvtxFileParser,
             ParserConfig::from_toml_str("[parser]\nname = \"evtx\"\nsourcetype = \"evtx\"\n")?,
+        ),
+        SourceKind::Journald => (
+            &JournaldFileParser,
+            ParserConfig::from_toml_str(
+                "[parser]\nname = \"journald\"\nsourcetype = \"journald\"\n",
+            )?,
         ),
         SourceKind::Text => {
             let config_path = parser_config_path
@@ -608,6 +626,23 @@ mod tests {
         assert_eq!(rest.into_iter().collect::<Vec<_>>(), vec![file.clone()]);
 
         std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn queue_from_cli_sources_picks_journald_for_a_dot_journal_file() {
+        let file = std::env::temp_dir().join(format!(
+            "peach-test-cli-journal-{}.journal",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&file, b"x").unwrap();
+
+        let (first, kind, rest) = queue_from_cli_sources(vec![file.clone()]);
+
+        assert_eq!(first, Some(file.clone()));
+        assert_eq!(kind, SourceKind::Journald);
+        assert!(rest.is_empty());
+
         std::fs::remove_file(&file).unwrap();
     }
 
