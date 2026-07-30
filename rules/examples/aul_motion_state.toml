@@ -1,0 +1,14 @@
+# AUL pattern-of-life: motion/activity state transitions (e.g. walking bouts).
+# Substring ported from iLEAPP's logarchive_motionstate artifact
+# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+
+[rule]
+name = "aul_motion_state"
+description = "Motion/activity state transitions (walking, stationary, etc.)"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = "Motion State Transition:"
+
+[rule.tag]
+value = "motion_state"

@@ -1,0 +1,18 @@
+# AUL pattern-of-life: personal hotspot/tethering state.
+# Substrings ported from iLEAPP's logarchive_tethering artifact
+# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+
+[rule]
+name = "aul_tethering"
+description = "Personal hotspot / tethering enabled or disabled"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Tethering is now enabled with",
+    "Received notification that wireless modem state changed",
+    "Previous tethering state was",
+]
+
+[rule.tag]
+value = "tethering"

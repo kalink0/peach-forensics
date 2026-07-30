@@ -1,0 +1,44 @@
+# AUL pattern-of-life: Bluetooth connection state, including call/handsfree
+# audio routing (there is no dedicated CallKit rule yet — see the
+# aul-pattern-of-life-categorization memory note on why calls/messages were
+# deferred). Substrings ported from iLEAPP's logarchive_bluetooth_status
+# artifact (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+
+[rule]
+name = "aul_bluetooth_status"
+description = "Bluetooth connect/disconnect and call/handsfree audio routing"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Bluetooth state changed",
+    "Sending new bluetooth state",
+    "Bluetooth state changed PoweredOn",
+    "ServiceManager disconnection result for",
+    "Device type is",
+    "is asking to connect device",
+    "Received connection result for",
+    "Received disconnection result for",
+    "Received handsfree disconnection",
+    "Sending ring notification for call",
+    "Accepting incoming audio connection",
+    "Received voice audio connected",
+    "Stopping A2DP audio streaming",
+    "Bluetooth A2DP device",
+    "Bluetooth Daemon: A2DP streaming",
+    "Starting Media connection to device",
+    "Received voice disconnection",
+    "Disconnecting audio from device",
+    "Audio was already disconnected",
+    "Toggled Bluetooth state from",
+    "CUBluetoothDevice",
+    "handsfree device disconnected",
+    "handsfree device connected",
+    "Bluetooth state updated",
+    "Bluetooth power is now off",
+    "Sending call state update",
+    "A2DP LinkQualityReport",
+]
+
+[rule.tag]
+value = "bluetooth_status"

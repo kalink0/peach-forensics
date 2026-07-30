@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use anyhow::Context;
 use eframe::egui;
 
-use crate::db::timeline_queries::Query;
+use crate::db::timeline_queries::{self, Query};
 use crate::db::timeline_schema::setup_timeline_schema;
 use crate::model::event_id::SourceFileId;
 use crate::model::log_entry::LogEntry;
@@ -17,8 +17,10 @@ use crate::parsers::{LogParser, ParserConfig, parse_source_streaming};
 use crate::session::persist::{self, LoadedSource, SessionPaths};
 use crate::tagging::engine::{apply_import_time, re_tag};
 use crate::tagging::rule::Rule;
+use crate::tagging::rule_file;
 use crate::ui::filter_bar::FilterBar;
-use crate::ui::timeline_view::TimelineView;
+use crate::ui::tag_dialog::{TagDialog, TagDialogOutcome};
+use crate::ui::timeline_view::{RowAction, TimelineView};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
@@ -68,8 +70,17 @@ pub struct PeachApp {
     timeline: TimelineView,
     filter_bar: FilterBar,
     available_levels: Vec<String>,
+    available_tags: Vec<String>,
     pending_cli_sources: VecDeque<PathBuf>,
     cleanup_dirs: Vec<PathBuf>,
+    tag_dialog: TagDialog,
+    tag_preview_rx: Option<mpsc::Receiver<usize>>,
+    /// The pattern the current/last `tag_preview` count corresponds to —
+    /// lets the UI tell "counting a stale pattern" apart from "count for
+    /// what's on screen right now" instead of showing a preview number
+    /// that's quietly wrong for what's currently typed.
+    tag_preview_pattern: String,
+    tag_preview: Option<usize>,
 }
 
 /// Pops the first `--add-source` path (if any) to pre-fill, determining its
@@ -122,6 +133,7 @@ impl PeachApp {
 
         Self {
             db_path: db_path.clone(),
+            timeline: TimelineView::new(db_path, session_paths.sqlite_path.clone()),
             session_paths,
             loaded_sources: Vec::new(),
             source_kind,
@@ -132,11 +144,15 @@ impl PeachApp {
             load_rx: None,
             retag_state: RetagState::Idle,
             retag_rx: None,
-            timeline: TimelineView::new(db_path),
             filter_bar: FilterBar::new(),
             available_levels: Vec::new(),
+            available_tags: Vec::new(),
             pending_cli_sources,
             cleanup_dirs,
+            tag_dialog: TagDialog::Closed,
+            tag_preview_rx: None,
+            tag_preview_pattern: String::new(),
+            tag_preview: None,
         }
     }
 
@@ -150,11 +166,12 @@ impl PeachApp {
         let search_query = persist::load_search_query(&conn)?.unwrap_or_default();
 
         self.db_path = session_paths.duckdb_path.clone();
+        self.timeline = TimelineView::new(self.db_path.clone(), session_paths.sqlite_path.clone());
         self.session_paths = session_paths;
         self.loaded_sources = loaded_sources;
-        self.timeline = TimelineView::new(self.db_path.clone());
         self.timeline.refresh();
         self.available_levels = self.timeline.distinct_levels();
+        self.available_tags = self.timeline.distinct_tags();
         self.filter_bar.set_text(search_query.clone());
         self.timeline.set_query(Query::parse(&search_query));
 
@@ -203,6 +220,173 @@ impl PeachApp {
             let _ = tx.send(LoadOutcome::Done(result));
         });
     }
+
+    /// Distinct tag values from both tables tags can come from —
+    /// `import_tags` (rule-produced, already tracked in `available_tags`)
+    /// and `analyst_tags` (manual) — so the tagging dialogs' "existing
+    /// tags" picker offers one combined vocabulary regardless of which
+    /// table a tag happened to come from.
+    fn combined_tag_vocabulary(&self) -> Vec<String> {
+        let mut tags = self.available_tags.clone();
+        if let Ok(conn) = persist::open_session_db(&self.session_paths.sqlite_path)
+            && let Ok(analyst_tags) = persist::distinct_analyst_tag_values(&conn)
+        {
+            tags.extend(analyst_tags);
+        }
+        tags.sort();
+        tags.dedup();
+        tags
+    }
+
+    fn handle_row_action(&mut self, action: RowAction) {
+        match action {
+            RowAction::TagSingle { event_id } => {
+                let existing = self.combined_tag_vocabulary();
+                self.tag_dialog = TagDialog::open_single(event_id, existing);
+                self.tag_preview = None;
+                self.tag_preview_pattern.clear();
+            }
+            RowAction::TagAllMatching { event_id, message } => {
+                let existing = self.combined_tag_vocabulary();
+                self.tag_dialog = TagDialog::open_advanced(event_id, message, existing);
+                self.tag_preview = None;
+                self.tag_preview_pattern.clear();
+            }
+            RowAction::ShowContext { query_text } => {
+                self.filter_bar.set_text(query_text.clone());
+                self.timeline.set_query(Query::parse(&query_text));
+                if let Ok(conn) = persist::open_session_db(&self.session_paths.sqlite_path) {
+                    let _ = persist::save_search_query(&conn, &query_text);
+                }
+            }
+        }
+    }
+
+    /// Kicks off a background match count for the Advanced dialog's
+    /// current pattern if it changed since the last one — same "don't
+    /// freeze the UI on every keystroke" reasoning as
+    /// `TimelineView::recount`, since this is the same kind of
+    /// leading-wildcard `LIKE` scan.
+    fn update_tag_preview_request(&mut self) {
+        let Some(pattern) = self.tag_dialog.current_pattern() else {
+            return;
+        };
+        if pattern == self.tag_preview_pattern || self.tag_preview_rx.is_some() {
+            return;
+        }
+        self.tag_preview_pattern = pattern.to_string();
+        self.tag_preview = None;
+        if pattern.trim().is_empty() {
+            return;
+        }
+
+        let (tx, rx) = mpsc::channel();
+        self.tag_preview_rx = Some(rx);
+        let db_path = self.db_path.clone();
+        let pattern = pattern.to_string();
+        std::thread::spawn(move || {
+            let count = duckdb::Connection::open(&db_path)
+                .ok()
+                .and_then(|conn| timeline_queries::count_message_contains(&conn, &pattern).ok())
+                .unwrap_or(0);
+            let _ = tx.send(count);
+        });
+    }
+
+    fn poll_tag_preview(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.tag_preview_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(count) => {
+                self.tag_preview = Some(count);
+                self.tag_preview_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => ctx.request_repaint(),
+            Err(mpsc::TryRecvError::Disconnected) => self.tag_preview_rx = None,
+        }
+    }
+
+    /// Renders whichever tag dialog is open and executes what the analyst
+    /// confirmed — the dialog itself only reports the outcome (see
+    /// `ui::tag_dialog`), since it doesn't own the session/rule-file state
+    /// applying it needs.
+    fn handle_tag_dialog(&mut self, ctx: &egui::Context) {
+        if !self.tag_dialog.is_open() {
+            return;
+        }
+        let rule_paths = self.rule_paths.clone();
+        let preview = self
+            .tag_dialog
+            .current_pattern()
+            .filter(|pattern| *pattern == self.tag_preview_pattern)
+            .and(self.tag_preview);
+        let Some(outcome) = self.tag_dialog.ui(
+            ctx,
+            |tag| find_rule_producing_tag(&rule_paths, tag),
+            preview,
+        ) else {
+            return;
+        };
+
+        match outcome {
+            TagDialogOutcome::TagSingleEvent {
+                event_id,
+                tag_value,
+            } => {
+                if let Ok(conn) = persist::open_session_db(&self.session_paths.sqlite_path) {
+                    let _ = persist::insert_analyst_tag(&conn, event_id, &tag_value);
+                }
+                self.timeline.refresh();
+            }
+            TagDialogOutcome::CreateRule {
+                rule_name,
+                pattern,
+                tag_value,
+            } => {
+                if let Ok(dir) = rule_file::default_user_rules_dir() {
+                    let path = dir.join(format!("{}.toml", rule_file::slugify(&rule_name)));
+                    if rule_file::create_message_contains_rule(
+                        &path, &rule_name, &pattern, &tag_value,
+                    )
+                    .is_ok()
+                    {
+                        if !self.rule_paths.contains(&path) {
+                            self.rule_paths.push(path);
+                        }
+                        self.start_retag();
+                    }
+                }
+            }
+            TagDialogOutcome::ExtendRule { path, pattern } => {
+                if rule_file::append_message_contains_pattern(&path, &pattern).is_ok() {
+                    if !self.rule_paths.contains(&path) {
+                        self.rule_paths.push(path);
+                    }
+                    self.start_retag();
+                }
+            }
+        }
+    }
+}
+
+/// Which currently-loaded rule file (if exactly one — `None` if zero or
+/// several, ambiguous) already produces `tag_value`, so the advanced
+/// tagging dialog can offer "extend that rule" instead of always creating
+/// a new one.
+fn find_rule_producing_tag(rule_paths: &[PathBuf], tag_value: &str) -> Option<PathBuf> {
+    let mut candidates = rule_paths.iter().filter(|path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| Rule::from_toml_str(&text).ok())
+            .is_some_and(|rule| rule.rule.tag.value == tag_value)
+    });
+    let first = candidates.next()?;
+    if candidates.next().is_some() {
+        None
+    } else {
+        Some(first.clone())
+    }
 }
 
 impl eframe::App for PeachApp {
@@ -224,6 +408,7 @@ impl eframe::App for PeachApp {
                             };
                             self.timeline.refresh();
                             self.available_levels = self.timeline.distinct_levels();
+                            self.available_tags = self.timeline.distinct_tags();
                             self.loaded_sources.push(loaded_source);
                             if let Ok(conn) =
                                 persist::open_session_db(&self.session_paths.sqlite_path)
@@ -255,7 +440,16 @@ impl eframe::App for PeachApp {
             match rx.try_recv() {
                 Ok(RetagOutcome::Done(result)) => {
                     match result {
-                        Ok(applied) => self.retag_state = RetagState::Done { applied },
+                        Ok(applied) => {
+                            self.retag_state = RetagState::Done { applied };
+                            // Drops the row cache so the Tags column
+                            // reflects the just-recomputed import_tags
+                            // immediately, not only once the visible
+                            // window happens to get invalidated some
+                            // other way (e.g. scrolling).
+                            self.timeline.refresh();
+                            self.available_tags = self.timeline.distinct_tags();
+                        }
                         Err(err) => self.retag_state = RetagState::Failed(err),
                     }
                     self.retag_rx = None;
@@ -430,16 +624,27 @@ impl eframe::App for PeachApp {
             });
         });
 
+        let mut row_action = None;
         egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(query) = self.filter_bar.ui(ui, &self.available_levels) {
+            if let Some(query) =
+                self.filter_bar
+                    .ui(ui, &self.available_levels, &self.available_tags)
+            {
                 self.timeline.set_query(query);
                 if let Ok(conn) = persist::open_session_db(&self.session_paths.sqlite_path) {
                     let _ = persist::save_search_query(&conn, self.filter_bar.text());
                 }
             }
             ui.separator();
-            self.timeline.ui(ui);
+            row_action = self.timeline.ui(ui);
         });
+
+        if let Some(action) = row_action {
+            self.handle_row_action(action);
+        }
+        self.poll_tag_preview(ui.ctx());
+        self.update_tag_preview_request();
+        self.handle_tag_dialog(ui.ctx());
     }
 }
 

@@ -1,0 +1,32 @@
+# AUL pattern-of-life: turn-by-turn navigation (Maps) usage.
+# Substrings ported from iLEAPP's logarchive_navigation artifact
+# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py). The
+# original SQL LIKE patterns used a couple of literal-percent escapes
+# ('Proceed to\%', 'Arrived\%') that don't translate to a plain substring
+# check; those are covered here by their unescaped prefixes instead.
+
+[rule]
+name = "aul_navigation"
+description = "Turn-by-turn navigation instructions (Maps usage)"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Starting route to",
+    "Proceed to the",
+    "Turn right",
+    "Turn left",
+    "roundabout",
+    "first exit",
+    "Stay in the",
+    "parking lot for",
+    "of a mile",
+    "In about",
+    "then arrive",
+    "your destination",
+    "At the light",
+    "Arrived",
+]
+
+[rule.tag]
+value = "navigation"

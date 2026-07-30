@@ -70,6 +70,26 @@ event_id = 4625
 value = "auth_failure"
 ```
 
+`message_contains` is a substring variant of `message`: a string or array of
+strings, matching if the entry's message contains *any* of them. This is the
+main mechanism for pattern-of-life categorization, where messages carry
+variable data around a recognizable fixed substring:
+
+```toml
+[rule.match]
+sourcetype = "aul"
+message_contains = ["Screen did lock", "screen is unlocked"]
+```
+
+See `rules/examples/aul_*.toml` for a pattern-of-life rule pack for AUL
+(screen lock state, app launches, WiFi/Bluetooth status, flashlight, airplane
+mode, tethering, motion state, navigation, volume, clock changes) — the
+message substrings are ported from
+[iLEAPP](https://github.com/abrignoni/iLEAPP)'s `logarchive_*` artifacts
+rather than re-derived from scratch. There is deliberately no call/message
+category yet — iLEAPP itself resolves those from the SMS/CallHistory
+databases rather than Unified Logs, which Peach doesn't parse.
+
 Three modes:
 
 - **Import-time**: rules selected before clicking **Load** are applied
@@ -78,8 +98,42 @@ Three modes:
   against *everything* already loaded. This **replaces** all import-time tags —
   it's a full recompute, not an incremental patch, so a changed or removed rule
   never leaves a stale tag behind.
-- **Ad-hoc / analyst tags**: query-time evaluation and manually-set per-entry tags
-  exist at the engine/database level but have no dedicated UI yet.
+- **Ad-hoc / analyst tags**: query-time evaluation exists at the engine level
+  with no dedicated UI yet. Manual, per-entry tags (`analyst_tags`) do have a
+  UI — see below.
+
+**Right-click a row** in the timeline for these actions:
+
+- **Copy message** — copies just the `message` field to the clipboard.
+- **Copy whole event as text** — copies timestamp, level, tags, message, and
+  `raw` (the full original record/line) as a plain-text block.
+- **Show context around this event** (± 1 / 5 / 15 / 60 min) — replaces the
+  search box with an `after=.../before=...` window centered on the clicked
+  row, so you see everything around it rather than only whatever the
+  previous filter matched.
+- **Tag this event...** — a manual tag on just that one entry, stored in the
+  session's `analyst_tags` (SQLite), separate from rule-produced tags because
+  it isn't rule-based. Pick an already-used tag from the dropdown or choose
+  "New tag...".
+- **Tag all matching (advanced)...** — tags every entry whose message
+  contains a pattern (prefilled from the clicked row, editable), with a live
+  preview of how many entries currently match before you commit. Choosing an
+  existing tag that's produced by exactly one currently-loaded rule file
+  offers to extend that rule's pattern list instead of creating a new one; a
+  brand-new tag (or one with no single unambiguous owning rule) creates a new
+  rule file under the per-user rules directory and asks you to name it.
+  Applying either path re-tags immediately, same as clicking **Re-tag now**.
+
+Both the Tags column and the tag picker in these dialogs combine tags from
+both `import_tags` and `analyst_tags` — one vocabulary regardless of which
+table a tag happened to come from.
+
+The timeline table has a **Tags** column listing every tag on that entry, and
+the **Level** column is colored — both from the same 8-color categorical
+palette. The color is a deterministic hash of the value, not
+assignment-order-based: the same level/tag string always gets the same color,
+in this session and every future one, rather than shifting depending on what
+order things were loaded in.
 
 ## Search
 
@@ -90,17 +144,42 @@ language. Filters apply live as you type — there's no separate "search" button
 - `field=value` / `field:value` — exact match. Recognized fields: `level`,
   `source` (sourcetype), `tag` (from tagging rules), `message`, `raw`.
 - `field~value` — regex match on that field instead of exact/substring.
+- `tag=*` — has at least one tag, whichever. Combined with negation,
+  `NOT tag=*` means "untagged" — there's no separate keyword for it.
+- `after=<timestamp>` / `before=<timestamp>` — bounds on `timestamp_utc`
+  (UTC, always). Accepts `2026-07-29T10:00:00`, `2026-07-29 10:00:00` (quote
+  it — the space would otherwise split into two tokens), with or without
+  seconds or fractional seconds, or a bare date (`2026-07-29`, meaning
+  midnight). A timestamp that doesn't parse in any of these shapes matches
+  nothing, rather than erroring.
 - `NOT term` or `-term` — negation.
 - Terms are implicitly ANDed; use `OR` explicitly. There's no parentheses or
   operator precedence yet — everything evaluates strictly left to right, in the
-  order you typed it.
+  order you typed it. This means several terms joined by bare `OR` only group
+  correctly if nothing else in the query is `AND`-ing against them — see the
+  next paragraph for how the buttons avoid this trap.
 
 Example: `source=evtx tag=auth_failure NOT level=INFO "login"`
 
-The **Level** buttons under the search box are a shortcut: clicking one just
-toggles a `level=X` term in the search box, populated from whatever level values
-are actually present in the loaded data (AUL's level names and a text log's
-ERROR/WARN/INFO have nothing in common, so this list is never hardcoded).
+The **Level** and **Tag** button rows under the search box are a shortcut:
+clicking one toggles that value in and out of the search box, populated from
+whatever level/tag values are actually present in the loaded data (AUL's
+level names and a text log's ERROR/WARN/INFO have nothing in common, and
+which tags exist depends entirely on which rules were run, so neither list
+is ever hardcoded). The Tag row only appears once at least one tagging rule
+has produced a tag — either from import-time tagging during Load, or after
+clicking **Re-tag now**.
+
+Selecting several buttons in the same row means "match any of these", not
+"match all of these" — but since the grammar above has no parentheses, that
+can't be expressed as several `field=value` terms joined by `OR` once
+anything else in the query is `AND`-ing against them. Instead, the buttons
+write a single regex-alternation term, e.g. selecting two tags produces
+`tag~^(?:wifi_status|screen_lock_state)$` — one term, so it always combines
+correctly with the rest of the query regardless of order. The **Untagged**
+button next to the Tag row toggles `NOT tag=*` for the same reason it isn't
+just another value button: "no tag" isn't a value that could appear in the
+alternation.
 
 ## Sessions
 

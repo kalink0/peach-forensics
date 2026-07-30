@@ -1,0 +1,26 @@
+# AUL pattern-of-life: airplane mode toggled on/off.
+# Substrings ported from iLEAPP's logarchive_airplane_mode artifact
+# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+
+[rule]
+name = "aul_airplane_mode"
+description = "Airplane mode enabled or disabled"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Airplane Mode is now 1",
+    "Airplane Mode is now On",
+    "Setting airplane mode to true",
+    "Airplane mode now active",
+    "enabling airplanemode",
+    "Airplane mode changed",
+    "Airplane Mode is now 0",
+    "Airplane Mode is now Off",
+    "Setting airplane mode to false",
+    "Airplane mode now inactive",
+    "Airplane mode Disabled",
+]
+
+[rule.tag]
+value = "airplane_mode"

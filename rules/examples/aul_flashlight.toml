@@ -1,0 +1,20 @@
+# AUL pattern-of-life: flashlight/torch use.
+# Substrings ported from iLEAPP's logarchive_flashlight artifact
+# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py) — both the
+# unspaced and spaced AVFlashlight log forms are kept, since which one a
+# given iOS release emits varies.
+
+[rule]
+name = "aul_flashlight"
+description = "Flashlight/torch turned on or off"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "[Flashlight Controller]",
+    "<<<<AVFlashlight>>>>-",
+    "<<<< AVFlashlight >>>>",
+]
+
+[rule.tag]
+value = "flashlight"

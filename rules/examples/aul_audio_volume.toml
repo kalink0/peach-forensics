@@ -1,0 +1,23 @@
+# AUL pattern-of-life: physical volume button presses and playback state.
+# Substrings ported from iLEAPP's logarchive_audio_status artifact
+# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+# See also: https://thesisfriday.com/index.php/2025/05/30/thesis-friday-8-aul-physical-buttons-volume/
+
+[rule]
+name = "aul_audio_volume"
+description = "Volume button presses and audio playback state changes"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "AudioQueueIsPlaying",
+    "VolumeIncrement",
+    "rawVolumeIncreasePress",
+    "rawVolumeDecreasePress",
+    "Volume active",
+    "PlaybackQueueInvalidation",
+    "volumeValueDidChange",
+]
+
+[rule.tag]
+value = "audio_volume"

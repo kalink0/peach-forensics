@@ -6,6 +6,15 @@ use thiserror::Error;
 /// `subsystem`, EVTX `event_id`) — anything not recognized as normalized is
 /// looked up in the entry's `fields` JSON. All conditions in one rule must
 /// hold (AND) for it to match.
+///
+/// `message_contains` is a substring variant of `message`: the value is
+/// either a single string or an array of strings, and the rule matches if
+/// `message` contains *any* of them. This exists because most real-world
+/// pattern-of-life categorization (see the AUL rule pack under
+/// `rules/examples/`) keys off recognizable substrings in free-text log
+/// messages, not off exact equality or structured fields — matching the
+/// approach forensic tools like iLEAPP use for the same Apple Unified Log
+/// data.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Rule {
     pub rule: RuleBody,
@@ -53,10 +62,27 @@ impl Rule {
                 "sourcetype" => expected.as_str() == Some(sourcetype),
                 "level" => level.is_some_and(|actual| expected.as_str() == Some(actual)),
                 "message" => message.is_some_and(|actual| expected.as_str() == Some(actual)),
+                "message_contains" => message.is_some_and(|actual| {
+                    toml_value_as_strings(expected)
+                        .iter()
+                        .any(|needle| actual.contains(needle))
+                }),
                 other => fields
                     .get(other)
                     .is_some_and(|actual| toml_matches_json(expected, actual)),
             })
+    }
+}
+
+/// Reads `message_contains`'s value as a list of substrings to search for,
+/// accepting either a bare string or an array of strings. Any other shape
+/// (e.g. an integer) yields an empty list, so a malformed rule simply never
+/// matches rather than panicking.
+fn toml_value_as_strings(value: &toml::Value) -> Vec<&str> {
+    match value {
+        toml::Value::String(s) => vec![s.as_str()],
+        toml::Value::Array(items) => items.iter().filter_map(|v| v.as_str()).collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -166,6 +192,42 @@ value = "error"
         assert!(rule.matches("evtx", None, None, &matching));
         assert!(!rule.matches("evtx", None, None, &wrong_id));
         assert!(!rule.matches("evtx", None, None, &missing_field));
+    }
+
+    #[test]
+    fn matches_message_contains_against_array_of_substrings() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"screen_lock\"\n[rule.match]\nmessage_contains = [\"Screen did lock\", \"screen is unlocked\"]\n[rule.tag]\nvalue = \"screen_lock_state\"\n",
+        )
+        .unwrap();
+        let null = serde_json::Value::Null;
+
+        assert!(rule.matches("aul", None, Some("Screen did lock now"), &null));
+        assert!(rule.matches("aul", None, Some("the screen is unlocked"), &null));
+        assert!(!rule.matches("aul", None, Some("unrelated message"), &null));
+        assert!(!rule.matches("aul", None, None, &null));
+    }
+
+    #[test]
+    fn matches_message_contains_against_a_single_bare_string() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"flashlight\"\n[rule.match]\nmessage_contains = \"[Flashlight Controller]\"\n[rule.tag]\nvalue = \"flashlight\"\n",
+        )
+        .unwrap();
+        let null = serde_json::Value::Null;
+
+        assert!(rule.matches("aul", None, Some("[Flashlight Controller] on"), &null));
+        assert!(!rule.matches("aul", None, Some("unrelated"), &null));
+    }
+
+    #[test]
+    fn message_contains_with_non_string_value_never_matches() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"bad\"\n[rule.match]\nmessage_contains = 42\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+
+        assert!(!rule.matches("aul", None, Some("anything"), &serde_json::Value::Null));
     }
 
     #[test]

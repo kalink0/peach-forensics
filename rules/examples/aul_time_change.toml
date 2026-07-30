@@ -1,0 +1,16 @@
+# AUL pattern-of-life: system clock changes (relevant to timeline integrity,
+# not just pattern-of-life — a shifted clock affects every other tagged
+# event's apparent time). Substring ported from iLEAPP's
+# logarchive_time_change artifact (github.com/abrignoni/iLEAPP,
+# scripts/artifacts/logarchive.py).
+
+[rule]
+name = "aul_time_change"
+description = "System clock shifted"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = "Time change: Clock shifted by"
+
+[rule.tag]
+value = "time_change"

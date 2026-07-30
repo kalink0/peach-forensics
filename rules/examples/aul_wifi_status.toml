@@ -1,0 +1,39 @@
+# AUL pattern-of-life: WiFi association/scan/network-change events.
+# Substrings ported from iLEAPP's logarchive_wifi_status artifact
+# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+
+[rule]
+name = "aul_wifi_status"
+description = "WiFi state changes, network joins, and scan activity"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "WiFi state changed:",
+    "Toggled WiFi state",
+    "is WiFi associated?",
+    "link status changed",
+    "reachability changed",
+    "ISNetworkObserver",
+    "ForgetSSID",
+    "en0: SSID",
+    "Removing Lease SSID",
+    "SysMon: WiFi state changed:",
+    "WiFiManagerClientRemoveNetworkWithReason:",
+    "WiFiSecurityRemovePassword",
+    "AlwaysOnWifi:",
+    "WiFiDeviceManagerSetNetworks:",
+    "Scanning For Broadcast found:",
+    "Scanning Remaining Channels",
+    "WiFiSettlementObserver _handleScanResults",
+    "Attempting to join",
+    "WiFiLQAMgrSetCurrentNetwork: Joined SSID:",
+    "Preparing background scan request for",
+    "WiFiNetworkPrepareKnownBssList",
+    "to list of known networks",
+    "{AUTOJOIN, SCAN*} Scanning 2Ghz Channels found:",
+    "{AUTOJOIN, SCAN*} Scanning 5Ghz Channels found:",
+]
+
+[rule.tag]
+value = "wifi_status"

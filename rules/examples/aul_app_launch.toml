@@ -1,0 +1,18 @@
+# AUL pattern-of-life: app launches / foreground switches.
+# Substrings ported from iLEAPP's logarchive_executed_apps artifact
+# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+
+[rule]
+name = "aul_app_launch"
+description = "App icon taps and application launches"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Allowing tap for icon view",
+    "Launching application",
+    "transition source:",
+]
+
+[rule.tag]
+value = "app_launch"

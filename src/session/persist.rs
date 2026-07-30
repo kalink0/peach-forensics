@@ -5,6 +5,7 @@ use directories::ProjectDirs;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::session_schema::setup_session_schema;
+use crate::model::event_id::EventId;
 
 /// Default per-user directory for session files (XDG on Linux, `AppData` on
 /// Windows, `Application Support` on macOS) — not user-configurable yet
@@ -118,6 +119,79 @@ pub fn load_search_query(conn: &Connection) -> anyhow::Result<Option<String>> {
     get_session_state(conn, SEARCH_QUERY_KEY)
 }
 
+/// Records a manual, analyst-driven tag on one entry — the "fourth,
+/// analyst-driven layer" from the tagging design (CLAUDE.md §6), kept
+/// separate from rule-produced `import_tags` precisely because it isn't
+/// rule-based: no `rule_name` to attribute it to. Allows duplicates on
+/// purpose (no uniqueness check) — a second manual tag with the same value
+/// is harmless and simpler than silently swallowing a re-click.
+pub fn insert_analyst_tag(
+    conn: &Connection,
+    event_id: EventId,
+    tag_value: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO analyst_tags (event_id_source, event_id_seq, tag_value, note, created_at)
+         VALUES (?1, ?2, ?3, NULL, ?4)",
+        params![
+            event_id.source_file_id.to_string(),
+            event_id.sequence_number.value() as i64,
+            tag_value,
+            chrono::Utc::now().timestamp(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Distinct `tag_value`s already used as analyst tags in this session —
+/// feeds the "existing tags" picker in the tagging UI alongside
+/// `timeline_queries::distinct_tags` (import_tags), so the picker offers
+/// one combined vocabulary regardless of which table a tag happened to
+/// come from.
+pub fn distinct_analyst_tag_values(conn: &Connection) -> anyhow::Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT DISTINCT tag_value FROM analyst_tags ORDER BY tag_value")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Every analyst tag in this session, grouped by [`EventId`] — loaded
+/// wholesale rather than filtered per visible window: analyst tags are
+/// manually curated one at a time, so this table stays small (unlike
+/// `import_tags`, which can hold millions of rule-produced rows), and a
+/// row-value `IN` filter would be awkward to express portably in SQLite.
+/// Used to merge analyst tags into the timeline's Tags column, which
+/// otherwise only reflects `import_tags` (a different database file
+/// entirely — DuckDB vs. this SQLite session DB).
+pub fn all_analyst_tags(
+    conn: &Connection,
+) -> anyhow::Result<std::collections::HashMap<EventId, Vec<String>>> {
+    let mut stmt =
+        conn.prepare("SELECT event_id_source, event_id_seq, tag_value FROM analyst_tags")?;
+    let rows = stmt.query_map([], |row| {
+        let source_file_id: String = row.get(0)?;
+        let sequence_number: i64 = row.get(1)?;
+        let tag_value: String = row.get(2)?;
+        Ok((source_file_id, sequence_number, tag_value))
+    })?;
+
+    let mut by_event: std::collections::HashMap<EventId, Vec<String>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let (source_file_id, sequence_number, tag_value) = row?;
+        let event_id = EventId {
+            source_file_id: source_file_id
+                .parse()
+                .map_err(|err| anyhow::anyhow!("invalid source_file_id in database: {err}"))?,
+            sequence_number: crate::model::event_id::SequenceNumber::from_raw(
+                sequence_number as u64,
+            ),
+        };
+        by_event.entry(event_id).or_default().push(tag_value);
+    }
+    Ok(by_event)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +297,59 @@ mod tests {
             load_search_query(&conn).unwrap(),
             Some("tag=reviewed".to_string())
         );
+    }
+
+    use crate::model::event_id::{SequenceCounter, SourceFileId};
+
+    #[test]
+    fn insert_analyst_tag_is_readable_back_via_distinct_values() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+        let event_id = EventId {
+            source_file_id: SourceFileId::new_random(),
+            sequence_number: SequenceCounter::new().next_sequence_number(),
+        };
+
+        insert_analyst_tag(&conn, event_id, "reviewed").unwrap();
+
+        assert_eq!(
+            distinct_analyst_tag_values(&conn).unwrap(),
+            vec!["reviewed".to_string()]
+        );
+    }
+
+    #[test]
+    fn all_analyst_tags_groups_by_event_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+        let source_file_id = SourceFileId::new_random();
+        let mut counter = SequenceCounter::new();
+        let a = EventId {
+            source_file_id,
+            sequence_number: counter.next_sequence_number(),
+        };
+        let b = EventId {
+            source_file_id,
+            sequence_number: counter.next_sequence_number(),
+        };
+
+        insert_analyst_tag(&conn, a, "reviewed").unwrap();
+        insert_analyst_tag(&conn, a, "follow_up").unwrap();
+        insert_analyst_tag(&conn, b, "reviewed").unwrap();
+
+        let by_event = all_analyst_tags(&conn).unwrap();
+
+        let mut a_tags = by_event.get(&a).unwrap().clone();
+        a_tags.sort();
+        assert_eq!(a_tags, vec!["follow_up", "reviewed"]);
+        assert_eq!(by_event.get(&b).unwrap(), &vec!["reviewed".to_string()]);
+    }
+
+    #[test]
+    fn all_analyst_tags_is_empty_when_none_recorded() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+
+        assert!(all_analyst_tags(&conn).unwrap().is_empty());
     }
 }

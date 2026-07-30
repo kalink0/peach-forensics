@@ -1,0 +1,25 @@
+# AUL pattern-of-life: screen lock/unlock and biometric authentication.
+# Substrings ported from iLEAPP's logarchive_lock_status artifact
+# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py) — a
+# community-maintained mapping of Unified Log message text to device state,
+# not independently re-derived here.
+
+[rule]
+name = "aul_screen_lock_state"
+description = "Screen lock/unlock and biometric match events"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Screen did lock",
+    "ScreenOn changed",
+    "Screen shut off",
+    "screen is locked",
+    "screen is unlocked",
+    "Device unlocked",
+    "Device lock status",
+    "Biometric match complete",
+]
+
+[rule.tag]
+value = "screen_lock_state"
