@@ -53,13 +53,28 @@ struct RowCache {
 pub struct TimelineView {
     db_path: PathBuf,
     session_sqlite_path: PathBuf,
-    conn: Option<Connection>,
-    session_conn: Option<rusqlite::Connection>,
     query: Query,
     total_rows: usize,
+    /// Row count for the whole loaded timeline, ignoring the current
+    /// filter — separate from `total_rows` (which tracks the *filtered*
+    /// count and is what drives the table's virtual row count) so the UI
+    /// can show "N of M events" instead of just the filtered count.
+    total_unfiltered_rows: usize,
     cache: Option<RowCache>,
     count_rx: Option<mpsc::Receiver<usize>>,
+    /// Background count for `total_unfiltered_rows`. Deliberately not
+    /// recomputed on every `set_query` like `count_rx` is — the unfiltered
+    /// total only changes when the loaded data itself changes (a load or
+    /// re-tag finishing, a session switch), so this only fires from
+    /// `refresh()`.
+    total_rx: Option<mpsc::Receiver<usize>>,
     counting: bool,
+    window_rx: Option<mpsc::Receiver<(usize, Vec<DisplayRow>)>>,
+    /// Offset of the window fetch currently in flight, if any — gates
+    /// `ensure_window` so a fast scroll doesn't spawn a new DuckDB
+    /// connection + query on every frame while one is already running; the
+    /// next frame after it lands re-checks whatever row is visible by then.
+    pending_window_offset: Option<usize>,
 }
 
 impl TimelineView {
@@ -73,13 +88,15 @@ impl TimelineView {
         Self {
             db_path,
             session_sqlite_path,
-            conn: None,
-            session_conn: None,
             query: Query::default(),
             total_rows: 0,
+            total_unfiltered_rows: 0,
             cache: None,
             count_rx: None,
+            total_rx: None,
             counting: false,
+            window_rx: None,
+            pending_window_offset: None,
         }
     }
 
@@ -87,10 +104,17 @@ impl TimelineView {
         self.total_rows
     }
 
-    /// Re-reads the row count for the current query and drops the window
-    /// cache. Call after a load finishes.
+    pub fn total_unfiltered_rows(&self) -> usize {
+        self.total_unfiltered_rows
+    }
+
+    /// Re-reads the row count for the current query and the whole-timeline
+    /// total, and drops the window cache. Call after the loaded data
+    /// itself changes (a load or re-tag finishing, a session switch) —
+    /// unlike `set_query`, which only needs the filtered count to move.
     pub fn refresh(&mut self) {
         self.recount();
+        self.recount_total();
     }
 
     /// Sets the active search query. Filters apply immediately (no separate
@@ -118,6 +142,16 @@ impl TimelineView {
     fn recount(&mut self) {
         self.cache = None;
         self.counting = true;
+        // Drop any in-flight window fetch too: it was reading rows for the
+        // *old* query, and letting it land after the query has already
+        // moved on would (best case) show stale rows, or (worst case, if
+        // its offset happens to coincide with a later request against the
+        // new query) silently serve rows for the wrong query. Dropping the
+        // receiver here is enough — the fetch thread's `tx.send` then finds
+        // nobody listening and its result silently goes nowhere, same
+        // mechanism as the count below.
+        self.window_rx = None;
+        self.pending_window_offset = None;
         let query = self.query.clone();
         let db_path = self.db_path.clone();
         let (tx, rx) = mpsc::channel();
@@ -155,32 +189,74 @@ impl TimelineView {
         }
     }
 
-    pub fn distinct_levels(&mut self) -> Vec<String> {
-        self.connection()
-            .and_then(|conn| timeline_queries::distinct_levels(conn).ok())
+    /// Kicks off the whole-timeline (unfiltered) count on a background
+    /// thread — same reasoning as `recount`, its own connection since
+    /// `Connection` isn't `Send`.
+    fn recount_total(&mut self) {
+        let db_path = self.db_path.clone();
+        let (tx, rx) = mpsc::channel();
+        self.total_rx = Some(rx);
+        std::thread::spawn(move || {
+            let total = Connection::open(&db_path)
+                .ok()
+                .and_then(|conn| timeline_queries::count_matching(&conn, &Query::default()).ok())
+                .unwrap_or(0);
+            let _ = tx.send(total);
+        });
+    }
+
+    /// Applies a finished background whole-timeline count — same pattern as
+    /// `poll_count`.
+    fn poll_total(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.total_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(total) => {
+                self.total_unfiltered_rows = total;
+                self.total_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint();
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.total_rx = None;
+            }
+        }
+    }
+
+    /// Opens a fresh connection per call rather than reusing a cached one
+    /// — same reasoning as `recount`/`fetch_window`: a load or re-tag
+    /// writes `import_tags`/`log_entries` from its own, separate
+    /// connection on a background thread, and a long-lived connection kept
+    /// around on this side isn't guaranteed to see those writes on its
+    /// next query. That bug was real, not hypothetical: without this, the
+    /// Tag filter row's vocabulary could stay stuck at whatever
+    /// `import_tags` looked like the *first* time this was called, even
+    /// after later tagging added rows — see
+    /// `distinct_tags_sees_tags_written_by_a_different_connection_afterward`.
+    pub fn distinct_levels(&self) -> Vec<String> {
+        Connection::open(&self.db_path)
+            .ok()
+            .and_then(|conn| timeline_queries::distinct_levels(&conn).ok())
             .unwrap_or_default()
     }
 
-    pub fn distinct_tags(&mut self) -> Vec<String> {
-        self.connection()
-            .and_then(|conn| timeline_queries::distinct_tags(conn).ok())
+    pub fn distinct_tags(&self) -> Vec<String> {
+        Connection::open(&self.db_path)
+            .ok()
+            .and_then(|conn| timeline_queries::distinct_tags(&conn).ok())
             .unwrap_or_default()
     }
 
-    fn connection(&mut self) -> Option<&Connection> {
-        if self.conn.is_none() {
-            self.conn = Connection::open(&self.db_path).ok();
-        }
-        self.conn.as_ref()
-    }
-
-    fn session_connection(&mut self) -> Option<&rusqlite::Connection> {
-        if self.session_conn.is_none() {
-            self.session_conn = rusqlite::Connection::open(&self.session_sqlite_path).ok();
-        }
-        self.session_conn.as_ref()
-    }
-
+    /// Requests the window covering `row_index`, if it isn't already cached
+    /// or already being fetched. Runs the query in the background (see
+    /// [`Self::spawn_window_fetch`]) — with a filter that matches most of a
+    /// multi-million-row table (e.g. the "Untagged" toggle), the
+    /// `ORDER BY ... LIMIT/OFFSET` behind it can take real time, and this is
+    /// called from inside the table's row-rendering closure, i.e. on the UI
+    /// thread. Running it there synchronously (the original implementation)
+    /// froze the whole window for the duration of the query.
     fn ensure_window(&mut self, row_index: usize) {
         if let Some(cache) = &self.cache
             && row_index >= cache.offset
@@ -188,37 +264,96 @@ impl TimelineView {
         {
             return;
         }
+        if self.pending_window_offset.is_some() {
+            // Already fetching a window this frame (or a recent one) — the
+            // row renders blank for now; once it lands, `poll_window` clears
+            // `pending_window_offset` and the next frame's `ensure_window`
+            // call re-evaluates against wherever the view has scrolled to
+            // by then. Avoids spawning a new connection + query per visible
+            // row per frame while scrolling through an uncached region.
+            return;
+        }
         let offset = row_index.saturating_sub(WINDOW_SIZE / 4);
-        let query = self.query.clone();
-        let Some(conn) = self.connection() else {
-            return;
-        };
-        let Ok(mut rows) = timeline_queries::fetch_window(conn, &query, offset, WINDOW_SIZE) else {
-            return;
-        };
+        self.spawn_window_fetch(offset);
+    }
 
-        // Merge in analyst_tags (SQLite, a different database file than
-        // the DuckDB timeline) so the Tags column reflects both the
-        // rule-produced and manually-set tags on an entry, not just one
-        // of them — best-effort: a failure here just means analyst tags
-        // don't show up this frame, not that the timeline fails to render.
-        if let Some(session_conn) = self.session_connection()
-            && let Ok(analyst_tags) = persist::all_analyst_tags(session_conn)
-        {
-            for row in &mut rows {
-                if let Some(extra) = analyst_tags.get(&row.event_id) {
-                    row.tags.extend(extra.iter().cloned());
-                    row.tags.sort();
-                    row.tags.dedup();
+    /// Fetches one window on a background thread with its own connections
+    /// (`Connection`/`rusqlite::Connection` aren't `Send`, so the existing
+    /// ones can't just be moved over) and merges in `analyst_tags` there too
+    /// — same reasoning as [`Self::recount`].
+    fn spawn_window_fetch(&mut self, offset: usize) {
+        self.pending_window_offset = Some(offset);
+        let query = self.query.clone();
+        let db_path = self.db_path.clone();
+        let session_sqlite_path = self.session_sqlite_path.clone();
+        let (tx, rx) = mpsc::channel();
+        self.window_rx = Some(rx);
+        std::thread::spawn(move || {
+            let Ok(conn) = Connection::open(&db_path) else {
+                return;
+            };
+            let Ok(mut rows) = timeline_queries::fetch_window(&conn, &query, offset, WINDOW_SIZE)
+            else {
+                return;
+            };
+
+            // Merge in analyst_tags (SQLite, a different database file than
+            // the DuckDB timeline) so the Tags column reflects both the
+            // rule-produced and manually-set tags on an entry, not just one
+            // of them — best-effort: a failure here just means analyst tags
+            // don't show up for this window, not that the fetch fails.
+            if let Ok(session_conn) = rusqlite::Connection::open(&session_sqlite_path)
+                && let Ok(analyst_tags) = persist::all_analyst_tags(&session_conn)
+            {
+                for row in &mut rows {
+                    if let Some(extra) = analyst_tags.get(&row.event_id) {
+                        row.tags.extend(extra.iter().cloned());
+                        row.tags.sort();
+                        row.tags.dedup();
+                    }
                 }
             }
-        }
 
-        self.cache = Some(RowCache { offset, rows });
+            let _ = tx.send((offset, rows));
+        });
+    }
+
+    /// Applies a finished background window fetch, and requests a repaint
+    /// while one is outstanding — same pattern as [`Self::poll_count`].
+    fn poll_window(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.window_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok((offset, rows)) => {
+                self.cache = Some(RowCache { offset, rows });
+                self.window_rx = None;
+                self.pending_window_offset = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint();
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.window_rx = None;
+                self.pending_window_offset = None;
+            }
+        }
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<RowAction> {
         self.poll_count(ui.ctx());
+        self.poll_window(ui.ctx());
+        self.poll_total(ui.ctx());
+
+        if self.query.is_empty() {
+            ui.label(format!("{} events loaded", self.total_unfiltered_rows));
+        } else {
+            ui.label(format!(
+                "{} of {} events loaded match the filter",
+                self.total_rows, self.total_unfiltered_rows
+            ));
+        }
+
         if self.counting {
             ui.label("Filtering…");
         }
@@ -494,6 +629,81 @@ mod tests {
         std::fs::remove_file(db_path).unwrap();
     }
 
+    /// Polls until the in-flight background whole-timeline count lands (or
+    /// times out) — mirrors `wait_for_count` for `total_unfiltered_rows`.
+    fn wait_for_total(view: &mut TimelineView, ctx: &egui::Context) {
+        for _ in 0..500 {
+            view.poll_total(ctx);
+            if view.total_rx.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("timed out waiting for the background total count");
+    }
+
+    #[test]
+    fn refresh_updates_the_unfiltered_total_independently_of_the_filtered_count() {
+        let db_path = temp_db_path("unfiltered-total");
+        seed_db(&db_path, &["hello", "world", "hello again"]);
+        let ctx = egui::Context::default();
+
+        let mut view = TimelineView::new(db_path.clone(), temp_sqlite_path("session"));
+        view.set_query(Query::parse("hello"));
+        wait_for_count(&mut view, &ctx);
+        // `set_query` alone must not touch the unfiltered total — it only
+        // changes when the underlying data does.
+        assert_eq!(view.total_unfiltered_rows(), 0);
+
+        view.refresh();
+        wait_for_count(&mut view, &ctx);
+        wait_for_total(&mut view, &ctx);
+
+        assert_eq!(view.total_rows(), 2); // "hello" still matches only 2 of the 3 seeded rows
+        assert_eq!(view.total_unfiltered_rows(), 3);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    /// Regression test: a real load with no tagging rules selected calls
+    /// `distinct_tags()` once (via `LoadOutcome::Done`) while `import_tags`
+    /// is still empty. Loading a *second* source with rules selected, or
+    /// clicking "Re-tag now" afterward, writes new rows into `import_tags`
+    /// from a completely different `Connection` (its own background
+    /// thread, exactly like `run_load`/`run_retag`) and then calls
+    /// `distinct_tags()` again. That second call must see the new tag —
+    /// not whatever `import_tags` looked like when the first call happened
+    /// to run.
+    #[test]
+    fn distinct_tags_sees_tags_written_by_a_different_connection_afterward() {
+        let db_path = temp_db_path("distinct-tags-fresh-read");
+        seed_db(&db_path, &["hello"]);
+
+        let view = TimelineView::new(db_path.clone(), temp_sqlite_path("session"));
+        assert_eq!(view.distinct_tags(), Vec::<String>::new());
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let event_id = EventId {
+                source_file_id: SourceFileId::new_random(),
+                sequence_number: SequenceCounter::new().next_sequence_number(),
+            };
+            conn.execute(
+                "INSERT INTO import_tags
+                    (event_id_source, event_id_seq, rule_name, tag_value, applied_at)
+                 VALUES (?, ?, 'rule', 'my_tag', ?)",
+                duckdb::params![
+                    event_id.source_file_id.to_string(),
+                    event_id.sequence_number.value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(view.distinct_tags(), vec!["my_tag".to_string()]);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
     #[test]
     fn a_result_for_a_superseded_query_never_lands() {
         let db_path = temp_db_path("superseded");
@@ -524,6 +734,108 @@ mod tests {
         wait_for_count(&mut view, &ctx);
 
         assert_eq!(view.total_rows(), 3);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    /// Polls until the in-flight background window fetch lands (or times
+    /// out) — mirrors [`wait_for_count`] for `ensure_window`/`poll_window`.
+    fn wait_for_window(view: &mut TimelineView, ctx: &egui::Context) {
+        for _ in 0..500 {
+            view.poll_window(ctx);
+            if view.window_rx.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("timed out waiting for the background window fetch");
+    }
+
+    /// Regression test for the freeze this backgrounding fixes: previously
+    /// `ensure_window` ran `fetch_window` synchronously on the caller's
+    /// thread. Here, calling it must return immediately with the row still
+    /// uncached, and the cache only fills in once `poll_window` picks up the
+    /// background result — proving the fetch actually happens off-thread.
+    #[test]
+    fn ensure_window_runs_in_the_background_and_populates_the_cache() {
+        let db_path = temp_db_path("window-basic");
+        seed_db(&db_path, &["one", "two", "three"]);
+        let ctx = egui::Context::default();
+
+        let mut view = TimelineView::new(db_path.clone(), temp_sqlite_path("session"));
+        view.set_query(Query::default());
+        wait_for_count(&mut view, &ctx);
+
+        view.ensure_window(0);
+        assert!(view.cache.is_none(), "must not fetch synchronously");
+        assert!(view.pending_window_offset.is_some());
+
+        wait_for_window(&mut view, &ctx);
+
+        let cache = view
+            .cache
+            .as_ref()
+            .expect("window fetch should have landed");
+        assert_eq!(cache.rows.len(), 3);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    /// While scrolling, the table calls `ensure_window` once per visible row
+    /// per frame. Without gating on `pending_window_offset`, an uncached
+    /// region would spawn a new DuckDB connection + query for every one of
+    /// those rows before the first fetch even lands.
+    #[test]
+    fn ensure_window_does_not_spawn_a_second_fetch_while_one_is_in_flight() {
+        let db_path = temp_db_path("window-gate");
+        seed_db(&db_path, &["one", "two", "three"]);
+        let ctx = egui::Context::default();
+
+        let mut view = TimelineView::new(db_path.clone(), temp_sqlite_path("session"));
+        view.set_query(Query::default());
+        wait_for_count(&mut view, &ctx);
+
+        view.ensure_window(0);
+        let first_offset = view.pending_window_offset;
+        // A row far enough away to compute a different offset, if a new
+        // fetch were (wrongly) spawned for it.
+        view.ensure_window(1000);
+        assert_eq!(
+            view.pending_window_offset, first_offset,
+            "a second visible row must not preempt the in-flight fetch"
+        );
+
+        wait_for_window(&mut view, &ctx);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    /// Mirrors `a_result_for_a_superseded_query_never_lands` for window
+    /// fetches: changing the query while a window fetch for the old query is
+    /// still in flight must not let its rows land in the cache afterwards.
+    #[test]
+    fn a_window_fetch_for_a_superseded_query_never_lands() {
+        let db_path = temp_db_path("window-superseded");
+        seed_db(&db_path, &["alpha", "beta", "beta"]);
+        let ctx = egui::Context::default();
+
+        let mut view = TimelineView::new(db_path.clone(), temp_sqlite_path("session"));
+        view.set_query(Query::parse("alpha"));
+        wait_for_count(&mut view, &ctx);
+        view.ensure_window(0);
+
+        // Supersede immediately, before the "alpha" window fetch can
+        // possibly have landed — simulates the query changing (e.g. via the
+        // "Untagged" toggle) while a scroll-triggered fetch is in flight.
+        view.set_query(Query::parse("beta"));
+        assert!(
+            view.pending_window_offset.is_none(),
+            "recount() must clear the stale in-flight fetch's tracking"
+        );
+        wait_for_count(&mut view, &ctx);
+        view.ensure_window(0);
+        wait_for_window(&mut view, &ctx);
+
+        let cache = view.cache.as_ref().unwrap();
+        assert_eq!(cache.rows.len(), 2);
+        assert!(cache.rows.iter().all(|r| r.message == "beta"));
         std::fs::remove_file(db_path).unwrap();
     }
 }

@@ -5,6 +5,7 @@ use std::sync::mpsc;
 use anyhow::Context;
 use eframe::egui;
 
+use crate::config::{self, Settings};
 use crate::db::timeline_queries::{self, Query};
 use crate::db::timeline_schema::setup_timeline_schema;
 use crate::model::event_id::SourceFileId;
@@ -19,6 +20,8 @@ use crate::tagging::engine::{apply_import_time, re_tag};
 use crate::tagging::rule::Rule;
 use crate::tagging::rule_file;
 use crate::ui::filter_bar::FilterBar;
+use crate::ui::session_dialog::{self, SessionManagerDialog, SessionManagerOutcome};
+use crate::ui::settings_dialog::{SettingsDialog, SettingsOutcome};
 use crate::ui::tag_dialog::{TagDialog, TagDialogOutcome};
 use crate::ui::timeline_view::{RowAction, TimelineView};
 
@@ -31,15 +34,30 @@ enum SourceKind {
 }
 
 enum LoadOutcome {
-    Done(Result<(usize, usize, LoadedSource), String>),
+    /// Sent every [`LOAD_BATCH_SIZE`] entries during a load — the running
+    /// insert count so far. Not a fraction of a known total: a source's
+    /// total entry count generally isn't knowable without a full parse
+    /// pass, which would mean parsing twice (against the streaming design
+    /// `run_load`'s doc comment explains) just to show an ETA.
+    Progress(usize),
+    Done(Result<(usize, usize, LoadedSource, std::time::Duration), String>),
 }
 
 enum LoadState {
     Idle,
-    Loading,
+    Loading {
+        inserted_so_far: usize,
+    },
     Done {
         inserted: usize,
         tags_applied: usize,
+        /// Wall-clock time for the whole load (parsing + DuckDB inserts +
+        /// import-time tagging) — measured around `run_load` in
+        /// `start_load`, not inside it, so it reflects exactly what the
+        /// analyst was waiting on. Not a forensic artifact of the evidence
+        /// itself, just a quick way to gauge how this source/machine
+        /// performs.
+        elapsed: std::time::Duration,
     },
     Failed(String),
 }
@@ -58,6 +76,14 @@ enum RetagState {
 pub struct PeachApp {
     db_path: PathBuf,
     session_paths: SessionPaths,
+    /// Every session `.sqlite` path this run has ever pointed
+    /// `session_paths` at — including ones since abandoned by switching
+    /// away via `load_session`. `on_exit` empty-cleans all of them, not
+    /// just the current one: the session auto-created at startup (see
+    /// `new`) never gets touched again if the analyst switches to a
+    /// different saved session mid-run, so checking only `session_paths`
+    /// at exit would silently leak that first one forever.
+    visited_sessions: Vec<PathBuf>,
     loaded_sources: Vec<LoadedSource>,
     source_kind: SourceKind,
     source_path: Option<PathBuf>,
@@ -74,6 +100,9 @@ pub struct PeachApp {
     pending_cli_sources: VecDeque<PathBuf>,
     cleanup_dirs: Vec<PathBuf>,
     tag_dialog: TagDialog,
+    session_dialog: SessionManagerDialog,
+    settings: Settings,
+    settings_dialog: SettingsDialog,
     tag_preview_rx: Option<mpsc::Receiver<usize>>,
     /// The pattern the current/last `tag_preview` count corresponds to —
     /// lets the UI tell "counting a stale pattern" apart from "count for
@@ -121,10 +150,18 @@ fn source_kind_for_path(path: &Path) -> SourceKind {
 
 impl PeachApp {
     fn new(add_sources: Vec<PathBuf>, cleanup_dirs: Vec<PathBuf>) -> Self {
-        // Falls back to a plain temp file if the OS data directory can't be
-        // determined — better a working, non-persisted session than a
-        // crash on startup.
-        let sessions_dir = persist::default_sessions_dir().unwrap_or_else(|_| std::env::temp_dir());
+        let settings = config::load();
+        // Falls back to a plain temp file if the sessions directory (OS
+        // default or configured override) can't be created — better a
+        // working, non-persisted session than a crash on startup.
+        let sessions_dir = settings
+            .sessions_dir()
+            .unwrap_or_else(|_| std::env::temp_dir());
+        // A reliable backstop for the on_exit cleanup below: that one only
+        // fires on a graceful shutdown, so this sweeps up whatever a
+        // killed/crashed previous run left behind, before this run's own
+        // (currently still-empty) session gets created.
+        session_dialog::sweep_empty_sessions(&sessions_dir);
         let session_paths = SessionPaths::new_in(&sessions_dir, persist::new_session_id());
         let _ = persist::open_session_db(&session_paths.sqlite_path);
         let db_path = session_paths.duckdb_path.clone();
@@ -134,6 +171,7 @@ impl PeachApp {
         Self {
             db_path: db_path.clone(),
             timeline: TimelineView::new(db_path, session_paths.sqlite_path.clone()),
+            visited_sessions: vec![session_paths.sqlite_path.clone()],
             session_paths,
             loaded_sources: Vec::new(),
             source_kind,
@@ -150,6 +188,9 @@ impl PeachApp {
             pending_cli_sources,
             cleanup_dirs,
             tag_dialog: TagDialog::Closed,
+            session_dialog: SessionManagerDialog::Closed,
+            settings,
+            settings_dialog: SettingsDialog::Closed,
             tag_preview_rx: None,
             tag_preview_pattern: String::new(),
             tag_preview: None,
@@ -167,6 +208,10 @@ impl PeachApp {
 
         self.db_path = session_paths.duckdb_path.clone();
         self.timeline = TimelineView::new(self.db_path.clone(), session_paths.sqlite_path.clone());
+        if !self.visited_sessions.contains(&session_paths.sqlite_path) {
+            self.visited_sessions
+                .push(session_paths.sqlite_path.clone());
+        }
         self.session_paths = session_paths;
         self.loaded_sources = loaded_sources;
         self.timeline.refresh();
@@ -201,7 +246,7 @@ impl PeachApp {
         };
         let (tx, rx) = mpsc::channel();
         self.load_rx = Some(rx);
-        self.load_state = LoadState::Loading;
+        self.load_state = LoadState::Loading { inserted_so_far: 0 };
 
         let db_path = self.db_path.clone();
         let source_kind = self.source_kind;
@@ -209,13 +254,19 @@ impl PeachApp {
         let rule_paths = self.rule_paths.clone();
 
         std::thread::spawn(move || {
+            let progress_tx = tx.clone();
+            let start = std::time::Instant::now();
             let result = run_load(
                 source_kind,
                 &source_path,
                 parser_config_path.as_deref(),
                 &rule_paths,
                 &db_path,
+                &progress_tx,
             )
+            .map(|(inserted, tags_applied, loaded_source)| {
+                (inserted, tags_applied, loaded_source, start.elapsed())
+            })
             .map_err(|err| format!("{err:#}"));
             let _ = tx.send(LoadOutcome::Done(result));
         });
@@ -368,6 +419,50 @@ impl PeachApp {
             }
         }
     }
+
+    /// Renders the "Manage sessions" dialog if open and switches to
+    /// whichever session the analyst picked via its Open button — deletion
+    /// is handled entirely inside the dialog itself (it only ever touches
+    /// session files on disk, not `PeachApp`'s own state), so the only
+    /// outcome this side needs to react to is `Open`.
+    fn handle_session_dialog(&mut self, ctx: &egui::Context) {
+        if !self.session_dialog.is_open() {
+            return;
+        }
+        let Some(outcome) = self.session_dialog.ui(ctx, &self.session_paths.id) else {
+            return;
+        };
+        match outcome {
+            SessionManagerOutcome::Open(sqlite_path) => {
+                if let Err(err) = self.load_session(sqlite_path) {
+                    self.load_state = LoadState::Failed(format!("{err:#}"));
+                }
+            }
+        }
+    }
+
+    /// Renders the "Settings" dialog if open and persists a confirmed
+    /// change — best-effort, same as the rest of this app's local-file
+    /// housekeeping (`cleanup_temp_dir`, the empty-session cleanup in
+    /// `on_exit`): a failure to *write* `config.toml` shouldn't undo the
+    /// analyst's choice for the rest of this run, just mean it doesn't
+    /// survive a restart.
+    fn handle_settings_dialog(&mut self, ctx: &egui::Context) {
+        if !self.settings_dialog.is_open() {
+            return;
+        }
+        let Some(outcome) = self.settings_dialog.ui(ctx) else {
+            return;
+        };
+        match outcome {
+            SettingsOutcome::Save(new_settings) => {
+                if let Err(err) = config::save(&new_settings) {
+                    eprintln!("peach: failed to save settings: {err:#}");
+                }
+                self.settings = new_settings;
+            }
+        }
+    }
 }
 
 /// Which currently-loaded rule file (if exactly one — `None` if zero or
@@ -391,6 +486,21 @@ fn find_rule_producing_tag(rule_paths: &[PathBuf], tag_value: &str) -> Option<Pa
 
 impl eframe::App for PeachApp {
     fn on_exit(&mut self) {
+        // Best-effort: a session that was never loaded into (just created
+        // by starting the app, or abandoned by switching to a different
+        // one via `load_session` mid-run) shouldn't linger and clutter
+        // "Manage sessions" forever. Checks *every* session this run ever
+        // pointed at, not just the current one — see `visited_sessions`'
+        // doc. `delete_if_empty` itself refuses to touch a session that
+        // has data, so this is safe for whichever one is still current.
+        for sqlite_path in &self.visited_sessions {
+            if let Err(err) = session_dialog::delete_if_empty(sqlite_path) {
+                eprintln!(
+                    "peach: failed to clean up empty session {}: {err:#}",
+                    sqlite_path.display()
+                );
+            }
+        }
         for dir in &self.cleanup_dirs {
             cleanup_temp_dir(dir);
         }
@@ -398,40 +508,54 @@ impl eframe::App for PeachApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if let Some(rx) = &self.load_rx {
-            match rx.try_recv() {
-                Ok(LoadOutcome::Done(result)) => {
-                    match result {
-                        Ok((inserted, tags_applied, loaded_source)) => {
-                            self.load_state = LoadState::Done {
-                                inserted,
-                                tags_applied,
-                            };
-                            self.timeline.refresh();
-                            self.available_levels = self.timeline.distinct_levels();
-                            self.available_tags = self.timeline.distinct_tags();
-                            self.loaded_sources.push(loaded_source);
-                            if let Ok(conn) =
-                                persist::open_session_db(&self.session_paths.sqlite_path)
-                            {
-                                let _ = persist::save_loaded_sources(&conn, &self.loaded_sources);
-                            }
-                            if let Some(next) = self.pending_cli_sources.pop_front() {
-                                self.source_kind = source_kind_for_path(&next);
-                                self.source_path = Some(next);
-                                self.parser_config_path = None;
-                            }
-                        }
-                        Err(err) => self.load_state = LoadState::Failed(err),
+            // Drain everything queued this frame, not just one message: a
+            // large source can flush several `Progress` updates between
+            // frames, and only the most recent one (or a trailing `Done`)
+            // actually matters for what gets displayed.
+            loop {
+                match rx.try_recv() {
+                    Ok(LoadOutcome::Progress(inserted_so_far)) => {
+                        self.load_state = LoadState::Loading { inserted_so_far };
                     }
-                    self.load_rx = None;
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    ui.ctx().request_repaint();
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.load_state =
-                        LoadState::Failed("load worker disconnected unexpectedly".to_string());
-                    self.load_rx = None;
+                    Ok(LoadOutcome::Done(result)) => {
+                        match result {
+                            Ok((inserted, tags_applied, loaded_source, elapsed)) => {
+                                self.load_state = LoadState::Done {
+                                    inserted,
+                                    tags_applied,
+                                    elapsed,
+                                };
+                                self.timeline.refresh();
+                                self.available_levels = self.timeline.distinct_levels();
+                                self.available_tags = self.timeline.distinct_tags();
+                                self.loaded_sources.push(loaded_source);
+                                if let Ok(conn) =
+                                    persist::open_session_db(&self.session_paths.sqlite_path)
+                                {
+                                    let _ =
+                                        persist::save_loaded_sources(&conn, &self.loaded_sources);
+                                }
+                                if let Some(next) = self.pending_cli_sources.pop_front() {
+                                    self.source_kind = source_kind_for_path(&next);
+                                    self.source_path = Some(next);
+                                    self.parser_config_path = None;
+                                }
+                            }
+                            Err(err) => self.load_state = LoadState::Failed(err),
+                        }
+                        self.load_rx = None;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        ui.ctx().request_repaint();
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.load_state =
+                            LoadState::Failed("load worker disconnected unexpectedly".to_string());
+                        self.load_rx = None;
+                        break;
+                    }
                 }
             }
         }
@@ -468,14 +592,15 @@ impl eframe::App for PeachApp {
         egui::Panel::top("controls").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(format!("Session: {}", self.session_paths.id));
-                let can_switch_session = !matches!(self.load_state, LoadState::Loading)
+                let can_switch_session = !matches!(self.load_state, LoadState::Loading { .. })
                     && !matches!(self.retag_state, RetagState::Running);
                 if ui
                     .add_enabled(can_switch_session, egui::Button::new("Load session..."))
                     .clicked()
                     && let Some(picked) = rfd::FileDialog::new()
                         .set_directory(
-                            persist::default_sessions_dir()
+                            self.settings
+                                .sessions_dir()
                                 .unwrap_or_else(|_| std::env::temp_dir()),
                         )
                         .add_filter("Session", &["sqlite"])
@@ -483,6 +608,16 @@ impl eframe::App for PeachApp {
                     && let Err(err) = self.load_session(picked)
                 {
                     self.load_state = LoadState::Failed(format!("{err:#}"));
+                }
+                if ui
+                    .add_enabled(can_switch_session, egui::Button::new("Manage sessions..."))
+                    .clicked()
+                    && let Ok(dir) = self.settings.sessions_dir()
+                {
+                    self.session_dialog = SessionManagerDialog::open(&dir);
+                }
+                if ui.button("Settings...").clicked() {
+                    self.settings_dialog = SettingsDialog::open(self.settings.clone());
                 }
             });
 
@@ -562,7 +697,7 @@ impl eframe::App for PeachApp {
                     ui.label(format!("{} rule file(s) selected", self.rule_paths.len()));
                 }
 
-                let can_retag = !matches!(self.load_state, LoadState::Loading)
+                let can_retag = !matches!(self.load_state, LoadState::Loading { .. })
                     && !matches!(self.retag_state, RetagState::Running)
                     && !self.rule_paths.is_empty()
                     && self.timeline.total_rows() > 0;
@@ -591,7 +726,7 @@ impl eframe::App for PeachApp {
                 }
             });
 
-            let can_load = !matches!(self.load_state, LoadState::Loading)
+            let can_load = !matches!(self.load_state, LoadState::Loading { .. })
                 && !matches!(self.retag_state, RetagState::Running)
                 && self.source_path.is_some()
                 && (self.source_kind != SourceKind::Text || self.parser_config_path.is_some());
@@ -605,16 +740,22 @@ impl eframe::App for PeachApp {
                 }
                 match &self.load_state {
                     LoadState::Idle => {}
-                    LoadState::Loading => {
+                    LoadState::Loading { inserted_so_far } => {
                         ui.spinner();
-                        ui.label("Loading...");
+                        if *inserted_so_far > 0 {
+                            ui.label(format!("Loading... {inserted_so_far} entries so far"));
+                        } else {
+                            ui.label("Loading...");
+                        }
                     }
                     LoadState::Done {
                         inserted,
                         tags_applied,
+                        elapsed,
                     } => {
                         ui.label(format!(
-                            "Loaded {inserted} entries, applied {tags_applied} tags"
+                            "Loaded {inserted} entries, applied {tags_applied} tags in {:.1}s",
+                            elapsed.as_secs_f64()
                         ));
                     }
                     LoadState::Failed(err) => {
@@ -645,6 +786,8 @@ impl eframe::App for PeachApp {
         self.poll_tag_preview(ui.ctx());
         self.update_tag_preview_request();
         self.handle_tag_dialog(ui.ctx());
+        self.handle_session_dialog(ui.ctx());
+        self.handle_settings_dialog(ui.ctx());
     }
 }
 
@@ -672,6 +815,7 @@ fn run_load(
     parser_config_path: Option<&Path>,
     rule_paths: &[PathBuf],
     db_path: &Path,
+    progress_tx: &mpsc::Sender<LoadOutcome>,
 ) -> anyhow::Result<(usize, usize, LoadedSource)> {
     let conn = duckdb::Connection::open(db_path)?;
     setup_timeline_schema(&conn)?;
@@ -717,6 +861,10 @@ fn run_load(
         batch.push(entry);
         if batch.len() >= LOAD_BATCH_SIZE {
             tags_applied += flush_batch(&conn, &mut batch, &rules, &sourcetype)?;
+            // Best-effort: if the UI thread has already dropped its
+            // receiver (e.g. app shutting down mid-load), there's nobody
+            // to tell and the load itself must still proceed.
+            let _ = progress_tx.send(LoadOutcome::Progress(inserted));
         }
         Ok(())
     })?;
