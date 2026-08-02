@@ -1,16 +1,22 @@
 # AUL pattern-of-life: system clock changes (relevant to timeline integrity,
 # not just pattern-of-life — a shifted clock affects every other tagged
-# event's apparent time). Substring ported from iLEAPP's
-# logarchive_time_change artifact (github.com/abrignoni/iLEAPP,
-# scripts/artifacts/logarchive.py).
+# event's apparent time). Predicates from "Apple Unified Log Predicates in
+# iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive time change".
 
 [rule]
 name = "aul_time_change"
-description = "System clock shifted"
+description = "System clock shifted, including manual time-setting"
 
 [rule.match]
 sourcetype = "aul"
-message_contains = "Time change: Clock shifted by"
+message_contains = [
+    "Time change: Clock shifted by",
+    "Significant time change",
+    "TMSetManualTime",
+    "setting manual time",
+]
 
 [rule.tag]
 value = "time_change"

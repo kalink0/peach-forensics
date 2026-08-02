@@ -81,14 +81,26 @@ sourcetype = "aul"
 message_contains = ["Screen did lock", "screen is unlocked"]
 ```
 
-See `rules/examples/aul_*.toml` for a pattern-of-life rule pack for AUL
-(screen lock state, app launches, WiFi/Bluetooth status, flashlight, airplane
-mode, tethering, motion state, navigation, volume, clock changes) — the
-message substrings are ported from
-[iLEAPP](https://github.com/abrignoni/iLEAPP)'s `logarchive_*` artifacts
-rather than re-derived from scratch. There is deliberately no call/message
-category yet — iLEAPP itself resolves those from the SMS/CallHistory
-databases rather than Unified Logs, which Peach doesn't parse.
+`rules/examples/aul_*.toml` is a pattern-of-life rule pack for AUL (33 rule
+files covering human presence/handling, communication and input, application
+activity, connectivity, device state and power, media/audio/camera, motion
+and vehicle, and emergency SOS) — the predicates are sourced from "Apple
+Unified Log Predicates in iLEAPP: The Reference" (Alexis Brignoni),
+leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference, rather
+than re-derived from scratch. SMS/message *content* is still out of scope —
+that lives in a separate SQLite database Peach doesn't parse — but call
+tracking itself (`aul_call_events.toml`) is covered directly from Unified Log
+predicates.
+
+Unlike other rule files (which the analyst selects explicitly via "Choose
+tagging rules..."), this pack ships **embedded in the binary itself**
+(`build.rs` bundles every `rules/examples/aul_*.toml` file at compile time —
+see `src/tagging/builtin.rs`) and is applied automatically on every AUL
+load and re-tag by default — no file to locate or select, works the same in
+a release build with no repo nearby. The "Built-in AUL pattern-of-life
+rules" checkbox next to "Choose tagging rules..." turns this off if you want
+to import/re-tag without it; every rule in the pack matches
+`sourcetype = "aul"` on its own, so leaving it on never tags non-AUL rows.
 
 Three modes:
 

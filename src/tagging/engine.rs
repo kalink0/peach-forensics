@@ -94,7 +94,7 @@ pub fn re_tag(conn: &Connection, rules: &[Rule]) -> anyhow::Result<usize> {
     Ok(matches.len())
 }
 
-/// Query-time-only evaluation (section 6: ad-hoc mode) — evaluates `rules`
+/// Query-time-only, ad-hoc evaluation — evaluates `rules`
 /// against every entry currently in `log_entries` and returns the matching
 /// [`EventId`]s without writing anything to `import_tags`. An entry
 /// matching any one of `rules` is included once, not repeated per rule.

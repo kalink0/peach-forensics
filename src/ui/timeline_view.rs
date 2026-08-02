@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -35,6 +36,65 @@ const WINDOW_SIZE: usize = 200;
 struct RowCache {
     offset: usize,
     rows: Vec<DisplayRow>,
+}
+
+/// Display-only formatting of the Level column — appends a human-readable
+/// severity name to a sourcetype's raw numeric level digit (e.g. journald's
+/// `"6"` -> `"6 (info)"`, EVTX's `"2"` -> `"2 (Error)"`). The stored `level`
+/// value itself stays exactly what the parser read (see
+/// `parsers::journald`'s and `parsers::evtx`'s doc comments on why it's
+/// deliberately not remapped there) — this only touches what's rendered in
+/// the table, same forensic "raw stays raw" principle applied to the UI
+/// layer instead of the data layer. Any sourcetype/level combination without
+/// a mapping passes through unchanged.
+fn format_level(level: &str, sourcetype: &str) -> String {
+    let name = match sourcetype {
+        "journald" => match level {
+            "0" => "emerg",
+            "1" => "alert",
+            "2" => "crit",
+            "3" => "err",
+            "4" => "warning",
+            "5" => "notice",
+            "6" => "info",
+            "7" => "debug",
+            _ => return level.to_string(),
+        },
+        // Standard Windows Event Level values (`winmeta.xml`'s
+        // `WINEVENT_LEVEL_*` constants) — defined once at the OS/schema
+        // level and used consistently by every provider, unlike EventData
+        // which varies per provider. 6-255 are provider-defined/reserved,
+        // not part of this fixed set, so they pass through unmapped.
+        "evtx" => match level {
+            "0" => "LogAlways",
+            "1" => "Critical",
+            "2" => "Error",
+            "3" => "Warning",
+            "4" => "Informational",
+            "5" => "Verbose",
+            _ => return level.to_string(),
+        },
+        _ => return level.to_string(),
+    };
+    format!("{level} ({name})")
+}
+
+/// Display-only shortening of the Source column: the last path component for
+/// most sourcetypes (a real filename, e.g. `security.evtx`), but the full
+/// path for AUL. AUL's "file" is actually the directory the analyst picked —
+/// a raw extraction's parent folder, or a `.logarchive` bundle — and its last
+/// path component is frequently a generic name (`"db"`, `"extraction"`) that
+/// doesn't distinguish one AUL source from another the way a real filename
+/// does. The full path is always available via hover regardless of which
+/// form is shown here.
+fn source_display_label<'a>(source_path: &'a str, sourcetype: &str) -> &'a str {
+    if sourcetype == "aul" {
+        return source_path;
+    }
+    std::path::Path::new(source_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(source_path)
 }
 
 /// Virtualized, filterable timeline table: reads only the currently visible
@@ -75,15 +135,33 @@ pub struct TimelineView {
     /// connection + query on every frame while one is already running; the
     /// next frame after it lands re-checks whatever row is visible by then.
     pending_window_offset: Option<usize>,
+    /// Lazily-opened base connection to `db_path`, kept alive for the rest
+    /// of this view's lifetime — see [`Self::try_clone_conn`] for why every
+    /// background thread and foreground query gets a `try_clone()` of this
+    /// instead of independently re-opening the file.
+    conn: RefCell<Option<Connection>>,
+    /// Whether the optional Sourcetype/Host/Process/Event ID/Subsystem/
+    /// Category columns are shown, toggled via the "Columns" picker above
+    /// the table. The Source (file) column is always shown — these default
+    /// to hidden since they're either derivable from the file name
+    /// (Sourcetype) or only populated for sourcetypes with a confirmed
+    /// field mapping (see `timeline_queries::extracted_field_sql`), so
+    /// showing them unconditionally would mean an empty column for most
+    /// sessions.
+    show_sourcetype_column: bool,
+    show_host_column: bool,
+    show_process_column: bool,
+    show_event_code_column: bool,
+    show_subsystem_column: bool,
+    show_category_column: bool,
 }
 
 impl TimelineView {
     /// `session_sqlite_path` is the session's `.sqlite` file — used to
     /// merge `analyst_tags` (manual, per-entry tags) into the Tags column
     /// alongside `import_tags` (rule-produced, lives in `db_path`'s
-    /// DuckDB file instead). Two separate database files by design (see
-    /// CLAUDE.md §4) — merging them is this view's job, not either
-    /// engine's.
+    /// DuckDB file instead). Two separate database files by design —
+    /// merging them is this view's job, not either engine's.
     pub fn new(db_path: PathBuf, session_sqlite_path: PathBuf) -> Self {
         Self {
             db_path,
@@ -97,7 +175,64 @@ impl TimelineView {
             counting: false,
             window_rx: None,
             pending_window_offset: None,
+            conn: RefCell::new(None),
+            show_sourcetype_column: false,
+            show_host_column: false,
+            show_process_column: false,
+            show_event_code_column: false,
+            show_subsystem_column: false,
+            show_category_column: false,
         }
+    }
+
+    /// Hands out a connection to the same open database instance as every
+    /// other clone from this view — and, via `PeachApp`'s own use of this
+    /// method, the same instance `run_load`/`run_retag`/the tag-preview
+    /// count write and read through too. `try_clone()` reconnects to the
+    /// already-open file (no new OS-level file lock); it does not
+    /// independently re-open `db_path` from disk.
+    ///
+    /// This isn't just an optimization: DuckDB only reliably tolerates one
+    /// independent `Connection::open` of a given file at a time within a
+    /// process. A second, unrelated `open` while the first is still alive
+    /// can fail — reliably on Windows (file locks are scoped per handle,
+    /// not per process, so a second handle from the same process still
+    /// conflicts), while POSIX's per-*process* advisory locks mostly hide
+    /// the same hazard, which is why this only ever surfaced as CI
+    /// failures on `windows-latest`.
+    ///
+    /// Opens `db_path` lazily, on the first call — not in `new` — so a
+    /// session nothing has been loaded into yet still has no `.duckdb` file
+    /// on disk. `session_dialog`'s empty-session cleanup keys off exactly
+    /// that file's absence.
+    pub fn try_clone_conn(&self) -> Option<Connection> {
+        if let Some(conn) = self.conn.borrow().as_ref() {
+            return conn.try_clone().ok();
+        }
+        let conn = Connection::open(&self.db_path).ok()?;
+        let clone = conn.try_clone().ok();
+        *self.conn.borrow_mut() = Some(conn);
+        clone
+    }
+
+    /// Drops the base connection [`Self::try_clone_conn`] keeps alive,
+    /// without touching `db_path` itself — the next call to
+    /// `try_clone_conn` transparently reopens it fresh. Call after a large
+    /// bulk load or re-tag finishes.
+    ///
+    /// This isn't just housekeeping: measured directly against a real
+    /// multi-million-row load, DuckDB's Appender-based bulk-insert path
+    /// leaves several GB attached to the database instance that stays
+    /// resident for as long as *any* connection or clone to it remains
+    /// open — but is fully released once every one of them is dropped,
+    /// including this base connection, not just the clone that did the
+    /// actual inserting (that one alone already goes out of scope when
+    /// `run_load`/`run_retag` return). Since every other consumer only
+    /// ever holds a short-lived clone, this base connection — kept alive
+    /// for this view's entire lifetime otherwise — is the one thing still
+    /// pinning that memory once a load/re-tag's own clone is gone.
+    pub fn reopen_connection(&self) {
+        *self.conn.borrow_mut() = None;
     }
 
     pub fn total_rows(&self) -> usize {
@@ -153,12 +288,11 @@ impl TimelineView {
         self.window_rx = None;
         self.pending_window_offset = None;
         let query = self.query.clone();
-        let db_path = self.db_path.clone();
+        let conn = self.try_clone_conn();
         let (tx, rx) = mpsc::channel();
         self.count_rx = Some(rx);
         std::thread::spawn(move || {
-            let total = Connection::open(&db_path)
-                .ok()
+            let total = conn
                 .and_then(|conn| timeline_queries::count_matching(&conn, &query).ok())
                 .unwrap_or(0);
             let _ = tx.send(total);
@@ -190,15 +324,15 @@ impl TimelineView {
     }
 
     /// Kicks off the whole-timeline (unfiltered) count on a background
-    /// thread — same reasoning as `recount`, its own connection since
-    /// `Connection` isn't `Send`.
+    /// thread — same reasoning as `recount`, its own connection (via
+    /// [`Self::try_clone_conn`]) since `Connection` can't be moved into an
+    /// already-running thread.
     fn recount_total(&mut self) {
-        let db_path = self.db_path.clone();
+        let conn = self.try_clone_conn();
         let (tx, rx) = mpsc::channel();
         self.total_rx = Some(rx);
         std::thread::spawn(move || {
-            let total = Connection::open(&db_path)
-                .ok()
+            let total = conn
                 .and_then(|conn| timeline_queries::count_matching(&conn, &Query::default()).ok())
                 .unwrap_or(0);
             let _ = tx.send(total);
@@ -225,26 +359,24 @@ impl TimelineView {
         }
     }
 
-    /// Opens a fresh connection per call rather than reusing a cached one
-    /// — same reasoning as `recount`/`fetch_window`: a load or re-tag
-    /// writes `import_tags`/`log_entries` from its own, separate
-    /// connection on a background thread, and a long-lived connection kept
-    /// around on this side isn't guaranteed to see those writes on its
-    /// next query. That bug was real, not hypothetical: without this, the
-    /// Tag filter row's vocabulary could stay stuck at whatever
-    /// `import_tags` looked like the *first* time this was called, even
-    /// after later tagging added rows — see
+    /// Gets a fresh connection handle per call (via [`Self::try_clone_conn`])
+    /// rather than reusing one — same reasoning as `recount`/`fetch_window`:
+    /// a load or re-tag writes `import_tags`/`log_entries` from its own,
+    /// separate connection on a background thread, and a long-lived
+    /// connection kept around on this side isn't guaranteed to see those
+    /// writes on its next query. That bug was real, not hypothetical:
+    /// without this, the Tag filter row's vocabulary could stay stuck at
+    /// whatever `import_tags` looked like the *first* time this was called,
+    /// even after later tagging added rows — see
     /// `distinct_tags_sees_tags_written_by_a_different_connection_afterward`.
     pub fn distinct_levels(&self) -> Vec<String> {
-        Connection::open(&self.db_path)
-            .ok()
+        self.try_clone_conn()
             .and_then(|conn| timeline_queries::distinct_levels(&conn).ok())
             .unwrap_or_default()
     }
 
     pub fn distinct_tags(&self) -> Vec<String> {
-        Connection::open(&self.db_path)
-            .ok()
+        self.try_clone_conn()
             .and_then(|conn| timeline_queries::distinct_tags(&conn).ok())
             .unwrap_or_default()
     }
@@ -278,18 +410,19 @@ impl TimelineView {
     }
 
     /// Fetches one window on a background thread with its own connections
-    /// (`Connection`/`rusqlite::Connection` aren't `Send`, so the existing
-    /// ones can't just be moved over) and merges in `analyst_tags` there too
-    /// — same reasoning as [`Self::recount`].
+    /// (a `try_clone_conn()` for the timeline, a fresh `rusqlite::Connection`
+    /// for the small per-session SQLite file — `Connection` can't be moved
+    /// into an already-running thread) and merges in `analyst_tags` there
+    /// too — same reasoning as [`Self::recount`].
     fn spawn_window_fetch(&mut self, offset: usize) {
         self.pending_window_offset = Some(offset);
         let query = self.query.clone();
-        let db_path = self.db_path.clone();
+        let conn = self.try_clone_conn();
         let session_sqlite_path = self.session_sqlite_path.clone();
         let (tx, rx) = mpsc::channel();
         self.window_rx = Some(rx);
         std::thread::spawn(move || {
-            let Ok(conn) = Connection::open(&db_path) else {
+            let Some(conn) = conn else {
                 return;
             };
             let Ok(mut rows) = timeline_queries::fetch_window(&conn, &query, offset, WINDOW_SIZE)
@@ -365,18 +498,55 @@ impl TimelineView {
             return None;
         }
 
+        ui.horizontal(|ui| {
+            ui.menu_button("Columns", |ui| {
+                ui.checkbox(&mut self.show_sourcetype_column, "Sourcetype");
+                ui.checkbox(&mut self.show_host_column, "Host");
+                ui.checkbox(&mut self.show_process_column, "Process");
+                ui.checkbox(&mut self.show_event_code_column, "Event ID");
+                ui.checkbox(&mut self.show_subsystem_column, "Subsystem");
+                ui.checkbox(&mut self.show_category_column, "Category");
+            });
+        });
+
         let mut requested = None;
         let total_rows = self.total_rows;
-        TableBuilder::new(ui)
+        let show_sourcetype_column = self.show_sourcetype_column;
+        let show_host_column = self.show_host_column;
+        let show_process_column = self.show_process_column;
+        let show_event_code_column = self.show_event_code_column;
+        let show_subsystem_column = self.show_subsystem_column;
+        let show_category_column = self.show_category_column;
+        let mut table = TableBuilder::new(ui)
             .striped(true)
             // Rows only sense hover by default — a right-click context
             // menu needs click sensing on the row's `response()`, or
             // `.context_menu()` never fires no matter what's inside it.
             .sense(egui::Sense::click())
-            .column(Column::auto().at_least(170.0))
-            .column(Column::auto().at_least(80.0))
-            .column(Column::auto().at_least(140.0))
-            .column(Column::remainder())
+            .column(Column::auto().at_least(170.0)) // Timestamp
+            .column(Column::auto().at_least(80.0)) // Level
+            .column(Column::auto().at_least(140.0)); // Source (file)
+        if show_sourcetype_column {
+            table = table.column(Column::auto().at_least(90.0)); // Sourcetype
+        }
+        if show_host_column {
+            table = table.column(Column::auto().at_least(110.0)); // Host
+        }
+        if show_process_column {
+            table = table.column(Column::auto().at_least(110.0)); // Process
+        }
+        if show_event_code_column {
+            table = table.column(Column::auto().at_least(70.0)); // Event ID
+        }
+        if show_subsystem_column {
+            table = table.column(Column::auto().at_least(140.0)); // Subsystem
+        }
+        if show_category_column {
+            table = table.column(Column::auto().at_least(110.0)); // Category
+        }
+        table
+            .column(Column::auto().at_least(140.0)) // Tags
+            .column(Column::remainder()) // Message
             .header(20.0, |mut header| {
                 header.col(|ui| {
                     ui.strong("Timestamp (UTC)");
@@ -384,6 +554,39 @@ impl TimelineView {
                 header.col(|ui| {
                     ui.strong("Level");
                 });
+                header.col(|ui| {
+                    ui.strong("Source");
+                });
+                if show_sourcetype_column {
+                    header.col(|ui| {
+                        ui.strong("Sourcetype");
+                    });
+                }
+                if show_host_column {
+                    header.col(|ui| {
+                        ui.strong("Host");
+                    });
+                }
+                if show_process_column {
+                    header.col(|ui| {
+                        ui.strong("Process");
+                    });
+                }
+                if show_event_code_column {
+                    header.col(|ui| {
+                        ui.strong("Event ID");
+                    });
+                }
+                if show_subsystem_column {
+                    header.col(|ui| {
+                        ui.strong("Subsystem");
+                    });
+                }
+                if show_category_column {
+                    header.col(|ui| {
+                        ui.strong("Category");
+                    });
+                }
                 header.col(|ui| {
                     ui.strong("Tags");
                 });
@@ -409,9 +612,65 @@ impl TimelineView {
                             && !d.level.is_empty()
                         {
                             let color = categorical_color(&d.level, ui.visuals().dark_mode);
-                            ui.colored_label(color, &d.level);
+                            ui.colored_label(color, format_level(&d.level, &d.sourcetype));
                         }
                     });
+                    let (source_rect, _) = row.col(|ui| {
+                        if let Some(d) = display
+                            && !d.source_path.is_empty()
+                        {
+                            let label = source_display_label(&d.source_path, &d.sourcetype);
+                            ui.label(label).on_hover_text(&d.source_path);
+                        }
+                    });
+                    let sourcetype_rect = if show_sourcetype_column {
+                        let (rect, _) = row.col(|ui| {
+                            ui.label(display.map(|d| d.sourcetype.as_str()).unwrap_or(""));
+                        });
+                        Some(rect)
+                    } else {
+                        None
+                    };
+                    let host_rect = if show_host_column {
+                        let (rect, _) = row.col(|ui| {
+                            ui.label(display.map(|d| d.host.as_str()).unwrap_or(""));
+                        });
+                        Some(rect)
+                    } else {
+                        None
+                    };
+                    let process_rect = if show_process_column {
+                        let (rect, _) = row.col(|ui| {
+                            ui.label(display.map(|d| d.process.as_str()).unwrap_or(""));
+                        });
+                        Some(rect)
+                    } else {
+                        None
+                    };
+                    let event_code_rect = if show_event_code_column {
+                        let (rect, _) = row.col(|ui| {
+                            ui.label(display.map(|d| d.event_code.as_str()).unwrap_or(""));
+                        });
+                        Some(rect)
+                    } else {
+                        None
+                    };
+                    let subsystem_rect = if show_subsystem_column {
+                        let (rect, _) = row.col(|ui| {
+                            ui.label(display.map(|d| d.subsystem.as_str()).unwrap_or(""));
+                        });
+                        Some(rect)
+                    } else {
+                        None
+                    };
+                    let category_rect = if show_category_column {
+                        let (rect, _) = row.col(|ui| {
+                            ui.label(display.map(|d| d.category.as_str()).unwrap_or(""));
+                        });
+                        Some(rect)
+                    } else {
+                        None
+                    };
                     let (tags_rect, _) = row.col(|ui| {
                         if let Some(d) = display {
                             ui.horizontal_wrapped(|ui| {
@@ -429,7 +688,7 @@ impl TimelineView {
                         if let Some(d) = display {
                             let event_id = d.event_id;
                             let message = d.message.clone();
-                            let db_path = self.db_path.clone();
+                            let conn = self.try_clone_conn();
                             let timestamp = chrono::NaiveDateTime::parse_from_str(
                                 &d.timestamp_utc,
                                 "%Y-%m-%d %H:%M:%S%.f",
@@ -444,13 +703,27 @@ impl TimelineView {
                             // for reasons not fully pinned down in
                             // egui_extras' per-cell layout internals.
                             // Explicitly interacting over the whole row's
-                            // rect (spanning all four cells, computed from
-                            // what `row.col` already returned) sidesteps
-                            // that entirely.
-                            let full_row_rect = ts_rect
+                            // rect (spanning every cell, computed from what
+                            // `row.col` already returned) sidesteps that
+                            // entirely.
+                            let mut full_row_rect = ts_rect
                                 .union(level_rect)
+                                .union(source_rect)
                                 .union(tags_rect)
                                 .union(ui.max_rect());
+                            for optional_rect in [
+                                sourcetype_rect,
+                                host_rect,
+                                process_rect,
+                                event_code_rect,
+                                subsystem_rect,
+                                category_rect,
+                            ]
+                            .into_iter()
+                            .flatten()
+                            {
+                                full_row_rect = full_row_rect.union(optional_rect);
+                            }
                             let row_response = ui.interact(
                                 full_row_rect,
                                 ui.id().with(("row_context_menu", row_index)),
@@ -463,8 +736,7 @@ impl TimelineView {
                                     ui.close();
                                 }
                                 if ui.button("Copy whole event as text").clicked() {
-                                    if let Some(text) = Connection::open(&db_path)
-                                        .ok()
+                                    if let Some(text) = conn
                                         .and_then(|conn| {
                                             timeline_queries::fetch_full_entry(&conn, event_id).ok()
                                         })
@@ -530,6 +802,91 @@ mod tests {
     use crate::db::timeline_schema::setup_timeline_schema;
     use crate::model::event_id::{EventId, SequenceCounter, SourceFileId};
     use chrono::Utc;
+
+    #[test]
+    fn format_level_appends_the_syslog_severity_name_for_journald() {
+        assert_eq!(format_level("6", "journald"), "6 (info)");
+        assert_eq!(format_level("0", "journald"), "0 (emerg)");
+        assert_eq!(format_level("7", "journald"), "7 (debug)");
+    }
+
+    #[test]
+    fn format_level_leaves_unmapped_sourcetypes_untouched() {
+        assert_eq!(format_level("ERROR", "text_config"), "ERROR");
+        assert_eq!(format_level("Info", "aul"), "Info");
+    }
+
+    #[test]
+    fn format_level_passes_through_an_unrecognized_journald_digit() {
+        assert_eq!(format_level("9", "journald"), "9");
+    }
+
+    #[test]
+    fn format_level_appends_the_windows_event_level_name_for_evtx() {
+        assert_eq!(format_level("2", "evtx"), "2 (Error)");
+        assert_eq!(format_level("3", "evtx"), "3 (Warning)");
+        assert_eq!(format_level("4", "evtx"), "4 (Informational)");
+    }
+
+    #[test]
+    fn source_display_label_shows_the_full_path_for_aul() {
+        // AUL's "file" is a directory the analyst picked — its last path
+        // component (e.g. "db") isn't distinctive the way a real filename
+        // is, so the full path is shown instead of being truncated.
+        assert_eq!(
+            source_display_label("/home/kalinko/Documents/temp/db", "aul"),
+            "/home/kalinko/Documents/temp/db"
+        );
+    }
+
+    #[test]
+    fn source_display_label_shows_only_the_filename_for_other_sourcetypes() {
+        assert_eq!(
+            source_display_label("/var/log/security.evtx", "evtx"),
+            "security.evtx"
+        );
+        assert_eq!(
+            source_display_label("/var/log/syslog", "journald"),
+            "syslog"
+        );
+    }
+
+    #[test]
+    fn format_level_passes_through_an_unrecognized_evtx_level() {
+        // 6-255 are provider-defined/reserved, not part of the fixed
+        // standard set — must not be mapped to a guessed name.
+        assert_eq!(format_level("16", "evtx"), "16");
+    }
+
+    #[test]
+    fn reopen_connection_still_works_afterward() {
+        let db_path = temp_db_path("reopen");
+        let view = TimelineView::new(db_path.clone(), temp_sqlite_path("session"));
+        let first = view.try_clone_conn().unwrap();
+        first.execute("CREATE TABLE t (x INTEGER)", []).unwrap();
+        drop(first);
+
+        view.reopen_connection();
+
+        let second = view.try_clone_conn().unwrap();
+        let count: i64 = second
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    #[test]
+    fn reopen_connection_before_the_file_ever_existed_is_a_no_op() {
+        let db_path = temp_db_path("reopen-empty");
+        let view = TimelineView::new(db_path.clone(), temp_sqlite_path("session"));
+
+        // No try_clone_conn() call yet — self.conn is already None, and
+        // reopen_connection() must tolerate that instead of panicking.
+        view.reopen_connection();
+
+        assert!(!db_path.exists());
+    }
 
     #[test]
     fn context_window_query_writes_a_whitespace_free_iso_bound_on_each_side() {
@@ -668,11 +1025,11 @@ mod tests {
     /// `distinct_tags()` once (via `LoadOutcome::Done`) while `import_tags`
     /// is still empty. Loading a *second* source with rules selected, or
     /// clicking "Re-tag now" afterward, writes new rows into `import_tags`
-    /// from a completely different `Connection` (its own background
-    /// thread, exactly like `run_load`/`run_retag`) and then calls
-    /// `distinct_tags()` again. That second call must see the new tag —
-    /// not whatever `import_tags` looked like when the first call happened
-    /// to run.
+    /// from a different `Connection` — a `try_clone_conn()` sibling, its own
+    /// background thread, exactly like `run_load`/`run_retag` — and then
+    /// calls `distinct_tags()` again. That second call must see the new tag
+    /// — not whatever `import_tags` looked like when the first call
+    /// happened to run.
     #[test]
     fn distinct_tags_sees_tags_written_by_a_different_connection_afterward() {
         let db_path = temp_db_path("distinct-tags-fresh-read");
@@ -682,7 +1039,14 @@ mod tests {
         assert_eq!(view.distinct_tags(), Vec::<String>::new());
 
         {
-            let conn = Connection::open(&db_path).unwrap();
+            // Not an independent `Connection::open` of the same file: `view`
+            // already holds `db_path` open (lazily, since the assertion
+            // above), and a second, unrelated `open` while that's alive is
+            // exactly the Windows lock conflict `try_clone_conn` exists to
+            // avoid. `try_clone_conn()` still hands back a genuinely
+            // different `Connection` object, which is what this test needs
+            // to exercise.
+            let conn = view.try_clone_conn().unwrap();
             let event_id = EventId {
                 source_file_id: SourceFileId::new_random(),
                 sequence_number: SequenceCounter::new().next_sequence_number(),

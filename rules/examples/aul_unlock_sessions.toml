@@ -1,0 +1,26 @@
+# AUL pattern-of-life: unlock session durations ("Was locked for N seconds"),
+# authentication requests with type and outcome (passcode vs. biometric,
+# including failures), chronod locked-state transitions, APFS volume unlock,
+# and locks from the side button. Finer-grained companion to
+# aul_screen_lock_state. Predicates from "Apple Unified Log Predicates in
+# iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive unlock sessions and method".
+
+[rule]
+name = "aul_unlock_sessions"
+description = "Unlock session duration, authentication method, and outcome"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Screen did unlock (Was locked for",
+    "Screen did lock (Was unlocked for",
+    "Processed authentication request",
+    "Transition: locked ->",
+    "apfs is being UN-locked",
+    "lock button source",
+]
+
+[rule.tag]
+value = "unlock_sessions"

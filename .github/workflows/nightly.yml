@@ -1,0 +1,179 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for new commits since last nightly/release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          head_sha="${{ github.sha }}"
+
+          # Reference points: the existing "nightly" tag and the latest stable
+          # (non-prerelease) release. Whichever is newer is the baseline.
+          nightly_sha=$(gh api "repos/${{ github.repository }}/commits/nightly" --jq .sha 2>/dev/null || true)
+          latest_tag=$(gh release list --repo "${{ github.repository }}" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
+          latest_sha=""
+          if [ -n "$latest_tag" ]; then
+            latest_sha=$(gh api "repos/${{ github.repository }}/commits/$latest_tag" --jq .sha 2>/dev/null || true)
+          fi
+
+          ref_sha=""
+          for sha in "$nightly_sha" "$latest_sha"; do
+            [ -z "$sha" ] && continue
+            if [ -z "$ref_sha" ] || [ "$(git show -s --format=%ct "$sha")" -gt "$(git show -s --format=%ct "$ref_sha")" ]; then
+              ref_sha="$sha"
+            fi
+          done
+
+          if [ -z "$ref_sha" ]; then
+            echo "No prior nightly tag or release found — running build."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          count=$(git rev-list "$ref_sha".."$head_sha" --count)
+          if [ "$count" -gt 0 ]; then
+            echo "$count new commit(s) since $ref_sha — running build."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No new commits since $ref_sha — skipping nightly build."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: github.event_name == 'workflow_dispatch' || needs.check.outputs.should_run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: peach-linux
+          - os: windows-latest
+            artifact_name: peach-windows
+          - os: macos-latest
+            artifact_name: peach-macos-arm
+          - os: macos-15-intel
+            artifact_name: peach-macos-intel
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set build identifier (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          BUILD_ID="$(date -u +%Y%m%d)-nightly-${GITHUB_SHA::7}"
+          echo "BUILD_ID=$BUILD_ID" >> "$GITHUB_ENV"
+          echo "PEACH_BUILD_TAG=$BUILD_ID" >> "$GITHUB_ENV"
+
+      - name: Set build identifier (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          $buildId = "$(Get-Date -AsUTC -Format 'yyyyMMdd')-nightly-$sha"
+          echo "BUILD_ID=$buildId" >> $env:GITHUB_ENV
+          echo "PEACH_BUILD_TAG=$buildId" >> $env:GITHUB_ENV
+
+      - name: Build (release)
+        run: cargo build --release --all-features --verbose
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: tar -C target/release -czf "${{ matrix.artifact_name }}-${{ env.BUILD_ID }}.tar.gz" peach
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path target\release\peach.exe -DestinationPath "${{ matrix.artifact_name }}-${{ env.BUILD_ID }}.zip"
+
+      - name: Upload artifact (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}-${{ env.BUILD_ID }}.tar.gz
+          retention-days: 1
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}-${{ env.BUILD_ID }}.zip
+          retention-days: 1
+
+  release:
+    needs: [check, build]
+    if: github.event_name == 'workflow_dispatch' || needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: peach-linux
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: peach-macos-arm
+
+      - name: Download macOS Intel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: peach-macos-intel
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: peach-windows
+
+      - name: Delete existing nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete nightly --repo ${{ github.repository }} --yes --cleanup-tag || true
+
+      - name: Create nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE=$(date -u '+%Y-%m-%d')
+          gh release create nightly \
+            --repo ${{ github.repository }} \
+            --title "Nightly Build (${DATE})" \
+            --notes "Automated nightly build from \`main\`. Not a stable release." \
+            --prerelease \
+            peach-linux-*.tar.gz \
+            peach-macos-arm-*.tar.gz \
+            peach-macos-intel-*.tar.gz \
+            peach-windows-*.zip

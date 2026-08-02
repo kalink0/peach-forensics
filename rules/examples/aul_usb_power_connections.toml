@@ -1,0 +1,19 @@
+# AUL pattern-of-life: cable attach/detach at two layers — powerd's
+# experienced plugin state changes and the kernel cable-detect shim.
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive USB and power connections".
+
+[rule]
+name = "aul_usb_power_connections"
+description = "USB/power cable attach and detach"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "plugin state changed to",
+    "IOAccessoryUSBConnectShim",
+]
+
+[rule.tag]
+value = "usb_power_connections"

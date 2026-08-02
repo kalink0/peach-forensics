@@ -14,11 +14,18 @@ use crate::parsers::{LogParser, ParserConfig};
 /// 4=Informational) — not remapped into an invented ERROR/WARN/INFO scheme,
 /// consistent with how [`crate::parsers::aul`] handles `LogType`.
 ///
-/// `message` is always `None`: the crate doesn't render human-readable
-/// event text (that needs the OS's message-resource DLLs/templates, which
-/// it deliberately doesn't ship). `EventData` is preserved in full in
-/// `raw`/`fields` instead, so nothing is lost — it's just not in the
-/// at-a-glance column for this sourcetype.
+/// `message` is `Event.RenderingInfo.Message` when present, `None`
+/// otherwise. `RenderingInfo` is an *optional* sibling of `System`/
+/// `EventData` under `Event` (`RenderingInfoType`, `minOccurs="0"` in
+/// Microsoft's own MS-EVEN6 schema, bundled with the `evtx` crate) — present
+/// when the file was produced by something that rendered the event before
+/// writing it out (e.g. Windows Event Forwarding's collector side), absent
+/// for a plain live `winevt\Logs\*.evtx` read directly, since rendering
+/// needs the source machine's message-resource DLLs/templates, which this
+/// crate deliberately doesn't ship or emulate. Never fabricated — if the
+/// file didn't embed it, `message` stays empty, same as before. `EventData`
+/// is preserved in full in `raw`/`fields` regardless, so nothing is lost
+/// either way.
 ///
 /// No config-driven field-mapping, like AUL — `ParserConfig.extra` is
 /// unused.
@@ -28,10 +35,9 @@ use crate::parsers::{LogParser, ParserConfig};
 /// per-record `Result` carries no partial data on error (not even a
 /// timestamp), so there's nothing to represent as a visible-but-broken
 /// timeline entry the way AUL's oversize-string failures can be. A
-/// per-source opt-in "skip and log bad records" mode is planned but not
-/// built yet (see the `parser-error-handling-roadmap` project note) — it
-/// needs a shared change to `LogParser::parse`'s return shape, not a
-/// one-off here.
+/// per-source opt-in "skip and log bad records" mode would need a shared
+/// change to `LogParser::parse`'s return shape, not a one-off here, so it
+/// isn't built yet.
 ///
 /// Testing note: like `aul.rs`, this module's tests exercise the
 /// mapping/conversion logic against hand-built records, not a real
@@ -70,6 +76,10 @@ fn to_parsed_record(
         .data
         .pointer("/Event/System/Level")
         .and_then(json_value_to_plain_string);
+    let message = record
+        .data
+        .pointer("/Event/RenderingInfo/Message")
+        .and_then(json_value_to_plain_string);
 
     let event = record
         .data
@@ -85,7 +95,7 @@ fn to_parsed_record(
     Ok(ParsedRecord {
         timestamp_utc,
         level,
-        message: None,
+        message,
         raw,
         fields,
     })
@@ -151,7 +161,11 @@ mod tests {
     }
 
     #[test]
-    fn message_is_always_none() {
+    fn message_is_none_without_rendering_info() {
+        // The common case: a plain live winevt\Logs\*.evtx read directly
+        // has no RenderingInfo (needs a message-resource DLL/template this
+        // crate doesn't ship or emulate) — message stays empty, not
+        // fabricated from EventData or anything else.
         let record = sample_record(
             1,
             jiff::Timestamp::from_second(0).unwrap(),
@@ -161,6 +175,35 @@ mod tests {
         let parsed = to_parsed_record(record).unwrap();
 
         assert_eq!(parsed.message, None);
+    }
+
+    #[test]
+    fn message_is_taken_from_rendering_info_when_present() {
+        // RenderingInfo appears when the source file was produced by
+        // something that rendered the event before writing it out (e.g.
+        // Windows Event Forwarding) — confirmed via Microsoft's own
+        // MS-EVEN6 schema (`RenderingInfoType`, bundled with the `evtx`
+        // crate), not guessed.
+        let record = sample_record(
+            1,
+            jiff::Timestamp::from_second(0).unwrap(),
+            serde_json::json!({
+                "Event": {
+                    "System": {},
+                    "RenderingInfo": {
+                        "Message": "An account failed to log on.",
+                        "Level": "Information"
+                    }
+                }
+            }),
+        );
+
+        let parsed = to_parsed_record(record).unwrap();
+
+        assert_eq!(
+            parsed.message.as_deref(),
+            Some("An account failed to log on.")
+        );
     }
 
     #[test]

@@ -26,10 +26,16 @@ pub fn new_session_id() -> String {
         .to_string()
 }
 
-/// A session is a `<id>.duckdb` + `<id>.sqlite` pair in the same directory
-/// — the DuckDB file holds the already-parsed timeline (so re-opening a
-/// session never re-parses evidence), the SQLite file holds analyst tags
-/// and `session_state` (loaded-source list, search query).
+/// A session is its own `<id>/` subdirectory of the sessions directory,
+/// holding an `<id>.duckdb` + `<id>.sqlite` pair (filenames still carry the
+/// timestamp-embedding id, not just the directory — self-describing even if
+/// a file ends up separated from its directory) — the DuckDB file holds the
+/// already-parsed timeline (so re-opening a session never re-parses
+/// evidence), the SQLite file holds analyst tags and `session_state`
+/// (loaded-source list, search query). One directory per session (rather
+/// than all sessions' files side by side in one shared directory) means the
+/// whole session is exactly one thing to copy/move/zip for a hand-off —
+/// see `ui/session_dialog.rs`'s "Open folder" action.
 #[derive(Debug, Clone)]
 pub struct SessionPaths {
     pub id: String,
@@ -38,27 +44,50 @@ pub struct SessionPaths {
 }
 
 impl SessionPaths {
+    /// Pure path computation, no filesystem access — a fresh session's
+    /// directory doesn't exist on disk yet at this point. Callers that are
+    /// actually creating a new session (not just deriving paths for one
+    /// that's already there, e.g. `from_sqlite_path`) must call
+    /// [`Self::ensure_dir`] before opening either file.
     pub fn new_in(dir: &Path, id: impl Into<String>) -> Self {
         let id = id.into();
+        let session_dir = dir.join(&id);
         Self {
-            duckdb_path: dir.join(format!("{id}.duckdb")),
-            sqlite_path: dir.join(format!("{id}.sqlite")),
+            duckdb_path: session_dir.join(format!("{id}.duckdb")),
+            sqlite_path: session_dir.join(format!("{id}.sqlite")),
             id,
         }
     }
 
-    /// Derives the paired `.duckdb` path from a chosen `.sqlite` session
-    /// file (e.g. from a "Load session..." file dialog).
+    /// Derives the sibling `<id>.duckdb` path from a chosen `<id>.sqlite`
+    /// file (e.g. from a "Load session..." file dialog) — the session's
+    /// directory already exists in this case, so unlike `new_in` at
+    /// session-creation time, there's nothing to create here.
     pub fn from_sqlite_path(sqlite_path: &Path) -> anyhow::Result<Self> {
         let id = sqlite_path
             .file_stem()
             .and_then(|s| s.to_str())
             .ok_or_else(|| anyhow::anyhow!("invalid session file name: {}", sqlite_path.display()))?
             .to_string();
-        let dir = sqlite_path
+        let session_dir = sqlite_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("session file has no parent directory"))?;
-        Ok(Self::new_in(dir, id))
+        let sessions_dir = session_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("session directory has no parent directory"))?;
+        Ok(Self::new_in(sessions_dir, id))
+    }
+
+    /// Creates this session's directory if it doesn't exist yet — call
+    /// before opening `duckdb_path`/`sqlite_path` for a session just minted
+    /// by [`new_session_id`]. A no-op (not an error) if it's already there.
+    pub fn ensure_dir(&self) -> anyhow::Result<()> {
+        let dir = self
+            .sqlite_path
+            .parent()
+            .expect("sqlite_path always has a parent — it's `session_dir/<id>.sqlite`");
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create session directory {}", dir.display()))
     }
 }
 
@@ -119,12 +148,12 @@ pub fn load_search_query(conn: &Connection) -> anyhow::Result<Option<String>> {
     get_session_state(conn, SEARCH_QUERY_KEY)
 }
 
-/// Records a manual, analyst-driven tag on one entry — the "fourth,
-/// analyst-driven layer" from the tagging design (CLAUDE.md §6), kept
-/// separate from rule-produced `import_tags` precisely because it isn't
-/// rule-based: no `rule_name` to attribute it to. Allows duplicates on
-/// purpose (no uniqueness check) — a second manual tag with the same value
-/// is harmless and simpler than silently swallowing a re-click.
+/// Records a manual, analyst-driven tag on one entry — a fourth tagging
+/// layer alongside import-time/re-tag/ad-hoc rule matching, kept separate
+/// from rule-produced `import_tags` precisely because it isn't rule-based:
+/// no `rule_name` to attribute it to. Allows duplicates on purpose (no
+/// uniqueness check) — a second manual tag with the same value is harmless
+/// and simpler than silently swallowing a re-click.
 pub fn insert_analyst_tag(
     conn: &Connection,
     event_id: EventId,
@@ -197,28 +226,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_paths_derive_matching_duckdb_and_sqlite_files() {
+    fn session_paths_derive_matching_duckdb_and_sqlite_files_in_their_own_subdir() {
         let paths = SessionPaths::new_in(Path::new("/sessions"), "session-20260729-153000");
         assert_eq!(
             paths.duckdb_path,
-            Path::new("/sessions/session-20260729-153000.duckdb")
+            Path::new("/sessions/session-20260729-153000/session-20260729-153000.duckdb")
         );
         assert_eq!(
             paths.sqlite_path,
-            Path::new("/sessions/session-20260729-153000.sqlite")
+            Path::new("/sessions/session-20260729-153000/session-20260729-153000.sqlite")
         );
     }
 
     #[test]
     fn from_sqlite_path_round_trips_the_id() {
-        let paths =
-            SessionPaths::from_sqlite_path(Path::new("/sessions/session-20260729-153000.sqlite"))
-                .unwrap();
+        let paths = SessionPaths::from_sqlite_path(Path::new(
+            "/sessions/session-20260729-153000/session-20260729-153000.sqlite",
+        ))
+        .unwrap();
         assert_eq!(paths.id, "session-20260729-153000");
         assert_eq!(
             paths.duckdb_path,
-            Path::new("/sessions/session-20260729-153000.duckdb")
+            Path::new("/sessions/session-20260729-153000/session-20260729-153000.duckdb")
         );
+    }
+
+    #[test]
+    fn ensure_dir_creates_the_session_subdirectory() {
+        let dir = std::env::temp_dir().join(format!(
+            "peach-persist-test-ensure-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let paths = SessionPaths::new_in(&dir, "session-20260729-153000");
+        assert!(!paths.sqlite_path.parent().unwrap().exists());
+
+        paths.ensure_dir().unwrap();
+
+        assert!(paths.sqlite_path.parent().unwrap().is_dir());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

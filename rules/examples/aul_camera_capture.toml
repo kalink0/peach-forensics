@@ -1,0 +1,28 @@
+# AUL pattern-of-life: the capture chain from shutter to library — capture
+# mode changes, moment capture begin/commit, still image capture, and
+# assetsd adding the result to the photo library with IMG_ filenames when
+# not redacted. Ties a specific photo's creation to hands-on camera use,
+# and survives the photo's later deletion for as long as the log entry
+# lives. Predicates from "Apple Unified Log Predicates in iLEAPP: The
+# Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive camera capture".
+
+[rule]
+name = "aul_camera_capture"
+description = "Camera shutter to photo/video library capture chain"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "will change to: Photo",
+    "MomentCapture",
+    "Still image capture type",
+    "IrisWillBeginCapture",
+    "added photo to library",
+    "added video to library",
+    "Created asset IMG",
+]
+
+[rule.tag]
+value = "camera_capture"

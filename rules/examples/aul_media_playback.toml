@@ -1,0 +1,19 @@
+# AUL pattern-of-life: the MediaRemote category — now-playing state with the
+# originating app's bundle id, playback state changes, and route
+# information (duration, elapsed time, AirPlay target names). Activity and
+# alibi evidence. Matches on AUL's structured `category` field, not a
+# message substring. Predicates from "Apple Unified Log Predicates in
+# iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive media playback".
+
+[rule]
+name = "aul_media_playback"
+description = "Media now-playing state, playback changes, and route info"
+
+[rule.match]
+sourcetype = "aul"
+category = "MediaRemote"
+
+[rule.tag]
+value = "media_playback"

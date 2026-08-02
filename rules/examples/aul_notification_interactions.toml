@@ -1,0 +1,24 @@
+# AUL pattern-of-life: notifications the user did something with —
+# removals, group expansion, cell default actions (a tap-through into the
+# app), long-look presentation, and replies from the notification itself.
+# Content is not recorded, only that interaction happened. Predicates from
+# "Apple Unified Log Predicates in iLEAPP: The Reference" (Alexis
+# Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive notification interactions".
+
+[rule]
+name = "aul_notification_interactions"
+description = "User interaction with a notification (removal, tap-through, reply, ...)"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "removing notification request",
+    "expanding notification group",
+    "notification cell executing default action",
+    "will present long look",
+    "action reply for notification",
+]
+
+[rule.tag]
+value = "notification_interactions"

@@ -1,6 +1,7 @@
 # AUL pattern-of-life: personal hotspot/tethering state.
-# Substrings ported from iLEAPP's logarchive_tethering artifact
-# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive personal hotspot".
 
 [rule]
 name = "aul_tethering"

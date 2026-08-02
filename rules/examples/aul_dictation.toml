@@ -1,0 +1,22 @@
+# AUL pattern-of-life: voice input instead of typed input — dictation start
+# with the keyboard language code, begin/end feedback, and the assistantd
+# record type that distinguishes keyboard dictation from a Siri request.
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive dictation".
+
+[rule]
+name = "aul_dictation"
+description = "Voice dictation (keyboard mic input) start/end"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "DictationConnection startDictation",
+    "Dictation did begin",
+    "Dictation did end",
+    "CSAudioRecordTypeDictation",
+]
+
+[rule.tag]
+value = "dictation"

@@ -1,8 +1,9 @@
 # AUL pattern-of-life: Bluetooth connection state, including call/handsfree
-# audio routing (there is no dedicated CallKit rule yet — see the
-# aul-pattern-of-life-categorization memory note on why calls/messages were
-# deferred). Substrings ported from iLEAPP's logarchive_bluetooth_status
-# artifact (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+# audio routing (pairing/discovery is a separate rule, aul_bluetooth_pairing;
+# call tracking itself is aul_call_events).
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive bluetooth status".
 
 [rule]
 name = "aul_bluetooth_status"
@@ -36,6 +37,7 @@ message_contains = [
     "handsfree device connected",
     "Bluetooth state updated",
     "Bluetooth power is now off",
+    "Bluetooth state",
     "Sending call state update",
     "A2DP LinkQualityReport",
 ]

@@ -4,8 +4,9 @@ use std::sync::mpsc;
 
 use anyhow::Context;
 use eframe::egui;
+use rayon::prelude::*;
 
-use crate::config::{self, Settings};
+use crate::config::{self, Settings, Theme};
 use crate::db::timeline_queries::{self, Query};
 use crate::db::timeline_schema::setup_timeline_schema;
 use crate::model::event_id::SourceFileId;
@@ -19,10 +20,12 @@ use crate::session::persist::{self, LoadedSource, SessionPaths};
 use crate::tagging::engine::{apply_import_time, re_tag};
 use crate::tagging::rule::Rule;
 use crate::tagging::rule_file;
+use crate::ui::about_dialog::{self, AboutDialog};
 use crate::ui::filter_bar::FilterBar;
 use crate::ui::session_dialog::{self, SessionManagerDialog, SessionManagerOutcome};
 use crate::ui::settings_dialog::{SettingsDialog, SettingsOutcome};
 use crate::ui::tag_dialog::{TagDialog, TagDialogOutcome};
+use crate::ui::theme;
 use crate::ui::timeline_view::{RowAction, TimelineView};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,19 +37,50 @@ enum SourceKind {
 }
 
 enum LoadOutcome {
-    /// Sent every [`LOAD_BATCH_SIZE`] entries during a load — the running
-    /// insert count so far. Not a fraction of a known total: a source's
-    /// total entry count generally isn't knowable without a full parse
-    /// pass, which would mean parsing twice (against the streaming design
-    /// `run_load`'s doc comment explains) just to show an ETA.
-    Progress(usize),
-    Done(Result<(usize, usize, LoadedSource, std::time::Duration), String>),
+    /// Sent every [`LOAD_BATCH_SIZE`] entries, and whenever a file
+    /// finishes, during a load — running totals across every file when
+    /// the source is a folder (never reset mid-load). `inserted` isn't a
+    /// fraction of a known total: a source's total *entry* count generally
+    /// isn't knowable without a full parse pass, which would mean parsing
+    /// twice (against the streaming design `run_load`'s doc comment
+    /// explains) just to show an ETA. `bytes_done`/`bytes_total` fill that
+    /// gap with a real, data-based fraction instead — known upfront from
+    /// file sizes, at file-level granularity (jumps per completed file,
+    /// not smoothly within one — see `run_load`).
+    Progress {
+        inserted: usize,
+        bytes_done: u64,
+        bytes_total: u64,
+    },
+    Done(Result<(LoadSummary, std::time::Duration), String>),
+}
+
+/// A file `run_load` found (via `collect_source_files`) but didn't produce
+/// any timeline entries from — either a real parse error, or a file that
+/// parsed cleanly but matched nothing (see `load_one_file`). Surfaced to
+/// the analyst rather than silently dropped — forensic tooling doesn't get
+/// to make a file's evidence quietly disappear from the load result just
+/// because it didn't parse.
+struct SkippedFile {
+    path: PathBuf,
+    reason: String,
+}
+
+/// What one `run_load` call — one file, or every matching file under a
+/// recursively-loaded folder — accomplished.
+struct LoadSummary {
+    inserted: usize,
+    tags_applied: usize,
+    loaded_sources: Vec<LoadedSource>,
+    skipped: Vec<SkippedFile>,
 }
 
 enum LoadState {
     Idle,
     Loading {
         inserted_so_far: usize,
+        bytes_done: u64,
+        bytes_total: u64,
     },
     Done {
         inserted: usize,
@@ -58,6 +92,9 @@ enum LoadState {
         /// itself, just a quick way to gauge how this source/machine
         /// performs.
         elapsed: std::time::Duration,
+        /// Files `collect_source_files` found but that produced no
+        /// entries — empty for the common single-good-file case.
+        skipped: Vec<SkippedFile>,
     },
     Failed(String),
 }
@@ -89,6 +126,13 @@ pub struct PeachApp {
     source_path: Option<PathBuf>,
     parser_config_path: Option<PathBuf>,
     rule_paths: Vec<PathBuf>,
+    /// Whether the embedded AUL pattern-of-life pack
+    /// (`tagging::builtin::aul_pattern_of_life_rules`) is applied alongside
+    /// `rule_paths` on every load/re-tag. On by default — the analyst can
+    /// still see and turn it off, it just isn't opt-in by default, since
+    /// pattern-of-life categorization is the normal AUL workflow, not an
+    /// advanced feature (see `docs/`).
+    use_builtin_aul_rules: bool,
     load_state: LoadState,
     load_rx: Option<mpsc::Receiver<LoadOutcome>>,
     retag_state: RetagState,
@@ -103,6 +147,11 @@ pub struct PeachApp {
     session_dialog: SessionManagerDialog,
     settings: Settings,
     settings_dialog: SettingsDialog,
+    about_dialog: AboutDialog,
+    /// Wall-clock anchor for the `Theme::Rainbow` animation — see
+    /// `theme::tick`'s doc comment for why it's elapsed-time-based rather
+    /// than a per-frame step.
+    rainbow_start: Option<std::time::Instant>,
     tag_preview_rx: Option<mpsc::Receiver<usize>>,
     /// The pattern the current/last `tag_preview` count corresponds to —
     /// lets the UI tell "counting a stale pattern" apart from "count for
@@ -163,6 +212,10 @@ impl PeachApp {
         // (currently still-empty) session gets created.
         session_dialog::sweep_empty_sessions(&sessions_dir);
         let session_paths = SessionPaths::new_in(&sessions_dir, persist::new_session_id());
+        // Best-effort, same reasoning as the `open_session_db` call right
+        // after it: a failure here just means this run's session doesn't
+        // persist, not a crash on startup.
+        let _ = session_paths.ensure_dir();
         let _ = persist::open_session_db(&session_paths.sqlite_path);
         let db_path = session_paths.duckdb_path.clone();
 
@@ -178,6 +231,7 @@ impl PeachApp {
             source_path,
             parser_config_path: None,
             rule_paths: Vec::new(),
+            use_builtin_aul_rules: true,
             load_state: LoadState::Idle,
             load_rx: None,
             retag_state: RetagState::Idle,
@@ -191,6 +245,8 @@ impl PeachApp {
             session_dialog: SessionManagerDialog::Closed,
             settings,
             settings_dialog: SettingsDialog::Closed,
+            about_dialog: AboutDialog::Closed,
+            rainbow_start: None,
             tag_preview_rx: None,
             tag_preview_pattern: String::new(),
             tag_preview: None,
@@ -224,18 +280,24 @@ impl PeachApp {
     }
 
     fn start_retag(&mut self) {
-        if self.rule_paths.is_empty() {
+        if self.rule_paths.is_empty() && !self.use_builtin_aul_rules {
             return;
         }
+        let Some(conn) = self.timeline.try_clone_conn() else {
+            self.retag_state =
+                RetagState::Failed("failed to open a database connection for re-tagging".into());
+            return;
+        };
         let (tx, rx) = mpsc::channel();
         self.retag_rx = Some(rx);
         self.retag_state = RetagState::Running;
 
-        let db_path = self.db_path.clone();
         let rule_paths = self.rule_paths.clone();
+        let include_builtin_aul_rules = self.use_builtin_aul_rules;
 
         std::thread::spawn(move || {
-            let result = run_retag(&rule_paths, &db_path).map_err(|err| format!("{err:#}"));
+            let result = run_retag(&rule_paths, include_builtin_aul_rules, conn)
+                .map_err(|err| format!("{err:#}"));
             let _ = tx.send(RetagOutcome::Done(result));
         });
     }
@@ -244,14 +306,24 @@ impl PeachApp {
         let Some(source_path) = self.source_path.clone() else {
             return;
         };
+        let Some(conn) = self.timeline.try_clone_conn() else {
+            self.load_state =
+                LoadState::Failed("failed to open a database connection for loading".to_string());
+            return;
+        };
         let (tx, rx) = mpsc::channel();
         self.load_rx = Some(rx);
-        self.load_state = LoadState::Loading { inserted_so_far: 0 };
+        self.load_state = LoadState::Loading {
+            inserted_so_far: 0,
+            bytes_done: 0,
+            bytes_total: 0,
+        };
 
-        let db_path = self.db_path.clone();
         let source_kind = self.source_kind;
         let parser_config_path = self.parser_config_path.clone();
         let rule_paths = self.rule_paths.clone();
+        let include_builtin_aul_rules = self.use_builtin_aul_rules;
+        let load_threads = self.settings.effective_load_threads();
 
         std::thread::spawn(move || {
             let progress_tx = tx.clone();
@@ -260,13 +332,15 @@ impl PeachApp {
                 source_kind,
                 &source_path,
                 parser_config_path.as_deref(),
-                &rule_paths,
-                &db_path,
+                RuleSelection {
+                    paths: &rule_paths,
+                    include_builtin_aul: include_builtin_aul_rules,
+                },
+                conn,
+                load_threads,
                 &progress_tx,
             )
-            .map(|(inserted, tags_applied, loaded_source)| {
-                (inserted, tags_applied, loaded_source, start.elapsed())
-            })
+            .map(|summary| (summary, start.elapsed()))
             .map_err(|err| format!("{err:#}"));
             let _ = tx.send(LoadOutcome::Done(result));
         });
@@ -333,11 +407,10 @@ impl PeachApp {
 
         let (tx, rx) = mpsc::channel();
         self.tag_preview_rx = Some(rx);
-        let db_path = self.db_path.clone();
+        let conn = self.timeline.try_clone_conn();
         let pattern = pattern.to_string();
         std::thread::spawn(move || {
-            let count = duckdb::Connection::open(&db_path)
-                .ok()
+            let count = conn
                 .and_then(|conn| timeline_queries::count_message_contains(&conn, &pattern).ok())
                 .unwrap_or(0);
             let _ = tx.send(count);
@@ -507,6 +580,8 @@ impl eframe::App for PeachApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        theme::tick(ui.ctx(), self.settings.theme, &mut self.rainbow_start);
+
         if let Some(rx) = &self.load_rx {
             // Drain everything queued this frame, not just one message: a
             // large source can flush several `Progress` updates between
@@ -514,21 +589,39 @@ impl eframe::App for PeachApp {
             // actually matters for what gets displayed.
             loop {
                 match rx.try_recv() {
-                    Ok(LoadOutcome::Progress(inserted_so_far)) => {
-                        self.load_state = LoadState::Loading { inserted_so_far };
+                    Ok(LoadOutcome::Progress {
+                        inserted,
+                        bytes_done,
+                        bytes_total,
+                    }) => {
+                        self.load_state = LoadState::Loading {
+                            inserted_so_far: inserted,
+                            bytes_done,
+                            bytes_total,
+                        };
                     }
                     Ok(LoadOutcome::Done(result)) => {
                         match result {
-                            Ok((inserted, tags_applied, loaded_source, elapsed)) => {
+                            Ok((summary, elapsed)) => {
                                 self.load_state = LoadState::Done {
-                                    inserted,
-                                    tags_applied,
+                                    inserted: summary.inserted,
+                                    tags_applied: summary.tags_applied,
                                     elapsed,
+                                    skipped: summary.skipped,
                                 };
+                                // Releases the multi-GB DuckDB Appender
+                                // memory the bulk load just left attached to
+                                // the database instance — see
+                                // `TimelineView::reopen_connection`'s doc
+                                // comment. Before `refresh()`, not after: its
+                                // own `try_clone_conn()` calls should get the
+                                // fresh connection, not the about-to-be-freed
+                                // one.
+                                self.timeline.reopen_connection();
                                 self.timeline.refresh();
                                 self.available_levels = self.timeline.distinct_levels();
                                 self.available_tags = self.timeline.distinct_tags();
-                                self.loaded_sources.push(loaded_source);
+                                self.loaded_sources.extend(summary.loaded_sources);
                                 if let Ok(conn) =
                                     persist::open_session_db(&self.session_paths.sqlite_path)
                                 {
@@ -566,6 +659,14 @@ impl eframe::App for PeachApp {
                     match result {
                         Ok(applied) => {
                             self.retag_state = RetagState::Done { applied };
+                            // Same reasoning as the load-completion handler:
+                            // `re_tag`'s DELETE+Appender-rewrite of
+                            // `import_tags` leaves memory attached to the
+                            // database instance until every connection to
+                            // it, including this view's own base one, is
+                            // dropped — see
+                            // `TimelineView::reopen_connection`.
+                            self.timeline.reopen_connection();
                             // Drops the row cache so the Tags column
                             // reflects the just-recomputed import_tags
                             // immediately, not only once the visible
@@ -589,11 +690,109 @@ impl eframe::App for PeachApp {
             }
         }
 
+        let can_switch_session = !matches!(self.load_state, LoadState::Loading { .. })
+            && !matches!(self.retag_state, RetagState::Running);
+
+        egui::Panel::top("menu_bar").show(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui
+                        .add_enabled(can_switch_session, egui::Button::new("Load session..."))
+                        .clicked()
+                    {
+                        ui.close();
+                        if let Some(picked) = rfd::FileDialog::new()
+                            .set_directory(
+                                self.settings
+                                    .sessions_dir()
+                                    .unwrap_or_else(|_| std::env::temp_dir()),
+                            )
+                            .add_filter("Session", &["sqlite"])
+                            .pick_file()
+                            && let Err(err) = self.load_session(picked)
+                        {
+                            self.load_state = LoadState::Failed(format!("{err:#}"));
+                        }
+                    }
+                    if ui
+                        .add_enabled(can_switch_session, egui::Button::new("Manage sessions..."))
+                        .clicked()
+                    {
+                        ui.close();
+                        if let Ok(dir) = self.settings.sessions_dir() {
+                            // Only clone a connection if the current session's
+                            // `.duckdb` already exists — `try_clone_conn`
+                            // lazily *creates* it on first call, and this
+                            // dialog otherwise has no reason to touch a
+                            // session nothing has been loaded into yet. Doing
+                            // that unconditionally here used to leave behind
+                            // an empty-but-no-longer-"empty" `.duckdb` (data
+                            // schema, zero rows) just from opening this
+                            // dialog, which then defeated the on-exit
+                            // empty-session cleanup (`delete_if_empty`) since
+                            // it only checks file *existence*, not row count.
+                            let current_conn = if self.db_path.exists() {
+                                self.timeline.try_clone_conn()
+                            } else {
+                                None
+                            };
+                            self.session_dialog = SessionManagerDialog::open(
+                                &dir,
+                                &self.session_paths.id,
+                                current_conn,
+                            );
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Settings...").clicked() {
+                        self.settings_dialog = SettingsDialog::open(self.settings.clone());
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+
+                ui.menu_button("View", |ui| {
+                    ui.menu_button("Theme", |ui| {
+                        let mut theme_changed = false;
+                        theme_changed |= ui
+                            .radio_value(&mut self.settings.theme, Theme::System, "System default")
+                            .changed();
+                        theme_changed |= ui
+                            .radio_value(&mut self.settings.theme, Theme::Light, "Light")
+                            .changed();
+                        theme_changed |= ui
+                            .radio_value(&mut self.settings.theme, Theme::Dark, "Dark")
+                            .changed();
+                        theme_changed |= ui
+                            .radio_value(&mut self.settings.theme, Theme::Geek, "Geek")
+                            .changed();
+                        theme_changed |= ui
+                            .radio_value(&mut self.settings.theme, Theme::Rainbow, "Rainbow")
+                            .changed();
+                        if theme_changed {
+                            theme::apply(ui.ctx(), self.settings.theme);
+                            if let Err(err) = config::save(&self.settings) {
+                                eprintln!("peach: failed to save theme setting: {err:#}");
+                            }
+                        }
+                    });
+                });
+
+                ui.menu_button("Help", |ui| {
+                    if ui.button("About Peach...").clicked() {
+                        self.about_dialog = AboutDialog::open();
+                        ui.close();
+                    }
+                });
+            });
+        });
+
         egui::Panel::top("controls").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(format!("Session: {}", self.session_paths.id));
-                let can_switch_session = !matches!(self.load_state, LoadState::Loading { .. })
-                    && !matches!(self.retag_state, RetagState::Running);
                 if ui
                     .add_enabled(can_switch_session, egui::Button::new("Load session..."))
                     .clicked()
@@ -608,16 +807,6 @@ impl eframe::App for PeachApp {
                     && let Err(err) = self.load_session(picked)
                 {
                     self.load_state = LoadState::Failed(format!("{err:#}"));
-                }
-                if ui
-                    .add_enabled(can_switch_session, egui::Button::new("Manage sessions..."))
-                    .clicked()
-                    && let Ok(dir) = self.settings.sessions_dir()
-                {
-                    self.session_dialog = SessionManagerDialog::open(&dir);
-                }
-                if ui.button("Settings...").clicked() {
-                    self.settings_dialog = SettingsDialog::open(self.settings.clone());
                 }
             });
 
@@ -640,24 +829,39 @@ impl eframe::App for PeachApp {
             });
 
             ui.horizontal(|ui| {
-                let pick_label = match self.source_kind {
-                    SourceKind::Aul => "Choose .logarchive folder...",
-                    SourceKind::Evtx => "Choose .evtx file...",
-                    SourceKind::Journald => "Choose .journal file...",
-                    SourceKind::Text => "Choose log file...",
-                };
-                if ui.button(pick_label).clicked() {
-                    let picked = match self.source_kind {
-                        SourceKind::Aul => rfd::FileDialog::new().pick_folder(),
-                        SourceKind::Evtx => rfd::FileDialog::new()
-                            .add_filter("EVTX", &["evtx"])
-                            .pick_file(),
-                        SourceKind::Journald => rfd::FileDialog::new()
-                            .add_filter("journald", &["journal"])
-                            .pick_file(),
-                        SourceKind::Text => rfd::FileDialog::new().pick_file(),
+                if self.source_kind == SourceKind::Aul {
+                    if ui.button("Choose .logarchive folder...").clicked()
+                        && let Some(picked) = rfd::FileDialog::new().pick_folder()
+                    {
+                        self.source_path = Some(picked);
+                    }
+                } else {
+                    let (file_label, extension_filter) = match self.source_kind {
+                        SourceKind::Evtx => ("Choose .evtx file...", Some(("EVTX", "evtx"))),
+                        SourceKind::Journald => {
+                            ("Choose .journal file...", Some(("journald", "journal")))
+                        }
+                        SourceKind::Text => ("Choose log file...", None),
+                        SourceKind::Aul => unreachable!("handled above"),
                     };
-                    if let Some(picked) = picked {
+                    if ui.button(file_label).clicked() {
+                        let mut dialog = rfd::FileDialog::new();
+                        if let Some((name, ext)) = extension_filter {
+                            dialog = dialog.add_filter(name, &[ext]);
+                        }
+                        if let Some(picked) = dialog.pick_file() {
+                            self.source_path = Some(picked);
+                        }
+                    }
+                    if ui
+                        .button("Choose folder...")
+                        .on_hover_text(
+                            "Recursively loads every matching file found in the folder \
+                             (and its subfolders) as separate sources",
+                        )
+                        .clicked()
+                        && let Some(picked) = rfd::FileDialog::new().pick_folder()
+                    {
                         self.source_path = Some(picked);
                     }
                 }
@@ -682,6 +886,16 @@ impl eframe::App for PeachApp {
             }
 
             ui.horizontal(|ui| {
+                ui.checkbox(
+                    &mut self.use_builtin_aul_rules,
+                    "Built-in AUL pattern-of-life rules",
+                )
+                .on_hover_text(
+                    "Applies the bundled AUL rule pack (screen lock, WiFi, app launches, \
+                         etc.) on every load and re-tag, regardless of which rule files are \
+                         also selected below. Only ever matches AUL entries.",
+                );
+
                 if ui
                     .button("Choose tagging rules (TOML, optional)...")
                     .clicked()
@@ -692,14 +906,14 @@ impl eframe::App for PeachApp {
                     self.rule_paths = picked;
                 }
                 if self.rule_paths.is_empty() {
-                    ui.label("(none selected — import-time tagging skipped)");
+                    ui.label("(no extra rule files selected)");
                 } else {
                     ui.label(format!("{} rule file(s) selected", self.rule_paths.len()));
                 }
 
                 let can_retag = !matches!(self.load_state, LoadState::Loading { .. })
                     && !matches!(self.retag_state, RetagState::Running)
-                    && !self.rule_paths.is_empty()
+                    && (!self.rule_paths.is_empty() || self.use_builtin_aul_rules)
                     && self.timeline.total_rows() > 0;
                 if ui
                     .add_enabled(can_retag, egui::Button::new("Re-tag now"))
@@ -740,23 +954,53 @@ impl eframe::App for PeachApp {
                 }
                 match &self.load_state {
                     LoadState::Idle => {}
-                    LoadState::Loading { inserted_so_far } => {
+                    LoadState::Loading {
+                        inserted_so_far,
+                        bytes_done,
+                        bytes_total,
+                    } => {
                         ui.spinner();
                         if *inserted_so_far > 0 {
                             ui.label(format!("Loading... {inserted_so_far} entries so far"));
                         } else {
                             ui.label("Loading...");
                         }
+                        // Data-based progress — file-level granularity (jumps
+                        // per completed file, not smooth within one large
+                        // file; see `run_load`'s doc comment for why entry
+                        // count can't drive a real fraction here either).
+                        if *bytes_total > 0 {
+                            let fraction = *bytes_done as f32 / *bytes_total as f32;
+                            ui.add(egui::ProgressBar::new(fraction).desired_width(200.0).text(
+                                format!(
+                                    "{:.1} / {:.1} MB",
+                                    *bytes_done as f64 / 1_000_000.0,
+                                    *bytes_total as f64 / 1_000_000.0
+                                ),
+                            ));
+                        }
                     }
                     LoadState::Done {
                         inserted,
                         tags_applied,
                         elapsed,
+                        skipped,
                     } => {
                         ui.label(format!(
                             "Loaded {inserted} entries, applied {tags_applied} tags in {:.1}s",
                             elapsed.as_secs_f64()
                         ));
+                        if !skipped.is_empty() {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(230, 160, 0),
+                                format!("{} file(s) skipped", skipped.len()),
+                            )
+                            .on_hover_ui(|ui| {
+                                for file in skipped {
+                                    ui.label(format!("{}: {}", file.path.display(), file.reason));
+                                }
+                            });
+                        }
                     }
                     LoadState::Failed(err) => {
                         ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
@@ -788,6 +1032,7 @@ impl eframe::App for PeachApp {
         self.handle_tag_dialog(ui.ctx());
         self.handle_session_dialog(ui.ctx());
         self.handle_settings_dialog(ui.ctx());
+        self.about_dialog.ui(ui.ctx());
     }
 }
 
@@ -796,28 +1041,112 @@ impl eframe::App for PeachApp {
 /// why that distinction actually matters here.
 const LOAD_BATCH_SIZE: usize = 10_000;
 
-/// Runs on a background thread so the UI stays responsive — this can mean
-/// parsing and inserting millions of rows for a large AUL source. Opens its
-/// own DuckDB connection (`Connection` isn't `Send`) and bulk-inserts via
-/// the DuckDB Appender rather than row-by-row `INSERT` statements.
+/// Resolves `source_path` to the concrete list of files [`run_load`] will
+/// parse, one file = one independent parse run = one `source_file_id`/
+/// `sources` row (see [`load_one_file`]). AUL's `.logarchive` is always one
+/// atomic source (never split up) regardless of `source_path` being a
+/// directory, and a plain file pick for any sourcetype is always exactly
+/// itself — both short-circuit before ever touching the filesystem beyond
+/// `source_path` itself.
 ///
-/// Streams entries out of the parser in batches of [`LOAD_BATCH_SIZE`]
-/// (`parse_source_streaming`, not `parse_source`) rather than collecting
-/// the whole source into one `Vec<LogEntry>` before writing anything to
-/// DuckDB: a real AUL `.logarchive` can resolve into millions of entries,
-/// and holding all of them — each carrying its own `raw`/`fields` JSON —
-/// in the Rust heap at once is what drove a 219 MB source past 45 GB of
-/// RSS during testing. DuckDB, not the process heap, is meant to hold the
-/// bulk timeline (CLAUDE.md's "nicht im RAM halten" principle).
+/// Otherwise (a folder picked for EVTX/journald/Text), walks it
+/// recursively. EVTX/journald filter by their own canonical,
+/// unambiguous extension (`.evtx`/`.journal`, case-insensitive) — a folder
+/// export commonly has unrelated files sitting alongside the real ones.
+/// Text has no fixed extension (fully TOML-configurable), so every regular
+/// file is attempted — no mandatory auto-detection, the analyst already
+/// chose the parser config, so it isn't this function's place to
+/// second-guess which files "look like" a match; files that don't actually
+/// match end up in [`LoadSummary::skipped`], not silently excluded
+/// upfront. Sorted for deterministic load order — same folder + same
+/// config must always produce the same result.
+fn collect_source_files(source_kind: SourceKind, source_path: &Path) -> Vec<PathBuf> {
+    if source_kind == SourceKind::Aul || source_path.is_file() {
+        return vec![source_path.to_path_buf()];
+    }
+    let extension_filter: Option<&str> = match source_kind {
+        SourceKind::Evtx => Some("evtx"),
+        SourceKind::Journald => Some("journal"),
+        SourceKind::Text | SourceKind::Aul => None,
+    };
+    let mut files: Vec<PathBuf> = walkdir::WalkDir::new(source_path)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .filter(|path| match extension_filter {
+            Some(ext) => path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case(ext)),
+            None => true,
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// Real byte size of `path` — if it's a file, its own size; if it's a
+/// directory (AUL's `.logarchive` case), the sum of every file inside it,
+/// recursively. `path.metadata().len()` on a directory returns a small,
+/// meaningless number (just the directory entry itself, not its contents),
+/// so that shortcut can't be used for AUL.
+fn path_byte_size(path: &Path) -> u64 {
+    if path.is_dir() {
+        walkdir::WalkDir::new(path)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .filter_map(|entry| entry.metadata().ok())
+            .map(|metadata| metadata.len())
+            .sum()
+    } else {
+        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    }
+}
+
+/// Runs on a background thread so the UI stays responsive — this can mean
+/// parsing and inserting millions of rows for a large AUL source, or many
+/// files when `source_path` is a recursively-loaded folder. Takes an
+/// already-open `conn` (a `TimelineView::try_clone_conn()` clone, made on
+/// the UI thread before spawning) rather than opening its own: DuckDB only
+/// reliably tolerates one independent `Connection::open` of a file at a
+/// time within a process — a second one while the UI's own connection for
+/// this session is still alive could lose that race, reliably on Windows.
+/// `Connection` itself is `Send` (see `try_clone_conn`'s doc comment), so
+/// it can still be handed to background threads directly.
+///
+/// A file that fails to parse (or parses cleanly but matches nothing)
+/// doesn't abort the rest of the folder — it's recorded in
+/// [`LoadSummary::skipped`] and the remaining files still get loaded. Only
+/// resolving `(parser, config)` (e.g. no parser config selected for Text)
+/// or finding zero candidate files at all fails the whole call — those are
+/// setup problems, not a single file's problem.
+///
+/// `thread_count` only matters when [`collect_source_files`] finds more
+/// than one file (a folder pick for EVTX/journald/Text) — AUL's
+/// `.logarchive` is always exactly one atomic parse unit, and a
+/// single-file pick is also always exactly one, so both run
+/// [`run_sequential`] regardless of `thread_count`: there's nothing to
+/// parallelize across a list of one.
+/// Which tagging rules a load/re-tag should apply — user-selected files plus
+/// whether the embedded AUL pattern-of-life pack
+/// (`tagging::builtin::aul_pattern_of_life_rules`) is also merged in. A
+/// struct rather than two more `run_load` parameters, same reasoning as
+/// [`LoadContext`] bundling its own fields.
+struct RuleSelection<'a> {
+    paths: &'a [PathBuf],
+    include_builtin_aul: bool,
+}
+
 fn run_load(
     source_kind: SourceKind,
     source_path: &Path,
     parser_config_path: Option<&Path>,
-    rule_paths: &[PathBuf],
-    db_path: &Path,
+    rules: RuleSelection,
+    conn: duckdb::Connection,
+    thread_count: usize,
     progress_tx: &mpsc::Sender<LoadOutcome>,
-) -> anyhow::Result<(usize, usize, LoadedSource)> {
-    let conn = duckdb::Connection::open(db_path)?;
+) -> anyhow::Result<LoadSummary> {
     setup_timeline_schema(&conn)?;
 
     let (parser, config): (&dyn LogParser, ParserConfig) = match source_kind {
@@ -850,38 +1179,375 @@ fn run_load(
     // ...) depending on which config is loaded, so its own sourcetype() is
     // just a generic marker (see parsers/mod.rs doc comment).
     let sourcetype = config.parser.sourcetype.clone();
-    let rules = load_rules(rule_paths)?;
+    let rules = load_rules(rules.paths, rules.include_builtin_aul)?;
 
+    let files = collect_source_files(source_kind, source_path);
+    if files.is_empty() {
+        anyhow::bail!("no matching files found under {}", source_path.display());
+    }
+    let bytes_total: u64 = files.iter().map(|path| path_byte_size(path)).sum();
+
+    let load_ctx = LoadContext {
+        parser,
+        config: &config,
+        sourcetype: &sourcetype,
+        rules: &rules,
+        parser_config_path,
+    };
+
+    if files.len() <= 1 {
+        run_sequential(&load_ctx, files, &conn, bytes_total, progress_tx)
+    } else {
+        run_parallel(
+            &load_ctx,
+            files,
+            &conn,
+            bytes_total,
+            thread_count,
+            progress_tx,
+        )
+    }
+}
+
+/// Everything about a `run_load` call that's the same for every file it
+/// touches — resolved once per call, not per file — bundled together so
+/// [`run_sequential`]/[`run_parallel`] take one context argument instead
+/// of several. Needs `LogParser: Sync` (see `parsers/mod.rs`) so `&Self`
+/// can be shared with [`run_parallel`]'s worker threads.
+struct LoadContext<'a> {
+    parser: &'a dyn LogParser,
+    config: &'a ParserConfig,
+    sourcetype: &'a str,
+    rules: &'a [Rule],
+    parser_config_path: Option<&'a Path>,
+}
+
+/// The single-parse-unit path — always used for AUL (its `.logarchive` is
+/// one atomic source, never split into multiple files by
+/// [`collect_source_files`]) and for a single-file pick of any sourcetype.
+/// `files` always has exactly one entry here — `run_load` already bailed
+/// on an empty list, and anything with more than one goes through
+/// [`run_parallel`] instead.
+fn run_sequential(
+    ctx: &LoadContext,
+    files: Vec<PathBuf>,
+    conn: &duckdb::Connection,
+    bytes_total: u64,
+    progress_tx: &mpsc::Sender<LoadOutcome>,
+) -> anyhow::Result<LoadSummary> {
+    let mut summary = LoadSummary {
+        inserted: 0,
+        tags_applied: 0,
+        loaded_sources: Vec::new(),
+        skipped: Vec::new(),
+    };
+    let mut total_inserted = 0usize;
+    let mut bytes_done = 0u64;
+
+    for file_path in files {
+        let file_bytes = path_byte_size(&file_path);
+        match load_one_file(
+            ctx,
+            &file_path,
+            conn,
+            &mut total_inserted,
+            bytes_done,
+            bytes_total,
+            progress_tx,
+        ) {
+            Ok(Some((tags_applied, loaded_source))) => {
+                summary.tags_applied += tags_applied;
+                summary.loaded_sources.push(loaded_source);
+            }
+            Ok(None) => summary.skipped.push(SkippedFile {
+                path: file_path,
+                reason: "no matching entries".to_string(),
+            }),
+            Err(err) => summary.skipped.push(SkippedFile {
+                path: file_path,
+                reason: format!("{err:#}"),
+            }),
+        }
+        bytes_done += file_bytes;
+        let _ = progress_tx.send(LoadOutcome::Progress {
+            inserted: total_inserted,
+            bytes_done,
+            bytes_total,
+        });
+    }
+    summary.inserted = total_inserted;
+
+    Ok(summary)
+}
+
+/// Parses one file and, if it produced anything, appends it to
+/// `log_entries`/`sources`. `total_inserted` is threaded through by `&mut`
+/// rather than returned fresh, so [`LoadOutcome::Progress`] keeps
+/// reporting one running total, not a per-file count that resets and
+/// confuses "how far along is this." `bytes_done_before`/`bytes_total`
+/// are passed straight through into every progress send during this
+/// file's parsing — byte progress only advances once a whole file
+/// finishes (see [`run_sequential`]/[`run_parallel`]), so it stays flat
+/// while this one is in flight; only `inserted` keeps climbing live.
+///
+/// `Ok(None)` — not an error — when the file parsed cleanly but matched
+/// zero entries: still worth a note in the skip report ([`run_load`]), but
+/// not a parse failure, so it's kept distinct from `Err`.
+fn load_one_file(
+    ctx: &LoadContext,
+    file_path: &Path,
+    conn: &duckdb::Connection,
+    total_inserted: &mut usize,
+    bytes_done_before: u64,
+    bytes_total: u64,
+    progress_tx: &mpsc::Sender<LoadOutcome>,
+) -> anyhow::Result<Option<(usize, LoadedSource)>> {
     let mut batch: Vec<LogEntry> = Vec::with_capacity(LOAD_BATCH_SIZE);
-    let mut inserted = 0usize;
+    let mut inserted_this_file = 0usize;
     let mut tags_applied = 0usize;
 
-    let source_file_id = parse_source_streaming(parser, source_path, &config, |entry| {
-        inserted += 1;
+    let source_file_id = parse_source_streaming(ctx.parser, file_path, ctx.config, |entry| {
+        inserted_this_file += 1;
+        *total_inserted += 1;
         batch.push(entry);
         if batch.len() >= LOAD_BATCH_SIZE {
-            tags_applied += flush_batch(&conn, &mut batch, &rules, &sourcetype)?;
+            tags_applied += flush_batch(conn, &mut batch, ctx.rules, ctx.sourcetype)?;
             // Best-effort: if the UI thread has already dropped its
             // receiver (e.g. app shutting down mid-load), there's nobody
             // to tell and the load itself must still proceed.
-            let _ = progress_tx.send(LoadOutcome::Progress(inserted));
+            let _ = progress_tx.send(LoadOutcome::Progress {
+                inserted: *total_inserted,
+                bytes_done: bytes_done_before,
+                bytes_total,
+            });
         }
         Ok(())
     })?;
-    tags_applied += flush_batch(&conn, &mut batch, &rules, &sourcetype)?;
+    tags_applied += flush_batch(conn, &mut batch, ctx.rules, ctx.sourcetype)?;
+
+    if inserted_this_file == 0 {
+        return Ok(None);
+    }
+    insert_source_record(conn, source_file_id, file_path, ctx.sourcetype)?;
 
     let loaded_source = LoadedSource {
-        path: source_path.display().to_string(),
-        sourcetype: sourcetype.clone(),
-        parser_config_path: parser_config_path.map(|p| p.display().to_string()),
+        path: file_path.display().to_string(),
+        sourcetype: ctx.sourcetype.to_string(),
+        parser_config_path: ctx.parser_config_path.map(|p| p.display().to_string()),
     };
+    Ok(Some((tags_applied, loaded_source)))
+}
 
-    if inserted == 0 {
-        return Ok((0, 0, loaded_source));
+/// One worker's report back to [`run_parallel`]'s writer loop.
+enum ParseEvent {
+    /// Up to [`LOAD_BATCH_SIZE`] entries from one file, ready to flush —
+    /// same batching cadence as [`load_one_file`]'s single-threaded
+    /// version. Each `LogEntry` already carries its own
+    /// `event_id.source_file_id` (assigned once per file by
+    /// `parse_source_streaming`), so batches don't need to carry it
+    /// separately.
+    Batch { entries: Vec<LogEntry> },
+    /// A file finished parsing. `source_file_id` is `None` if it parsed
+    /// cleanly but matched zero entries — mirrors [`load_one_file`]'s
+    /// `Ok(None)`, not a failure.
+    FileDone {
+        file_path: PathBuf,
+        bytes: u64,
+        source_file_id: Option<SourceFileId>,
+    },
+    FileFailed {
+        file_path: PathBuf,
+        bytes: u64,
+        reason: String,
+    },
+}
+
+/// The multi-file path — only reached when [`collect_source_files`] finds
+/// more than one file (a folder pick for EVTX/journald/Text; AUL and
+/// single-file picks always go through [`run_sequential`] instead, see
+/// `run_load`). Parses files across up to `thread_count` worker threads,
+/// but every DuckDB write still happens on this thread, through the one
+/// `conn` — DuckDB's `Appender` is built for fast single-writer sequential
+/// bulk loads, and concurrent writers from multiple connections would
+/// contend rather than actually speed up the write step, so only the
+/// CPU-bound parsing work is fanned out.
+///
+/// `std::thread::scope` (not a detached `thread::spawn`) so `ctx`/`conn`
+/// — borrowed, non-`'static` — can be shared with the worker threads
+/// directly, and so this function doesn't return until every worker has
+/// actually finished. Each worker streams its file through the same
+/// `parse_source_streaming` [`load_one_file`] uses, bounding memory to
+/// `LOAD_BATCH_SIZE` per *worker* — with `thread_count` workers now
+/// running at once, that matters even more than in the single-threaded
+/// case: buffering a whole file per worker would multiply the exact RSS
+/// blowup streaming was built to avoid in the first place.
+///
+/// Result ordering: worker completion order is a race, so
+/// `loaded_sources`/`skipped` are sorted by path before returning —
+/// same input must always produce the same *result*, even if the
+/// parsing happened in a different order this run.
+fn run_parallel(
+    ctx: &LoadContext,
+    files: Vec<PathBuf>,
+    conn: &duckdb::Connection,
+    bytes_total: u64,
+    thread_count: usize,
+    progress_tx: &mpsc::Sender<LoadOutcome>,
+) -> anyhow::Result<LoadSummary> {
+    let thread_count = thread_count.min(files.len()).max(1);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(thread_count)
+        .build()
+        .context("failed to create the parse thread pool")?;
+
+    let mut summary = LoadSummary {
+        inserted: 0,
+        tags_applied: 0,
+        loaded_sources: Vec::new(),
+        skipped: Vec::new(),
+    };
+    let mut total_inserted = 0usize;
+    let mut bytes_done = 0u64;
+    let mut write_error = None;
+
+    // Bounded, not `mpsc::channel`'s unbounded default: with `thread_count`
+    // workers producing `LOAD_BATCH_SIZE`-entry batches purely CPU-bound
+    // (fast) and one writer thread consuming them via a DuckDB append plus
+    // import-time tagging (slower — real I/O, not just memory copies), an
+    // unbounded channel lets production outrun consumption without limit.
+    // That's exactly how this OOM'd in practice: nothing capped how many
+    // whole batches could pile up in the channel while the writer fell
+    // behind. `sync_channel`'s bounded capacity makes `send` block once
+    // full, so a fast worker pauses instead of continuing to buffer —
+    // real backpressure, not just a smaller unbounded buffer. Capacity is
+    // a small multiple of the worker count: enough that a worker isn't
+    // stalled waiting on every single batch, not so much that a big
+    // backlog can still accumulate.
+    let (tx, rx) = mpsc::sync_channel::<ParseEvent>(thread_count * 2);
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            pool.install(|| {
+                files.into_par_iter().for_each_with(tx, |tx, file_path| {
+                    parse_file_for_worker(ctx, &file_path, tx);
+                });
+            });
+        });
+
+        for event in rx {
+            match event {
+                ParseEvent::Batch { entries } => {
+                    total_inserted += entries.len();
+                    let mut entries = entries;
+                    match flush_batch(conn, &mut entries, ctx.rules, ctx.sourcetype) {
+                        Ok(applied) => summary.tags_applied += applied,
+                        Err(err) => {
+                            write_error = Some(err);
+                            break;
+                        }
+                    }
+                }
+                ParseEvent::FileDone {
+                    file_path,
+                    bytes,
+                    source_file_id,
+                } => {
+                    bytes_done += bytes;
+                    match source_file_id {
+                        Some(id) => {
+                            if let Err(err) =
+                                insert_source_record(conn, id, &file_path, ctx.sourcetype)
+                            {
+                                write_error = Some(err);
+                                break;
+                            }
+                            summary.loaded_sources.push(LoadedSource {
+                                path: file_path.display().to_string(),
+                                sourcetype: ctx.sourcetype.to_string(),
+                                parser_config_path: ctx
+                                    .parser_config_path
+                                    .map(|p| p.display().to_string()),
+                            });
+                        }
+                        None => summary.skipped.push(SkippedFile {
+                            path: file_path,
+                            reason: "no matching entries".to_string(),
+                        }),
+                    }
+                }
+                ParseEvent::FileFailed {
+                    file_path,
+                    bytes,
+                    reason,
+                } => {
+                    bytes_done += bytes;
+                    summary.skipped.push(SkippedFile {
+                        path: file_path,
+                        reason,
+                    });
+                }
+            }
+            let _ = progress_tx.send(LoadOutcome::Progress {
+                inserted: total_inserted,
+                bytes_done,
+                bytes_total,
+            });
+        }
+    });
+
+    if let Some(err) = write_error {
+        return Err(err);
     }
-    insert_source_record(&conn, source_file_id, source_path, &sourcetype)?;
+    summary.inserted = total_inserted;
+    summary.loaded_sources.sort_by(|a, b| a.path.cmp(&b.path));
+    summary.skipped.sort_by(|a, b| a.path.cmp(&b.path));
 
-    Ok((inserted, tags_applied, loaded_source))
+    Ok(summary)
+}
+
+/// Runs on a rayon worker thread — parses one file fully (streamed in
+/// `LOAD_BATCH_SIZE` chunks, never held whole in memory) and reports
+/// results back to [`run_parallel`]'s writer loop. Errors from `tx.send`
+/// are ignored (best-effort, same reasoning as [`load_one_file`]'s
+/// progress sends): if the writer already stopped listening (e.g. a
+/// DB-level error elsewhere aborted the load), there's nobody left to
+/// tell, and this worker's own work is already sunk cost at that point.
+fn parse_file_for_worker(ctx: &LoadContext, file_path: &Path, tx: &mpsc::SyncSender<ParseEvent>) {
+    let bytes = path_byte_size(file_path);
+    let mut batch: Vec<LogEntry> = Vec::with_capacity(LOAD_BATCH_SIZE);
+    let mut inserted = 0usize;
+
+    let result = parse_source_streaming(ctx.parser, file_path, ctx.config, |entry| {
+        inserted += 1;
+        batch.push(entry);
+        if batch.len() >= LOAD_BATCH_SIZE {
+            let full_batch = std::mem::replace(&mut batch, Vec::with_capacity(LOAD_BATCH_SIZE));
+            let _ = tx.send(ParseEvent::Batch {
+                entries: full_batch,
+            });
+        }
+        Ok(())
+    });
+
+    match result {
+        Ok(source_file_id) => {
+            if !batch.is_empty() {
+                let _ = tx.send(ParseEvent::Batch { entries: batch });
+            }
+            let source_file_id = (inserted > 0).then_some(source_file_id);
+            let _ = tx.send(ParseEvent::FileDone {
+                file_path: file_path.to_path_buf(),
+                bytes,
+                source_file_id,
+            });
+        }
+        Err(err) => {
+            let _ = tx.send(ParseEvent::FileFailed {
+                file_path: file_path.to_path_buf(),
+                bytes,
+                reason: format!("{err:#}"),
+            });
+        }
+    }
 }
 
 /// Appends `batch` to `log_entries` via the DuckDB Appender, applies
@@ -922,15 +1588,31 @@ fn flush_batch(
 
 /// Runs on a background thread, like [`run_load`] — re-evaluating rules
 /// against every already-loaded entry touches the whole `log_entries`
-/// table, so it deserves the same "don't freeze the UI" treatment.
-fn run_retag(rule_paths: &[PathBuf], db_path: &Path) -> anyhow::Result<usize> {
-    let conn = duckdb::Connection::open(db_path)?;
-    let rules = load_rules(rule_paths)?;
+/// table, so it deserves the same "don't freeze the UI" treatment. Takes
+/// an already-open `conn`, same reasoning as `run_load`.
+fn run_retag(
+    rule_paths: &[PathBuf],
+    include_builtin_aul_rules: bool,
+    conn: duckdb::Connection,
+) -> anyhow::Result<usize> {
+    let rules = load_rules(rule_paths, include_builtin_aul_rules)?;
     re_tag(&conn, &rules)
 }
 
-fn load_rules(rule_paths: &[PathBuf]) -> anyhow::Result<Vec<Rule>> {
-    rule_paths
+/// `include_builtin_aul_rules` appends the embedded AUL pattern-of-life
+/// pack (`tagging::builtin::aul_pattern_of_life_rules`) after the
+/// user-selected file-based rules — order doesn't affect tagging (every
+/// matching rule applies independently, see `tagging::engine`), it's just
+/// where they land in `import_tags`. Every embedded rule already scopes
+/// itself to `sourcetype = "aul"`, so merging it in unconditionally (not
+/// just when the *current* load/retag's sourcetype happens to be AUL) is
+/// safe — it simply never matches non-AUL rows, including during a retag
+/// of a session that also has EVTX/journald/Text data alongside AUL.
+fn load_rules(
+    rule_paths: &[PathBuf],
+    include_builtin_aul_rules: bool,
+) -> anyhow::Result<Vec<Rule>> {
+    let mut rules: Vec<Rule> = rule_paths
         .iter()
         .map(|path| {
             let text = std::fs::read_to_string(path)
@@ -938,7 +1620,11 @@ fn load_rules(rule_paths: &[PathBuf]) -> anyhow::Result<Vec<Rule>> {
             Rule::from_toml_str(&text)
                 .with_context(|| format!("invalid rule file {}", path.display()))
         })
-        .collect()
+        .collect::<anyhow::Result<Vec<Rule>>>()?;
+    if include_builtin_aul_rules {
+        rules.extend(crate::tagging::builtin::aul_pattern_of_life_rules());
+    }
+    Ok(rules)
 }
 
 fn insert_source_record(
@@ -993,11 +1679,19 @@ fn cleanup_temp_dir(dir: &Path) {
 }
 
 pub fn run(add_sources: Vec<PathBuf>, cleanup_dirs: Vec<PathBuf>) -> anyhow::Result<()> {
-    let native_options = eframe::NativeOptions::default();
+    let window_title = format!("Peach {}", about_dialog::display_version());
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_title(&window_title),
+        ..Default::default()
+    };
     eframe::run_native(
-        "Peach",
+        &window_title,
         native_options,
-        Box::new(move |_cc| Ok(Box::new(PeachApp::new(add_sources, cleanup_dirs)))),
+        Box::new(move |cc| {
+            let app = PeachApp::new(add_sources, cleanup_dirs);
+            theme::apply(&cc.egui_ctx, app.settings.theme);
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|err| anyhow::anyhow!("failed to run peach GUI: {err}"))
 }
@@ -1005,6 +1699,36 @@ pub fn run(add_sources: Vec<PathBuf>, cleanup_dirs: Vec<PathBuf>) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_rules_with_no_files_and_no_builtin_pack_is_empty() {
+        let rules = load_rules(&[], false).unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn load_rules_merges_the_builtin_aul_pack_with_no_files_selected() {
+        let rules = load_rules(&[], true).unwrap();
+        assert!(rules.len() >= 33);
+        assert!(rules.iter().any(|r| r.rule.tag.value == "wifi_status"));
+    }
+
+    #[test]
+    fn load_rules_merges_the_builtin_aul_pack_alongside_file_based_rules() {
+        let dir = temp_test_dir("load-rules-merge");
+        let rule_path = dir.join("custom.toml");
+        std::fs::write(
+            &rule_path,
+            "[rule]\nname = \"custom\"\n[rule.match]\nmessage_contains = \"x\"\n[rule.tag]\nvalue = \"custom_tag\"\n",
+        )
+        .unwrap();
+
+        let rules = load_rules(std::slice::from_ref(&rule_path), true).unwrap();
+
+        assert!(rules.iter().any(|r| r.rule.tag.value == "custom_tag"));
+        assert!(rules.iter().any(|r| r.rule.tag.value == "wifi_status"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn queue_from_cli_sources_prefills_the_first_and_queues_the_rest() {
@@ -1086,5 +1810,306 @@ mod tests {
             dir.exists(),
             "must not delete anything outside the OS temp dir"
         );
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "peach-app-test-{}-{}-{name}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn collect_source_files_returns_the_folder_itself_for_aul_even_though_its_a_directory() {
+        let dir = temp_test_dir("aul-folder");
+        std::fs::write(dir.join("not-an-aul-file.txt"), b"x").unwrap();
+
+        let files = collect_source_files(SourceKind::Aul, &dir);
+
+        assert_eq!(files, vec![dir.clone()]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn collect_source_files_returns_a_single_file_unchanged_for_any_sourcetype() {
+        let dir = temp_test_dir("single-file");
+        let file = dir.join("source.evtx");
+        std::fs::write(&file, b"x").unwrap();
+
+        let files = collect_source_files(SourceKind::Evtx, &file);
+
+        assert_eq!(files, vec![file]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn collect_source_files_recurses_and_filters_by_extension_for_evtx() {
+        let dir = temp_test_dir("evtx-folder");
+        let sub = dir.join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        let matching_top = dir.join("a.evtx");
+        let matching_nested = sub.join("b.EVTX"); // case-insensitive
+        let unrelated = dir.join("readme.txt");
+        std::fs::write(&matching_top, b"x").unwrap();
+        std::fs::write(&matching_nested, b"x").unwrap();
+        std::fs::write(&unrelated, b"x").unwrap();
+
+        let mut files = collect_source_files(SourceKind::Evtx, &dir);
+        files.sort();
+        let mut expected = vec![matching_top, matching_nested];
+        expected.sort();
+
+        assert_eq!(files, expected);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn collect_source_files_recurses_and_filters_by_extension_for_journald() {
+        let dir = temp_test_dir("journald-folder");
+        let matching = dir.join("system.journal");
+        let unrelated = dir.join("system.journal.tmp");
+        std::fs::write(&matching, b"x").unwrap();
+        std::fs::write(&unrelated, b"x").unwrap();
+
+        let files = collect_source_files(SourceKind::Journald, &dir);
+
+        assert_eq!(files, vec![matching]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn collect_source_files_returns_every_file_unfiltered_for_text() {
+        let dir = temp_test_dir("text-folder");
+        let a = dir.join("a.log");
+        let b = dir.join("b.bin");
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+
+        let mut files = collect_source_files(SourceKind::Text, &dir);
+        files.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+
+        assert_eq!(files, expected);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn collect_source_files_results_are_sorted() {
+        let dir = temp_test_dir("sorted-folder");
+        std::fs::write(dir.join("z.evtx"), b"x").unwrap();
+        std::fs::write(dir.join("a.evtx"), b"x").unwrap();
+        std::fs::write(dir.join("m.evtx"), b"x").unwrap();
+
+        let files = collect_source_files(SourceKind::Evtx, &dir);
+        let mut sorted = files.clone();
+        sorted.sort();
+
+        assert_eq!(files, sorted);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn text_parser_config() -> String {
+        "[parser]\nname = \"test\"\nsourcetype = \"test\"\n\
+         [parser.pattern]\n\
+         regex = '^(?P<timestamp>\\S+) (?P<level_raw>\\w+) (?P<msg>.*)$'\n\
+         timestamp_format = \"%Y-%m-%dT%H:%M:%S%z\"\n\
+         [parser.field_mapping]\n\
+         level = \"level_raw\"\n\
+         message = \"msg\"\n"
+            .to_string()
+    }
+
+    /// Regression test for the recursive folder-load feature: a folder with
+    /// two well-formed log files and one file whose content never matches
+    /// `pattern.regex` at all (so `TextConfigParser::parse` returns `Err`
+    /// for it, not an empty result) — the two good files must still load
+    /// fully and the bad one must land in `skipped` with its reason,
+    /// without aborting the other two.
+    #[test]
+    fn run_load_recurses_a_folder_loading_good_files_and_skipping_a_bad_one() {
+        // The parser config lives *outside* the folder being loaded — Text
+        // has no extension filter (per `collect_source_files`), so a config
+        // file sitting inside the loaded folder would itself become a
+        // (failing) load candidate and muddy this test's assertions.
+        let base = temp_test_dir("run-load-base");
+        let logs_dir = base.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(
+            logs_dir.join("a.log"),
+            "2026-07-28T12:00:00+0200 ERROR something broke\n",
+        )
+        .unwrap();
+        std::fs::write(
+            logs_dir.join("b.log"),
+            "2026-07-28T12:05:00+0200 INFO all fine\n2026-07-28T12:06:00+0200 WARN careful\n",
+        )
+        .unwrap();
+        std::fs::write(
+            logs_dir.join("c-bad.log"),
+            "this line matches nothing at all\n",
+        )
+        .unwrap();
+
+        let config_path = base.join("config.toml");
+        std::fs::write(&config_path, text_parser_config()).unwrap();
+
+        let db_path = base.join("test.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        let (tx, _rx) = mpsc::channel();
+
+        let summary = run_load(
+            SourceKind::Text,
+            &logs_dir,
+            Some(&config_path),
+            RuleSelection {
+                paths: &[],
+                include_builtin_aul: false,
+            },
+            conn,
+            2, // 3 files > 1, so this exercises run_parallel
+            &tx,
+        )
+        .unwrap();
+
+        assert_eq!(summary.inserted, 3); // 1 from a.log + 2 from b.log
+        assert_eq!(summary.loaded_sources.len(), 2); // a.log, b.log
+        assert_eq!(summary.skipped.len(), 1); // c-bad.log
+        let bad_entry = &summary.skipped[0];
+        assert_eq!(bad_entry.path.file_name().unwrap(), "c-bad.log");
+        assert!(
+            bad_entry.reason.contains("does not match"),
+            "unexpected skip reason: {}",
+            bad_entry.reason
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A single-file pick always has exactly one entry in
+    /// `collect_source_files`, so `run_load` must take the `run_sequential`
+    /// path, not `run_parallel` — this pins that down directly (as opposed
+    /// to the folder test above, which by construction only ever exercises
+    /// the parallel path once there's more than one file).
+    #[test]
+    fn run_load_with_a_single_file_uses_the_sequential_path() {
+        let base = temp_test_dir("run-load-single-file");
+        let log_path = base.join("only.log");
+        std::fs::write(
+            &log_path,
+            "2026-07-28T12:00:00+0200 ERROR something broke\n",
+        )
+        .unwrap();
+        let config_path = base.join("config.toml");
+        std::fs::write(&config_path, text_parser_config()).unwrap();
+
+        let db_path = base.join("test.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        let (tx, _rx) = mpsc::channel();
+
+        let summary = run_load(
+            SourceKind::Text,
+            &log_path,
+            Some(&config_path),
+            RuleSelection {
+                paths: &[],
+                include_builtin_aul: false,
+            },
+            conn,
+            4, // irrelevant with a single file — must still behave correctly
+            &tx,
+        )
+        .unwrap();
+
+        assert_eq!(summary.inserted, 1);
+        assert_eq!(summary.loaded_sources.len(), 1);
+        assert_eq!(
+            summary.loaded_sources[0].path,
+            log_path.display().to_string()
+        );
+        assert!(summary.skipped.is_empty());
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Same folder-load scenario as
+    /// `run_load_recurses_a_folder_loading_good_files_and_skipping_a_bad_one`,
+    /// but run twice with different `thread_count`s — the aggregate result
+    /// must be identical regardless of how many worker threads did the
+    /// parsing, only the completion order (invisible here, since results
+    /// are sorted before returning) can differ.
+    #[test]
+    fn run_load_produces_the_same_result_regardless_of_thread_count() {
+        let base = temp_test_dir("run-load-thread-counts");
+        let logs_dir = base.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        for (name, content) in [
+            ("a.log", "2026-07-28T12:00:00+0200 ERROR one\n"),
+            ("b.log", "2026-07-28T12:01:00+0200 ERROR two\n"),
+            ("c.log", "2026-07-28T12:02:00+0200 ERROR three\n"),
+            ("d.log", "2026-07-28T12:03:00+0200 ERROR four\n"),
+        ] {
+            std::fs::write(logs_dir.join(name), content).unwrap();
+        }
+        let config_path = base.join("config.toml");
+        std::fs::write(&config_path, text_parser_config()).unwrap();
+
+        let mut results = Vec::new();
+        for thread_count in [1usize, 4] {
+            let db_path = base.join(format!("test-{thread_count}.duckdb"));
+            let conn = duckdb::Connection::open(&db_path).unwrap();
+            let (tx, _rx) = mpsc::channel();
+            let summary = run_load(
+                SourceKind::Text,
+                &logs_dir,
+                Some(&config_path),
+                RuleSelection {
+                    paths: &[],
+                    include_builtin_aul: false,
+                },
+                conn,
+                thread_count,
+                &tx,
+            )
+            .unwrap();
+            let paths: Vec<String> = summary
+                .loaded_sources
+                .iter()
+                .map(|s| s.path.clone())
+                .collect();
+            results.push((summary.inserted, summary.skipped.len(), paths));
+        }
+
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[0].0, 4);
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn path_byte_size_sums_a_directorys_files_recursively() {
+        let dir = temp_test_dir("byte-size-dir");
+        std::fs::write(dir.join("a"), vec![0u8; 100]).unwrap();
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("b"), vec![0u8; 50]).unwrap();
+
+        assert_eq!(path_byte_size(&dir), 150);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn path_byte_size_of_a_plain_file_is_its_own_size() {
+        let dir = temp_test_dir("byte-size-file");
+        let file = dir.join("only.log");
+        std::fs::write(&file, vec![0u8; 42]).unwrap();
+
+        assert_eq!(path_byte_size(&file), 42);
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

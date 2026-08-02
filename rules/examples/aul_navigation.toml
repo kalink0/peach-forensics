@@ -1,9 +1,12 @@
 # AUL pattern-of-life: turn-by-turn navigation (Maps) usage.
-# Substrings ported from iLEAPP's logarchive_navigation artifact
-# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py). The
-# original SQL LIKE patterns used a couple of literal-percent escapes
-# ('Proceed to\%', 'Arrived\%') that don't translate to a plain substring
-# check; those are covered here by their unescaped prefixes instead.
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive navigation". The source's `'%Proceed to\%'`/`'%Arrived\%'`
+# predicates use `\%` as an escaped *literal* percent character, not a
+# wildcard — they match text containing an actual "%" right after "Proceed
+# to"/"Arrived" (e.g. a literal progress percentage in the message), so
+# they're ported here as "Proceed to%"/"Arrived%" with the real percent
+# character, not broadened to a bare "Proceed to"/"Arrived".
 
 [rule]
 name = "aul_navigation"
@@ -14,6 +17,7 @@ sourcetype = "aul"
 message_contains = [
     "Starting route to",
     "Proceed to the",
+    "Proceed to%",
     "Turn right",
     "Turn left",
     "roundabout",
@@ -25,7 +29,7 @@ message_contains = [
     "then arrive",
     "your destination",
     "At the light",
-    "Arrived",
+    "Arrived%",
 ]
 
 [rule.tag]

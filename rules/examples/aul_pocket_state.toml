@@ -1,0 +1,20 @@
+# AUL pattern-of-life: front infrared sensor logging when the device is
+# face-down or stowed, and when it comes back out. Directly speaks to "the
+# phone was in my pocket." Predicates from "Apple Unified Log Predicates in
+# iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive pocket state".
+
+[rule]
+name = "aul_pocket_state"
+description = "Front infrared sensor: device face-down/stowed vs. out"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Doppler in pocket state",
+    "PocketState changed",
+]
+
+[rule.tag]
+value = "pocket_state"

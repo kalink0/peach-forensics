@@ -47,7 +47,11 @@ impl ParserConfig {
 /// assigning the stable [`EventId`] is centralized in [`parse_source`], so
 /// `source_file_id`/`sequence_number` assignment is identical and
 /// deterministic no matter which parser produced the data.
-pub trait LogParser {
+///
+/// `: Sync` so a `&dyn LogParser` can be shared with the parser worker
+/// threads `app.rs::run_load` spawns for a multi-file folder load — every
+/// implementor here is a stateless unit struct, so this costs nothing.
+pub trait LogParser: Sync {
     fn sourcetype(&self) -> &str;
     fn parse(&self, path: &Path, config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>>;
 
@@ -61,7 +65,7 @@ pub trait LogParser {
     /// serialized `raw`/`fields` JSON copy) in one `Vec` before the first
     /// row reaches DuckDB is what drove a 219 MB source past 45 GB of RSS
     /// during testing — DuckDB, not the Rust heap, is supposed to hold the
-    /// bulk timeline (see CLAUDE.md's "nicht im RAM halten" principle).
+    /// bulk timeline.
     fn parse_streaming(
         &self,
         path: &Path,

@@ -1,0 +1,25 @@
+# AUL pattern-of-life: sensor-level entries from the Face ID and Touch ID
+# stacks (camera frames with face-detected/attention/glasses flags,
+# face-to-device distance, SpringBoard face-in-view notices, and home-button
+# finger-on/finger-off events). Records what the hardware saw, not an unlock
+# decision — pair with aul_screen_lock_state/aul_unlock_sessions.
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive biometric sensor events".
+
+[rule]
+name = "aul_biometric_sensor_events"
+description = "Face ID / Touch ID sensor-level events (not the unlock decision itself)"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "PearlCamFrameReceived",
+    "getFaceDetectInfo",
+    "[User Presence Monitor]",
+    "kAppleBiometricFinger",
+    "Home Button Was Pressed",
+]
+
+[rule.tag]
+value = "biometric_sensor_events"

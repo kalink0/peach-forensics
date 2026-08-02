@@ -1,0 +1,24 @@
+# AUL pattern-of-life: where the sound went — receiver, speaker, or a
+# Bluetooth device, for calls and other audio sessions. Bluetooth routes
+# carry the accessory MAC address, which is hands-free-versus-handset
+# evidence during a call. Separate from aul_audio_volume (button presses
+# and playback state, not routing). Predicates from "Apple Unified Log
+# Predicates in iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive audio routes".
+
+[rule]
+name = "aul_audio_routes"
+description = "Audio output routing — receiver, speaker, or Bluetooth device"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "vaemConfigurePVMSettings",
+    "vaemVADRouteChangeListener",
+    "cmsmActivateEndpointFromRouteDescription",
+    "currently activating endpoint",
+]
+
+[rule.tag]
+value = "audio_routes"

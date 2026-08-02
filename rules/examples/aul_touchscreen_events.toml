@@ -1,0 +1,26 @@
+# AUL pattern-of-life: fingers physically on glass — digitizer contact
+# presence per finger, per-app touch statistics windows, touch attention
+# events, and tap-to-wake. Predicates from "Apple Unified Log Predicates in
+# iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive touchscreen events". The source's contact-presence predicate
+# is `%contact _ presence:%`, a SQL LIKE pattern where `_` is a single-char
+# wildcard (a per-finger index or similar token between literal spaces) —
+# Peach's substring-only matching can't replicate a wildcard, so this
+# matches the stable literal fragment around it instead.
+
+[rule]
+name = "aul_touchscreen_events"
+description = "Direct touchscreen contact — fingers physically on the glass"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    " presence:",
+    "touchstats",
+    "received tapToWake",
+    "AttentionAwareness.Touch",
+]
+
+[rule.tag]
+value = "touchscreen_events"

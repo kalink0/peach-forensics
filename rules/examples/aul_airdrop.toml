@@ -1,0 +1,27 @@
+# AUL pattern-of-life: the device's rotating AirDrop ID (observed in the
+# clear), discoverability scanning mode (Everyone, Contacts Only, Off),
+# SharingDaemon state dumps with device model and battery level, share
+# sheet activation, and transfer entries. AirDrop IDs rotate, so an ID ties
+# activity together only within one session. Predicates from "Apple Unified
+# Log Predicates in iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive AirDrop".
+
+[rule]
+name = "aul_airdrop"
+description = "AirDrop discoverability, ID, and transfer activity"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "AirDrop ID",
+    "SharingDaemon State",
+    "Scanning mode",
+    "startSending",
+    "New incoming transfer",
+    "alertLog: idx:",
+    "Activating com.apple.sharing.sharesheet",
+]
+
+[rule.tag]
+value = "airdrop"

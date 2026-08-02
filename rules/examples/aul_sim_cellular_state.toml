@@ -1,0 +1,23 @@
+# AUL pattern-of-life: SIM slot status values, cellular data network type
+# changes, and itunestored's view of the network type (which catches
+# WiFi-to-cellular fallback). Slot status records state at logging time,
+# not the moment a card physically moved. Predicates from "Apple Unified
+# Log Predicates in iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive SIM and cellular state".
+
+[rule]
+name = "aul_sim_cellular_state"
+description = "SIM slot status and cellular/WiFi data network type changes"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "kCTSIMSupportSIMStatus",
+    "dataNetwork changed to",
+    "disabling dataNetwork",
+    "ISNetworkObserver: Set network type",
+]
+
+[rule.tag]
+value = "sim_cellular_state"

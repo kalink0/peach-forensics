@@ -1,0 +1,20 @@
+# AUL pattern-of-life: charge level changes posted by powerd and battery
+# info updates from PowerUIAgent. A charge curve corroborates charging
+# claims and powered-on state. Predicates from "Apple Unified Log
+# Predicates in iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive battery state".
+
+[rule]
+name = "aul_battery_state"
+description = "Battery charge level and charging state changes"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Battery capacity change posted",
+    "battery info changed to",
+]
+
+[rule.tag]
+value = "battery_state"

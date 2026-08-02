@@ -1,6 +1,8 @@
-# AUL pattern-of-life: app launches / foreground switches.
-# Substrings ported from iLEAPP's logarchive_executed_apps artifact
-# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+# AUL pattern-of-life: app icon taps and launches (finer-grained focus/
+# lifecycle tracking is a separate rule, aul_app_focus_lifecycle).
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive executed apps".
 
 [rule]
 name = "aul_app_launch"

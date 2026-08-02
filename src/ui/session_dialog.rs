@@ -16,6 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
+use anyhow::Context;
 use eframe::egui;
 
 use crate::db::timeline_queries::{self, Query};
@@ -36,6 +37,11 @@ pub struct SessionEntry {
     /// for this session, or forever for a `has_data: false` (empty)
     /// session — never counted, there's nothing to count.
     event_count: Option<usize>,
+    /// Combined on-disk size of this session's `.sqlite`, `.duckdb`, and (if
+    /// present) `.duckdb.wal` files — a plain `stat()`, cheap enough to
+    /// compute synchronously in `scan_sessions` rather than backgrounded
+    /// like `event_count` (which needs an actual DuckDB query).
+    size_bytes: u64,
 }
 
 pub enum SessionManagerDialog {
@@ -60,10 +66,21 @@ impl SessionManagerDialog {
 
     /// Scans `sessions_dir` and opens the dialog listing whatever's there,
     /// kicking off a background count of each data-backed session's
-    /// events.
-    pub fn open(sessions_dir: &Path) -> Self {
+    /// events. `current_conn` is a `TimelineView::try_clone_conn()` clone
+    /// for `current_session_id` (the running app's own session) if it has
+    /// data — used instead of independently re-opening that one session's
+    /// `.duckdb` file, since that file may well still be open via the
+    /// running app's own connection; see `try_clone_conn`'s doc comment for
+    /// why a second, unrelated open of the same file can fail on Windows.
+    /// Every other session in the list is safe to open fresh — nothing
+    /// else in this process has them open.
+    pub fn open(
+        sessions_dir: &Path,
+        current_session_id: &str,
+        current_conn: Option<duckdb::Connection>,
+    ) -> Self {
         let entries = scan_sessions(sessions_dir);
-        let count_rx = spawn_event_counts(&entries);
+        let count_rx = spawn_event_counts(&entries, current_session_id, current_conn);
         Self::Open {
             entries,
             pending_delete: None,
@@ -140,9 +157,12 @@ impl SessionManagerDialog {
                         let is_current = entry.id == current_session_id;
                         ui.horizontal(|ui| {
                             let label = if entry.has_data {
+                                let size = format_bytes(entry.size_bytes);
                                 match entry.event_count {
-                                    Some(count) => format!("{} — {count} events", entry.id),
-                                    None => format!("{} (counting…)", entry.id),
+                                    Some(count) => {
+                                        format!("{} — {count} events, {size}", entry.id)
+                                    }
+                                    None => format!("{} (counting…), {size}", entry.id),
                                 }
                             } else {
                                 format!("{} (empty)", entry.id)
@@ -159,6 +179,18 @@ impl SessionManagerDialog {
                                 outcome =
                                     Some(SessionManagerOutcome::Open(entry.sqlite_path.clone()));
                                 close = true;
+                            }
+
+                            if ui
+                                .button("Open folder")
+                                .on_hover_text(
+                                    "Show this session's .sqlite/.duckdb files in the file \
+                                     manager — handy for copying the session elsewhere",
+                                )
+                                .clicked()
+                                && let Err(err) = reveal_in_file_manager(&entry.sqlite_path)
+                            {
+                                *error = Some(format!("{err:#}"));
                             }
 
                             if pending_delete.as_deref() == Some(entry.id.as_str()) {
@@ -207,8 +239,9 @@ impl SessionManagerDialog {
     }
 }
 
-/// Every `<id>.sqlite` in `dir` is a session, paired with `<id>.duckdb` if
-/// data has been loaded into it (see the module doc for why a missing
+/// Every subdirectory of `dir` named `<id>` containing an `<id>.sqlite` is a
+/// session (see `session::persist::SessionPaths`), paired with `<id>.duckdb`
+/// if data has been loaded into it (see the module doc for why a missing
 /// `.duckdb` isn't treated as an error). Sorted newest-first — session ids
 /// embed a `session-YYYYMMDD-HHMMSS` timestamp, so a plain string sort
 /// already orders chronologically.
@@ -219,24 +252,53 @@ fn scan_sessions(dir: &Path) -> Vec<SessionEntry> {
     let mut entries: Vec<SessionEntry> = read_dir
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
-            let sqlite_path = entry.path();
-            if sqlite_path.extension().and_then(|ext| ext.to_str()) != Some("sqlite") {
+            let session_dir = entry.path();
+            let id = session_dir.file_name()?.to_str()?.to_string();
+            let sqlite_path = session_dir.join(format!("{id}.sqlite"));
+            if !sqlite_path.is_file() {
                 return None;
             }
-            let id = sqlite_path.file_stem()?.to_str()?.to_string();
-            let duckdb_path = dir.join(format!("{id}.duckdb"));
+            let duckdb_path = session_dir.join(format!("{id}.duckdb"));
             let has_data = duckdb_path.exists();
+            let wal_path = session_dir.join(format!("{id}.duckdb.wal"));
+            let size_bytes = [&sqlite_path, &duckdb_path, &wal_path]
+                .iter()
+                .filter_map(|path| std::fs::metadata(path).ok())
+                .map(|metadata| metadata.len())
+                .sum();
             Some(SessionEntry {
                 id,
                 sqlite_path,
                 duckdb_path,
                 has_data,
                 event_count: None,
+                size_bytes,
             })
         })
         .collect();
     entries.sort_by(|a, b| b.id.cmp(&a.id));
     entries
+}
+
+/// Human-readable file size — B/KB/MB/GB, one decimal place from KB up
+/// (matches the load-progress bar's `MB` formatting elsewhere in the UI,
+/// just picking the right unit instead of assuming MB always fits).
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = UNITS[0];
+    for &next_unit in &UNITS[1..] {
+        if value < 1000.0 {
+            break;
+        }
+        value /= 1000.0;
+        unit = next_unit;
+    }
+    if unit == "B" {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {unit}")
+    }
 }
 
 /// Counts `log_entries` for every data-backed session in `entries`, one
@@ -248,7 +310,14 @@ fn scan_sessions(dir: &Path) -> Vec<SessionEntry> {
 /// each session's count the moment it's known instead of waiting for the
 /// slowest one. `None` if there's nothing to count at all, so `ui()` never
 /// shows a spinner for an all-empty sessions directory.
-fn spawn_event_counts(entries: &[SessionEntry]) -> Option<mpsc::Receiver<(String, usize)>> {
+///
+/// `current_session_id`'s target uses `current_conn` (if given) instead of
+/// opening its `.duckdb` file independently — see `open`'s doc comment.
+fn spawn_event_counts(
+    entries: &[SessionEntry],
+    current_session_id: &str,
+    current_conn: Option<duckdb::Connection>,
+) -> Option<mpsc::Receiver<(String, usize)>> {
     let targets: Vec<(String, PathBuf)> = entries
         .iter()
         .filter(|entry| entry.has_data)
@@ -258,11 +327,17 @@ fn spawn_event_counts(entries: &[SessionEntry]) -> Option<mpsc::Receiver<(String
         return None;
     }
 
+    let current_session_id = current_session_id.to_string();
+    let mut current_conn = current_conn;
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for (id, duckdb_path) in targets {
-            let count = duckdb::Connection::open(&duckdb_path)
-                .ok()
+            let conn = if id == current_session_id {
+                current_conn.take()
+            } else {
+                duckdb::Connection::open(&duckdb_path).ok()
+            };
+            let count = conn
                 .and_then(|conn| timeline_queries::count_matching(&conn, &Query::default()).ok())
                 .unwrap_or(0);
             if tx.send((id, count)).is_err() {
@@ -275,55 +350,101 @@ fn spawn_event_counts(entries: &[SessionEntry]) -> Option<mpsc::Receiver<(String
     Some(rx)
 }
 
-/// Removes every file that can belong to a session — `.sqlite`, `.duckdb`,
-/// and DuckDB's `.duckdb.wal` write-ahead log (present if the app closed,
-/// or crashed, before a checkpoint) — tolerating any of them already being
-/// absent (an empty session has no `.duckdb`/`.wal` at all) rather than
-/// treating that as failure.
-fn delete_session_files(entry: &SessionEntry) -> anyhow::Result<()> {
-    remove_if_exists(&entry.sqlite_path)?;
-    remove_if_exists(&entry.duckdb_path)?;
-    remove_if_exists(&entry.duckdb_path.with_extension("duckdb.wal"))?;
+/// Opens the OS file manager at `path`'s containing folder — every one of a
+/// session's files (`<id>.sqlite`, `<id>.duckdb`, its `.wal`) lives in that
+/// session's own dedicated subdirectory (see
+/// `session::persist::SessionPaths`), so revealing any one of them (here,
+/// always `<id>.sqlite` — it's the one path every session, even an empty
+/// one, is guaranteed to have) opens exactly that session's folder, nothing
+/// else's — the whole point being a one-drag copy for a hand-off.
+/// Explorer/Finder select the file itself; `xdg-open` on Linux just opens
+/// the containing folder — there's no cross-desktop convention for "open
+/// and select a specific file" to rely on there. Best-effort: spawns and
+/// returns, doesn't wait for or check an exit status (`explorer.exe` in
+/// particular is well known to report a nonzero exit code even on success).
+fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .context("failed to launch Explorer")?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .context("failed to launch Finder")?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dir = path.parent().unwrap_or(path);
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .context("failed to launch the file manager (is xdg-open installed?)")?;
+    }
     Ok(())
 }
 
-/// Deletes the session at `sqlite_path` only if it's empty (no `.duckdb` —
-/// see the module doc for why that means "nothing was ever loaded into
-/// it"). Used by `PeachApp::on_exit` so quitting without loading anything
-/// doesn't leave behind a session file that just clutters "Manage
-/// sessions" forever; a session with data is left untouched even if asked,
-/// as a safety net against ever calling this on the wrong path.
+/// Removes a session's whole directory — `<id>.sqlite`, `<id>.duckdb`, and
+/// DuckDB's `.wal` write-ahead log (present if the app closed, or crashed,
+/// before a checkpoint) all live there, so one `remove_dir_all` replaces
+/// what used to be three separate per-file removals. Tolerates the
+/// directory already being absent rather than treating that as failure.
+fn delete_session_files(entry: &SessionEntry) -> anyhow::Result<()> {
+    let session_dir = entry
+        .sqlite_path
+        .parent()
+        .expect("sqlite_path is always session_dir/<id>.sqlite");
+    remove_dir_if_exists(session_dir)
+}
+
+/// Deletes the session directory backing `sqlite_path` only if it's empty
+/// (no `<id>.duckdb` — see the module doc for why that means "nothing
+/// was ever loaded into it"). Used by `PeachApp::on_exit` so quitting
+/// without loading anything doesn't leave behind a session directory that
+/// just clutters "Manage sessions" forever; a session with data is left
+/// untouched even if asked, as a safety net against ever calling this on
+/// the wrong path.
 pub fn delete_if_empty(sqlite_path: &Path) -> anyhow::Result<()> {
     let duckdb_path = sqlite_path.with_extension("duckdb");
     if duckdb_path.exists() {
         return Ok(());
     }
-    remove_if_exists(sqlite_path)
+    let Some(session_dir) = sqlite_path.parent() else {
+        return Ok(());
+    };
+    remove_dir_if_exists(session_dir)
 }
 
-/// Removes every empty session (no `.duckdb`) currently in `sessions_dir`
-/// — called once at startup (`PeachApp::new`), before that run's own new
-/// session is created. This is the reliable backstop for the same cleanup
-/// `on_exit`/`delete_if_empty` do best-effort on a graceful shutdown:
-/// `on_exit` only runs when the window closes normally, so a killed
-/// process, a crash, or a forced quit leaves an empty session behind that
-/// nothing cleans up until *some later* startup sweeps it away. Best-effort
-/// per session — one failing removal (e.g. a permissions issue) doesn't
-/// stop the rest from being swept.
+/// Removes every empty session (no `<id>.duckdb`) currently in
+/// `sessions_dir` — called once at startup (`PeachApp::new`), before that
+/// run's own new session is created. This is the reliable backstop for the
+/// same cleanup `on_exit`/`delete_if_empty` do best-effort on a graceful
+/// shutdown: `on_exit` only runs when the window closes normally, so a
+/// killed process, a crash, or a forced quit leaves an empty session
+/// behind that nothing cleans up until *some later* startup sweeps it
+/// away. Best-effort per session — one failing removal (e.g. a permissions
+/// issue) doesn't stop the rest from being swept.
 pub fn sweep_empty_sessions(sessions_dir: &Path) {
     for entry in scan_sessions(sessions_dir) {
-        if !entry.has_data {
-            let _ = remove_if_exists(&entry.sqlite_path);
+        if !entry.has_data
+            && let Some(session_dir) = entry.sqlite_path.parent()
+        {
+            let _ = remove_dir_if_exists(session_dir);
         }
     }
 }
 
-fn remove_if_exists(path: &Path) -> anyhow::Result<()> {
-    match std::fs::remove_file(path) {
+fn remove_dir_if_exists(dir: &Path) -> anyhow::Result<()> {
+    match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => {
-            Err(anyhow::Error::from(err).context(format!("failed to remove {}", path.display())))
+            Err(anyhow::Error::from(err).context(format!("failed to remove {}", dir.display())))
         }
     }
 }
@@ -345,13 +466,29 @@ mod tests {
         dir
     }
 
+    /// Creates `dir/<id>/<id>.sqlite` (and `<id>.duckdb` too, if
+    /// `with_duckdb`) — the on-disk shape `scan_sessions` et al. expect.
+    /// Returns `(sqlite_path, duckdb_path)`; `duckdb_path` is returned even
+    /// when not created, since callers need it either way to build a
+    /// `SessionEntry`.
+    fn make_session(dir: &Path, id: &str, with_duckdb: bool) -> (PathBuf, PathBuf) {
+        let session_dir = dir.join(id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let sqlite_path = session_dir.join(format!("{id}.sqlite"));
+        let duckdb_path = session_dir.join(format!("{id}.duckdb"));
+        std::fs::write(&sqlite_path, b"").unwrap();
+        if with_duckdb {
+            std::fs::write(&duckdb_path, b"").unwrap();
+        }
+        (sqlite_path, duckdb_path)
+    }
+
     #[test]
     fn scan_sessions_lists_both_empty_and_data_backed_sessions_newest_first() {
         let dir = temp_sessions_dir("scan");
-        std::fs::write(dir.join("session-20260101-000000.sqlite"), b"").unwrap();
-        std::fs::write(dir.join("session-20260102-000000.sqlite"), b"").unwrap();
-        std::fs::write(dir.join("session-20260102-000000.duckdb"), b"").unwrap();
-        // Not a session file at all — must be ignored.
+        make_session(&dir, "session-20260101-000000", false);
+        make_session(&dir, "session-20260102-000000", true);
+        // Not a session directory at all — must be ignored.
         std::fs::write(dir.join("notes.txt"), b"").unwrap();
 
         let entries = scan_sessions(&dir);
@@ -365,68 +502,104 @@ mod tests {
     }
 
     #[test]
-    fn delete_session_files_removes_the_whole_triple_and_tolerates_missing_ones() {
+    fn scan_sessions_sums_sqlite_duckdb_and_wal_sizes() {
+        let dir = temp_sessions_dir("scan-size");
+        let (sqlite_path, duckdb_path) = make_session(&dir, "session-20260101-000000", true);
+        std::fs::write(&sqlite_path, vec![0u8; 100]).unwrap();
+        std::fs::write(&duckdb_path, vec![0u8; 250]).unwrap();
+        std::fs::write(duckdb_path.with_extension("duckdb.wal"), vec![0u8; 50]).unwrap();
+
+        let entries = scan_sessions(&dir);
+
+        assert_eq!(entries[0].size_bytes, 400);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn format_bytes_picks_the_right_unit() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(999), "999 B");
+        assert_eq!(format_bytes(1_500), "1.5 KB");
+        assert_eq!(format_bytes(2_500_000), "2.5 MB");
+        assert_eq!(format_bytes(3_500_000_000), "3.5 GB");
+    }
+
+    #[test]
+    fn delete_session_files_removes_the_whole_session_directory() {
         let dir = temp_sessions_dir("delete");
-        let sqlite_path = dir.join("session-20260101-000000.sqlite");
-        let duckdb_path = dir.join("session-20260101-000000.duckdb");
-        let wal_path = dir.join("session-20260101-000000.duckdb.wal");
-        std::fs::write(&sqlite_path, b"").unwrap();
-        std::fs::write(&duckdb_path, b"").unwrap();
-        std::fs::write(&wal_path, b"").unwrap();
+        let (sqlite_path, duckdb_path) = make_session(&dir, "session-20260101-000000", true);
+        std::fs::write(duckdb_path.with_extension("duckdb.wal"), b"").unwrap();
+        let session_dir = sqlite_path.parent().unwrap().to_path_buf();
         let entry = SessionEntry {
             id: "session-20260101-000000".to_string(),
-            sqlite_path: sqlite_path.clone(),
-            duckdb_path: duckdb_path.clone(),
+            sqlite_path,
+            duckdb_path,
             has_data: true,
             event_count: None,
+            size_bytes: 0,
         };
 
         delete_session_files(&entry).unwrap();
 
-        assert!(!sqlite_path.exists());
-        assert!(!duckdb_path.exists());
-        assert!(!wal_path.exists());
-        std::fs::remove_dir_all(dir).unwrap();
+        assert!(!session_dir.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn delete_session_files_is_fine_with_an_empty_session_that_never_had_a_duckdb_file() {
         let dir = temp_sessions_dir("delete-empty");
-        let sqlite_path = dir.join("session-20260101-000000.sqlite");
-        std::fs::write(&sqlite_path, b"").unwrap();
+        let (sqlite_path, duckdb_path) = make_session(&dir, "session-20260101-000000", false);
+        let session_dir = sqlite_path.parent().unwrap().to_path_buf();
         let entry = SessionEntry {
             id: "session-20260101-000000".to_string(),
-            sqlite_path: sqlite_path.clone(),
-            duckdb_path: dir.join("session-20260101-000000.duckdb"),
+            sqlite_path,
+            duckdb_path,
             has_data: false,
             event_count: None,
+            size_bytes: 0,
         };
 
         delete_session_files(&entry).unwrap();
 
-        assert!(!sqlite_path.exists());
-        std::fs::remove_dir_all(dir).unwrap();
+        assert!(!session_dir.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delete_session_files_tolerates_an_already_removed_directory() {
+        let dir = temp_sessions_dir("delete-already-gone");
+        let (sqlite_path, duckdb_path) = make_session(&dir, "session-20260101-000000", true);
+        let session_dir = sqlite_path.parent().unwrap().to_path_buf();
+        std::fs::remove_dir_all(&session_dir).unwrap();
+        let entry = SessionEntry {
+            id: "session-20260101-000000".to_string(),
+            sqlite_path,
+            duckdb_path,
+            has_data: true,
+            event_count: None,
+            size_bytes: 0,
+        };
+
+        delete_session_files(&entry).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn delete_if_empty_removes_a_session_with_no_duckdb_file() {
         let dir = temp_sessions_dir("delete-if-empty-empty");
-        let sqlite_path = dir.join("session-20260101-000000.sqlite");
-        std::fs::write(&sqlite_path, b"").unwrap();
+        let (sqlite_path, _) = make_session(&dir, "session-20260101-000000", false);
+        let session_dir = sqlite_path.parent().unwrap().to_path_buf();
 
         delete_if_empty(&sqlite_path).unwrap();
 
-        assert!(!sqlite_path.exists());
-        std::fs::remove_dir_all(dir).unwrap();
+        assert!(!session_dir.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn delete_if_empty_leaves_a_session_with_data_untouched() {
         let dir = temp_sessions_dir("delete-if-empty-data");
-        let sqlite_path = dir.join("session-20260101-000000.sqlite");
-        let duckdb_path = dir.join("session-20260101-000000.duckdb");
-        std::fs::write(&sqlite_path, b"").unwrap();
-        std::fs::write(&duckdb_path, b"").unwrap();
+        let (sqlite_path, duckdb_path) = make_session(&dir, "session-20260101-000000", true);
 
         delete_if_empty(&sqlite_path).unwrap();
 
@@ -435,28 +608,23 @@ mod tests {
             "must not delete a session that has data"
         );
         assert!(duckdb_path.exists());
-        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn sweep_empty_sessions_removes_only_the_ones_without_a_duckdb_file() {
         let dir = temp_sessions_dir("sweep");
-        let empty_a = dir.join("session-20260101-000000.sqlite");
-        let empty_b = dir.join("session-20260101-000001.sqlite");
-        let data_sqlite = dir.join("session-20260102-000000.sqlite");
-        let data_duckdb = dir.join("session-20260102-000000.duckdb");
-        std::fs::write(&empty_a, b"").unwrap();
-        std::fs::write(&empty_b, b"").unwrap();
-        std::fs::write(&data_sqlite, b"").unwrap();
-        std::fs::write(&data_duckdb, b"").unwrap();
+        let (empty_a, _) = make_session(&dir, "session-20260101-000000", false);
+        let (empty_b, _) = make_session(&dir, "session-20260101-000001", false);
+        let (data_sqlite, data_duckdb) = make_session(&dir, "session-20260102-000000", true);
 
         sweep_empty_sessions(&dir);
 
-        assert!(!empty_a.exists());
-        assert!(!empty_b.exists());
+        assert!(!empty_a.parent().unwrap().exists());
+        assert!(!empty_b.parent().unwrap().exists());
         assert!(data_sqlite.exists(), "must not touch a session with data");
         assert!(data_duckdb.exists());
-        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn seed_duckdb(path: &Path, message_count: usize) {
@@ -489,13 +657,13 @@ mod tests {
     #[test]
     fn open_counts_events_for_data_backed_sessions_in_the_background() {
         let dir = temp_sessions_dir("event-counts");
-        std::fs::write(dir.join("session-20260101-000000.sqlite"), b"").unwrap();
         // An empty session (no `.duckdb`) alongside a data-backed one —
         // only the latter should ever get a count.
-        std::fs::write(dir.join("session-20260102-000000.sqlite"), b"").unwrap();
-        seed_duckdb(&dir.join("session-20260102-000000.duckdb"), 3);
+        make_session(&dir, "session-20260101-000000", false);
+        let (_, duckdb_path) = make_session(&dir, "session-20260102-000000", false);
+        seed_duckdb(&duckdb_path, 3);
 
-        let mut dialog = SessionManagerDialog::open(&dir);
+        let mut dialog = SessionManagerDialog::open(&dir, "no-such-session", None);
         for _ in 0..500 {
             if !dialog.poll_counts() {
                 break;

@@ -18,6 +18,15 @@ use thiserror::Error;
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Rule {
     pub rule: RuleBody,
+    /// `message_contains` needles, precomputed once from
+    /// `rule.match_fields` here at parse time rather than rebuilt on every
+    /// [`Rule::matches`] call. Import-time tagging runs `matches()` once per
+    /// (entry, rule) pair — millions of times for a large AUL load — so
+    /// re-deriving this `Vec` from the TOML value on every call would mean
+    /// millions of redundant allocations for a list that never changes
+    /// after the rule is loaded.
+    #[serde(skip)]
+    message_contains_needles: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -41,7 +50,19 @@ pub struct RuleParseError(#[from] toml::de::Error);
 
 impl Rule {
     pub fn from_toml_str(s: &str) -> Result<Self, RuleParseError> {
-        Ok(toml::from_str(s)?)
+        let mut rule: Rule = toml::from_str(s)?;
+        rule.message_contains_needles = rule
+            .rule
+            .match_fields
+            .get("message_contains")
+            .map(|value| {
+                toml_value_as_strings(value)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(rule)
     }
 
     /// Takes the pieces of an entry that matching actually needs, rather
@@ -63,9 +84,9 @@ impl Rule {
                 "level" => level.is_some_and(|actual| expected.as_str() == Some(actual)),
                 "message" => message.is_some_and(|actual| expected.as_str() == Some(actual)),
                 "message_contains" => message.is_some_and(|actual| {
-                    toml_value_as_strings(expected)
+                    self.message_contains_needles
                         .iter()
-                        .any(|needle| actual.contains(needle))
+                        .any(|needle| actual.contains(needle.as_str()))
                 }),
                 other => fields
                     .get(other)
@@ -99,6 +120,33 @@ fn toml_matches_json(expected: &toml::Value, actual: &serde_json::Value) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every shipped rule file in `rules/examples/` (the AUL
+    /// pattern-of-life pack, see `docs/`) must parse and have a non-empty
+    /// name/tag — a broken TOML file in there would otherwise only surface
+    /// when an analyst actually tries to load it in the app.
+    #[test]
+    fn every_shipped_rule_file_parses() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("rules/examples");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let rule = Rule::from_toml_str(&text)
+                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+            assert!(!rule.rule.name.is_empty(), "{}: empty name", path.display());
+            assert!(
+                !rule.rule.tag.value.is_empty(),
+                "{}: empty tag value",
+                path.display()
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no rule files found in {}", dir.display());
+    }
 
     #[test]
     fn parses_the_evtx_style_example() {
@@ -218,6 +266,27 @@ value = "error"
 
         assert!(rule.matches("aul", None, Some("[Flashlight Controller] on"), &null));
         assert!(!rule.matches("aul", None, Some("unrelated"), &null));
+    }
+
+    #[test]
+    fn message_contains_needles_are_precomputed_once_at_parse_time() {
+        let array_rule = Rule::from_toml_str(
+            "[rule]\nname = \"a\"\n[rule.match]\nmessage_contains = [\"foo\", \"bar\"]\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        assert_eq!(array_rule.message_contains_needles, vec!["foo", "bar"]);
+
+        let bare_string_rule = Rule::from_toml_str(
+            "[rule]\nname = \"b\"\n[rule.match]\nmessage_contains = \"foo\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        assert_eq!(bare_string_rule.message_contains_needles, vec!["foo"]);
+
+        let no_message_contains_rule = Rule::from_toml_str(
+            "[rule]\nname = \"c\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        assert!(no_message_contains_rule.message_contains_needles.is_empty());
     }
 
     #[test]

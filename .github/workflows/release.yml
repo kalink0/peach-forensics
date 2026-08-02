@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: peach-linux
+          - os: windows-latest
+            artifact_name: peach-windows
+          - os: macos-latest
+            artifact_name: peach-macos-arm
+          - os: macos-15-intel
+            artifact_name: peach-macos-intel
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release --all-features --verbose
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: tar -C target/release -czf "${{ matrix.artifact_name }}-${{ github.ref_name }}.tar.gz" peach
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path target\release\peach.exe -DestinationPath "${{ matrix.artifact_name }}-${{ github.ref_name }}.zip"
+
+      - name: Upload release asset (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_name }}-${{ github.ref_name }}.tar.gz
+
+      - name: Upload release asset (Windows)
+        if: runner.os == 'Windows'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_name }}-${{ github.ref_name }}.zip

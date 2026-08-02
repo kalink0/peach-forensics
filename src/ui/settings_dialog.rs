@@ -6,7 +6,7 @@
 
 use eframe::egui;
 
-use crate::config::Settings;
+use crate::config::{self, Settings};
 
 pub enum SettingsOutcome {
     Save(Settings),
@@ -59,6 +59,33 @@ impl SettingsDialog {
                     ui.label(
                         "Applies to new sessions from now on — the session currently open, \
                          and sessions already saved elsewhere, stay where they are.",
+                    );
+
+                    ui.separator();
+                    ui.label("Parse threads for folder loads:");
+                    ui.horizontal(|ui| {
+                        let mut automatic = draft.load_threads.is_none();
+                        if ui.checkbox(&mut automatic, "Automatic").changed() {
+                            draft.load_threads = (!automatic).then(config::default_load_threads);
+                        }
+                        if let Some(mut value) = draft.load_threads {
+                            if ui
+                                .add(egui::DragValue::new(&mut value).range(1..=64))
+                                .changed()
+                            {
+                                draft.load_threads = Some(value);
+                            }
+                        } else {
+                            ui.weak(format!(
+                                "({} on this machine)",
+                                config::default_load_threads()
+                            ));
+                        }
+                    });
+                    ui.label(
+                        "Only used when a folder load resolves to more than one file \
+                         (EVTX/journald/Text). AUL and single-file loads always run on \
+                         one thread — there's nothing to parallelize.",
                     );
 
                     ui.separator();

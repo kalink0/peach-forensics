@@ -1,8 +1,9 @@
-# AUL pattern-of-life: flashlight/torch use.
-# Substrings ported from iLEAPP's logarchive_flashlight artifact
-# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py) — both the
-# unspaced and spaced AVFlashlight log forms are kept, since which one a
-# given iOS release emits varies.
+# AUL pattern-of-life: flashlight/torch use — both the unspaced and spaced
+# AVFlashlight log forms are kept, since which one a given iOS release
+# emits varies. Predicates from "Apple Unified Log Predicates in iLEAPP:
+# The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive flashlight".
 
 [rule]
 name = "aul_flashlight"

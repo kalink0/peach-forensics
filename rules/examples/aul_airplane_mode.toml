@@ -1,6 +1,7 @@
 # AUL pattern-of-life: airplane mode toggled on/off.
-# Substrings ported from iLEAPP's logarchive_airplane_mode artifact
-# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive airplane mode".
 
 [rule]
 name = "aul_airplane_mode"
@@ -20,6 +21,8 @@ message_contains = [
     "Setting airplane mode to false",
     "Airplane mode now inactive",
     "Airplane mode Disabled",
+    "Toggle AirPlane Mode state",
+    "Setting airplane mode enabled",
 ]
 
 [rule.tag]

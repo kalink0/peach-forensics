@@ -2,16 +2,25 @@ use duckdb::{Connection, types::Value};
 
 use crate::model::event_id::EventId;
 
-/// A Splunk-inspired v1 search grammar (Milestone 12) — whitespace-separated
-/// terms, implicit `AND`, explicit `OR`, `NOT`/`-` negation, `field=value` /
-/// `field:value` for exact filters, `field~value` for regex, quoted phrases,
-/// bare words as free text against `message` and `raw`. Left-associative,
-/// no parentheses, no operator precedence — see the `search-grammar-roadmap`
-/// project note for what's deliberately deferred to a later milestone.
+/// A Splunk-inspired v1 search grammar — whitespace-separated terms,
+/// implicit `AND`, explicit `OR`, `NOT`/`-` negation, `field=value` /
+/// `field:value` for exact filters, `field~value` for regex, quoted
+/// phrases, bare words as free text against `message` and `raw`.
+/// Left-associative, no parentheses, no operator precedence — deliberately
+/// deferred, not an oversight (see [`crate::ui::filter_bar`]'s doc comment
+/// for why the multi-select filter buttons work around this with a single
+/// anchored regex alternation instead of composing several terms).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Level,
-    Source,
+    /// `sourcetype=` — the format (`aul`/`evtx`/`journald`/...), matched
+    /// against `sources.sourcetype`. Exact match, like `Level`.
+    Sourcetype,
+    /// `source=` — the actual evidence file, matched against `sources.path`.
+    /// Substring match by default (like `Message`/`Raw`), since a full path
+    /// is rarely worth typing out — `source~` for a regex still works the
+    /// same as any other field.
+    SourceFile,
     Tag,
     Message,
     Raw,
@@ -28,7 +37,8 @@ impl Field {
     fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "level" => Some(Self::Level),
-            "source" | "sourcetype" => Some(Self::Source),
+            "sourcetype" => Some(Self::Sourcetype),
+            "source" => Some(Self::SourceFile),
             "tag" => Some(Self::Tag),
             "message" => Some(Self::Message),
             "raw" => Some(Self::Raw),
@@ -182,20 +192,20 @@ struct CompiledQuery {
 
 impl Query {
     fn compile(&self) -> CompiledQuery {
-        let needs_sources_join = self.terms.iter().any(|t| {
-            matches!(
-                t.kind,
-                TermKind::Field {
-                    field: Field::Source,
-                    ..
-                }
-            )
-        });
-
-        let mut from = "log_entries AS le".to_string();
-        if needs_sources_join {
-            from.push_str(" JOIN sources AS s ON le.event_id_source = s.source_file_id");
-        }
+        // Always joined, not just when a `sourcetype=`/`source=` term is
+        // present: `fetch_window` needs `s.path`/`s.sourcetype` for every
+        // row regardless of the active filter. `LEFT JOIN`, not `JOIN` —
+        // `sources` only gains its row for a file once that whole file has
+        // finished parsing (`insert_source_record` runs after the last
+        // batch, see `app.rs::load_one_file`), so a row already flushed to
+        // `log_entries` mid-load can briefly have no matching `sources` row
+        // yet. An inner join would make those rows vanish from the live
+        // view until their file completes — `LEFT JOIN` keeps them visible
+        // with an empty source column instead, consistent with how the
+        // live entry count already behaves during a load.
+        let from = "log_entries AS le \
+             LEFT JOIN sources AS s ON le.event_id_source = s.source_file_id"
+            .to_string();
 
         let mut params = Vec::new();
         let mut where_clause: Option<String> = None;
@@ -288,7 +298,8 @@ fn compile_term_kind(kind: &TermKind) -> (String, Vec<Value>) {
         } => {
             let column = match field {
                 Field::Level => "le.level",
-                Field::Source => "s.sourcetype",
+                Field::Sourcetype => "s.sourcetype",
+                Field::SourceFile => "s.path",
                 Field::Message => "le.message",
                 Field::Raw => "le.raw",
                 Field::Tag | Field::After | Field::Before => unreachable!("handled above"),
@@ -300,10 +311,10 @@ fn compile_term_kind(kind: &TermKind) -> (String, Vec<Value>) {
                 )
             } else {
                 match field {
-                    Field::Level | Field::Source => {
+                    Field::Level | Field::Sourcetype => {
                         (format!("{column} = ?"), vec![Value::Text(value.clone())])
                     }
-                    Field::Message | Field::Raw => (
+                    Field::SourceFile | Field::Message | Field::Raw => (
                         format!("{column} LIKE ? ESCAPE '\\'"),
                         vec![Value::Text(format!("%{}%", escape_like(value)))],
                     ),
@@ -362,6 +373,42 @@ pub struct DisplayRow {
     pub level: String,
     pub message: String,
     pub tags: Vec<String>,
+    /// The evidence file this entry came from (`sources.path`). Empty for
+    /// the brief window where a row has been flushed to `log_entries` but
+    /// its file hasn't finished parsing yet — see `compile`'s `LEFT JOIN`
+    /// comment.
+    pub source_path: String,
+    /// `sources.sourcetype` (`aul`/`evtx`/`journald`/...) for this entry's
+    /// source file. Same brief-empty-window caveat as `source_path`.
+    pub sourcetype: String,
+    /// Originating host, extracted from `fields` where the sourcetype has
+    /// one — journald's `_HOSTNAME` or EVTX's `Event.System.Computer`. AUL
+    /// is a single-device archive (no host concept), so it's empty there —
+    /// see [`extracted_field_sql`] for the exact mapping per sourcetype.
+    pub host: String,
+    /// Originating process, extracted from `fields` where the sourcetype
+    /// has a *name* (not just a numeric PID) for it — journald's
+    /// `SYSLOG_IDENTIFIER` (falling back to `_COMM` when a process didn't
+    /// set its own identifier) or AUL's `process`. Empty for EVTX: its only
+    /// generically available field is a bare PID, not a name — see
+    /// [`extracted_field_sql`].
+    pub process: String,
+    /// EVTX's `Event.System.EventID` (e.g. `4625`) — the single most
+    /// important field for triaging Windows events, so it's surfaced as its
+    /// own column rather than left inside `fields`/`raw`. Empty for every
+    /// other sourcetype (none has an equivalent numeric event-type code).
+    pub event_code: String,
+    /// The logging component: AUL's `subsystem` or EVTX's
+    /// `Event.System.Provider` name. Empty for journald and any sourcetype
+    /// without a confirmed mapping.
+    pub subsystem: String,
+    /// The event's classification within its subsystem/component: AUL's
+    /// `category` only — EVTX's closest-sounding field, `Channel`, is a
+    /// different kind of thing (which top-level Windows Event Log the
+    /// entry was routed to, e.g. `"Security"`, not a developer-set
+    /// classification) and deliberately isn't mapped here, same reasoning
+    /// as why EVTX has no `process`. Empty for every other sourcetype.
+    pub category: String,
 }
 
 /// Distinct, non-null `level` values currently in `log_entries` — used to
@@ -484,6 +531,109 @@ pub fn fetch_full_entry(conn: &Connection, event_id: EventId) -> anyhow::Result<
     }))
 }
 
+/// SQL for the `host`/`process`/`event_code`/`subsystem`/`category`
+/// columns — a `CASE` on `s.sourcetype` since each sourcetype's `fields`
+/// JSON uses entirely different keys (or has no such concept at all) for
+/// these. Only sourcetypes with a *confirmed* field name are mapped;
+/// anything else falls through to `NULL` rather than guessing at a JSON
+/// path that might silently extract the wrong thing. See
+/// `docs/field-extraction.md` for the authoritative, per-sourcetype list
+/// this implements.
+///
+/// EVTX's `Event.System.Computer`, `Event.System.EventID`, and
+/// `Event.System.Provider.#attributes.Name` are all confirmed against the
+/// `evtx` crate's own test snapshots
+/// (`tests/snapshots/test_record_samples__event_json_sample.snap`, the
+/// default non-`separate_json_attributes` shape this parser actually uses —
+/// see `parsers::evtx`) — plain top-level or `#attributes`-nested values,
+/// safe to map. `Event.System.Execution.#attributes.ProcessID` is
+/// confirmed too, but it's a bare numeric PID, not a process name/path
+/// like journald's `SYSLOG_IDENTIFIER` or AUL's `process` — mixing "the
+/// process's name" and "some process's PID" under one "Process" column
+/// would misrepresent one of them, so EVTX deliberately has no `process`
+/// mapping here. `Event.System.Channel` (e.g. `"Security"`,
+/// `"Application"`) is confirmed present too, but deliberately has no
+/// `category` mapping for the same reason: it's which top-level Windows
+/// Event Log the entry was routed to, not a fine-grained developer-set
+/// classification the way AUL's `category` is — same "don't misrepresent
+/// a different concept as if it were the same one" call as `process`.
+///
+/// AUL's `subsystem`/`category` are confirmed directly against a real
+/// loaded session's `fields` JSON (both plain top-level string values,
+/// matching `macos-unifiedlogs`' own `LogData` field names).
+///
+/// `fields_ref`/`sourcetype_ref` are the column references to use for
+/// `fields`/`sourcetype` in the caller's query — parameterized because
+/// [`fetch_window`]'s windowed lookup joins back through `le`/`s`, not the
+/// aliases a caller evaluating this against some other query shape might
+/// use.
+fn extracted_field_sql(fields_ref: &str, sourcetype_ref: &str) -> String {
+    format!(
+        "CASE {sourcetype_ref}
+            WHEN 'journald' THEN json_extract_string({fields_ref}, '$._HOSTNAME')
+            WHEN 'evtx' THEN json_extract_string({fields_ref}, '$.Event.System.Computer')
+            ELSE NULL
+         END AS host,
+         CASE {sourcetype_ref}
+            WHEN 'journald' THEN COALESCE(
+                json_extract_string({fields_ref}, '$.SYSLOG_IDENTIFIER'),
+                json_extract_string({fields_ref}, '$._COMM')
+            )
+            WHEN 'aul' THEN json_extract_string({fields_ref}, '$.process')
+            ELSE NULL
+         END AS process,
+         CASE {sourcetype_ref}
+            WHEN 'evtx' THEN json_extract_string({fields_ref}, '$.Event.System.EventID')
+            ELSE NULL
+         END AS event_code,
+         CASE {sourcetype_ref}
+            WHEN 'aul' THEN json_extract_string({fields_ref}, '$.subsystem')
+            WHEN 'evtx' THEN json_extract_string({fields_ref}, '$.Event.System.Provider.#attributes.Name')
+            ELSE NULL
+         END AS subsystem,
+         CASE {sourcetype_ref}
+            WHEN 'aul' THEN json_extract_string({fields_ref}, '$.category')
+            ELSE NULL
+         END AS category"
+    )
+}
+
+/// Two fully separate statements, not one query (not even a `MATERIALIZED`
+/// CTE): whenever the wide `fields`/`message` columns are selected in the
+/// same statement as the `tag=`/`tag~` filter's correlated `EXISTS`/
+/// `regexp_matches` condition, DuckDB reads `fields` for roughly the whole
+/// scanned range rather than only the rows that survive the filter,
+/// regardless of how the `SELECT`/CTE/temp-table boundaries are drawn —
+/// only fully separating "find the matching keys" (narrow columns, the
+/// filter) from "look up those exact keys" (wide columns, a plain
+/// equality lookup, no filter) keeps both stages proportional to the
+/// window size rather than the table size.
+fn fetch_window_keys(
+    conn: &Connection,
+    compiled: &CompiledQuery,
+    where_sql: &str,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<Vec<(String, i64)>> {
+    let sql = format!(
+        "SELECT le.event_id_source, le.event_id_seq
+         FROM {}
+         {where_sql}
+         ORDER BY le.timestamp_utc, le.event_id_source, le.event_id_seq
+         LIMIT ? OFFSET ?",
+        compiled.from
+    );
+    let mut params = compiled.params.clone();
+    params.push(Value::BigInt(limit as i64));
+    params.push(Value::BigInt(offset as i64));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(duckdb::params_from_iter(&params), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
 pub fn fetch_window(
     conn: &Connection,
     query: &Query,
@@ -496,27 +646,44 @@ pub fn fetch_window(
         .as_deref()
         .map(|w| format!("WHERE {w}"))
         .unwrap_or_default();
+
+    let keys = fetch_window_keys(conn, &compiled, &where_sql, offset, limit)?;
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+
     // Tags via a correlated scalar subquery rather than a JOIN, same
     // reasoning as the `tag=`/`tag~` filter above: one entry can have
     // several tags, and a join would fan out into duplicate rows. Sorted
     // in Rust after splitting rather than inside `string_agg` — simpler
     // than depending on DuckDB's ordered-aggregate syntax, and the tag
     // count per entry is always small.
+    //
+    // A `JOIN` against a `VALUES` list, not `WHERE (a, b) IN ((?, ?), ...)`
+    // — measured directly, the `IN`-list form still read `fields` broadly
+    // rather than doing a per-key primary-key lookup (a 200-key window
+    // stayed multiple GB), while the `JOIN` form (small list, driving into
+    // `log_entries`' primary key) cost under 200MB for the same 200 keys.
+    let extracted_field_sql = extracted_field_sql("le.fields", "s.sourcetype");
+    let values = keys.iter().map(|_| "(?, ?)").collect::<Vec<_>>().join(", ");
     let sql = format!(
         "SELECT le.event_id_source, le.event_id_seq, le.timestamp_utc, le.level, le.message,
                 (SELECT string_agg(it.tag_value, ',') FROM import_tags AS it
                  WHERE it.event_id_source = le.event_id_source
-                 AND it.event_id_seq = le.event_id_seq) AS tags
-         FROM {}
-         {where_sql}
-         ORDER BY le.timestamp_utc, le.event_id_source, le.event_id_seq
-         LIMIT ? OFFSET ?",
-        compiled.from
+                 AND it.event_id_seq = le.event_id_seq) AS tags,
+                s.path, s.sourcetype, {extracted_field_sql}
+         FROM (VALUES {values}) AS k(source_id, seq)
+         JOIN log_entries AS le
+             ON le.event_id_source = k.source_id AND le.event_id_seq = k.seq
+         LEFT JOIN sources AS s ON le.event_id_source = s.source_file_id
+         ORDER BY le.timestamp_utc, le.event_id_source, le.event_id_seq"
     );
 
-    let mut params = compiled.params;
-    params.push(Value::BigInt(limit as i64));
-    params.push(Value::BigInt(offset as i64));
+    let mut params: Vec<Value> = Vec::with_capacity(keys.len() * 2);
+    for (source_id, seq) in &keys {
+        params.push(Value::Text(source_id.clone()));
+        params.push(Value::BigInt(*seq));
+    }
 
     // Raw rows first, `EventId` parsing after — `query_map`'s closure can
     // only fail with `duckdb::Error`, and a malformed `source_file_id`
@@ -530,6 +697,13 @@ pub fn fetch_window(
         let level: Option<String> = row.get(3)?;
         let message: Option<String> = row.get(4)?;
         let tags: Option<String> = row.get(5)?;
+        let source_path: Option<String> = row.get(6)?;
+        let sourcetype: Option<String> = row.get(7)?;
+        let host: Option<String> = row.get(8)?;
+        let process: Option<String> = row.get(9)?;
+        let event_code: Option<String> = row.get(10)?;
+        let subsystem: Option<String> = row.get(11)?;
+        let category: Option<String> = row.get(12)?;
         Ok((
             source_file_id,
             sequence_number,
@@ -537,12 +711,33 @@ pub fn fetch_window(
             level,
             message,
             tags,
+            source_path,
+            sourcetype,
+            host,
+            process,
+            event_code,
+            subsystem,
+            category,
         ))
     })?;
 
     let mut display_rows = Vec::new();
     for row in raw_rows {
-        let (source_file_id, sequence_number, timestamp_utc, level, message, tags) = row?;
+        let (
+            source_file_id,
+            sequence_number,
+            timestamp_utc,
+            level,
+            message,
+            tags,
+            source_path,
+            sourcetype,
+            host,
+            process,
+            event_code,
+            subsystem,
+            category,
+        ) = row?;
         let event_id = EventId {
             source_file_id: source_file_id
                 .parse()
@@ -561,6 +756,13 @@ pub fn fetch_window(
             level: level.unwrap_or_default(),
             message: message.unwrap_or_default(),
             tags,
+            source_path: source_path.unwrap_or_default(),
+            sourcetype: sourcetype.unwrap_or_default(),
+            host: host.unwrap_or_default(),
+            process: process.unwrap_or_default(),
+            event_code: event_code.unwrap_or_default(),
+            subsystem: subsystem.unwrap_or_default(),
+            category: category.unwrap_or_default(),
         });
     }
     Ok(display_rows)
@@ -641,7 +843,7 @@ mod tests {
 
     #[test]
     fn quoted_phrase_is_one_free_text_term() {
-        let query = Query::parse(r#"source=evtx "failed login""#);
+        let query = Query::parse(r#"sourcetype=evtx "failed login""#);
         assert_eq!(
             query.terms,
             vec![
@@ -649,7 +851,7 @@ mod tests {
                     connector: Connector::And,
                     negate: false,
                     kind: TermKind::Field {
-                        field: Field::Source,
+                        field: Field::Sourcetype,
                         value: "evtx".to_string(),
                         is_regex: false
                     }
@@ -660,6 +862,26 @@ mod tests {
                     kind: TermKind::FreeText("failed login".to_string())
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn source_and_sourcetype_are_distinct_fields() {
+        assert_eq!(
+            Query::parse("sourcetype=evtx").terms[0].kind,
+            TermKind::Field {
+                field: Field::Sourcetype,
+                value: "evtx".to_string(),
+                is_regex: false
+            }
+        );
+        assert_eq!(
+            Query::parse("source=journal").terms[0].kind,
+            TermKind::Field {
+                field: Field::SourceFile,
+                value: "journal".to_string(),
+                is_regex: false
+            }
         );
     }
 
@@ -737,9 +959,12 @@ mod tests {
     }
 
     #[test]
-    fn source_filter_adds_a_sources_join() {
-        let compiled = Query::parse("source=evtx").compile();
-        assert!(compiled.from.contains("JOIN sources"));
+    fn sources_are_always_joined_regardless_of_filter() {
+        // `DisplayRow` needs `s.path`/`s.sourcetype` for every row, not
+        // just when a sourcetype=/source= filter is active — see
+        // `compile`'s doc comment on why this is a LEFT, not inner, join.
+        let compiled = Query::parse("level=ERROR").compile();
+        assert!(compiled.from.contains("LEFT JOIN sources"));
     }
 
     #[test]
@@ -924,7 +1149,7 @@ mod tests {
         }
 
         #[test]
-        fn source_filter_matches_via_join() {
+        fn sourcetype_filter_matches_via_join() {
             let conn = open_test_db();
             let aul_source = SourceFileId::new_random();
             let evtx_source = SourceFileId::new_random();
@@ -951,8 +1176,243 @@ mod tests {
                 "b",
             );
 
-            let query = Query::parse("source=evtx");
+            let query = Query::parse("sourcetype=evtx");
             assert_eq!(count_matching(&conn, &query).unwrap(), 1);
+        }
+
+        #[test]
+        fn source_file_filter_matches_a_substring_of_the_path() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            conn.execute(
+                "INSERT INTO sources (source_file_id, path, sourcetype, original_tz, parser_config)
+                 VALUES (?, '/evidence/case1/system.journal', 'journald', NULL, NULL)",
+                duckdb::params![source_file_id.to_string()],
+            )
+            .unwrap();
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: SequenceCounter::new().next_sequence_number(),
+                },
+                "6",
+                "a",
+                "a",
+            );
+
+            assert_eq!(
+                count_matching(&conn, &Query::parse("source=system.journal")).unwrap(),
+                1
+            );
+            assert_eq!(
+                count_matching(&conn, &Query::parse("source=nomatch")).unwrap(),
+                0
+            );
+        }
+
+        #[test]
+        fn fetch_window_includes_source_path_and_sourcetype() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "journald");
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: SequenceCounter::new().next_sequence_number(),
+                },
+                "6",
+                "a",
+                "a",
+            );
+
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+
+            assert_eq!(rows[0].source_path, "/evidence/test.log");
+            assert_eq!(rows[0].sourcetype, "journald");
+        }
+
+        #[test]
+        fn fetch_window_extracts_journald_host_and_process() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "journald");
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, '6', 'a', 'a',
+                         '{\"_HOSTNAME\": \"workstation1\", \"SYSLOG_IDENTIFIER\": \"sshd\"}')",
+                duckdb::params![
+                    source_file_id.to_string(),
+                    SequenceCounter::new().next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+
+            assert_eq!(rows[0].host, "workstation1");
+            assert_eq!(rows[0].process, "sshd");
+        }
+
+        #[test]
+        fn fetch_window_falls_back_to_comm_when_syslog_identifier_is_absent() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "journald");
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, '6', 'a', 'a', '{\"_COMM\": \"systemd\"}')",
+                duckdb::params![
+                    source_file_id.to_string(),
+                    SequenceCounter::new().next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+
+            assert_eq!(rows[0].process, "systemd");
+        }
+
+        #[test]
+        fn fetch_window_extracts_aul_process_but_not_host() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "aul");
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, 'Info', 'a', 'a', '{\"process\": \"/usr/bin/example\"}')",
+                duckdb::params![
+                    source_file_id.to_string(),
+                    SequenceCounter::new().next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+
+            assert_eq!(rows[0].process, "/usr/bin/example");
+            assert_eq!(
+                rows[0].host, "",
+                "AUL has no host concept — must stay empty"
+            );
+        }
+
+        #[test]
+        fn fetch_window_extracts_evtx_host_event_code_and_subsystem_but_not_process_or_category() {
+            // `fields` shape matches the real `evtx` crate's own
+            // non-`separate_json_attributes` output (the default this
+            // parser uses) — verified against
+            // `evtx-0.12.2/tests/snapshots/test_record_samples__event_json_sample.snap`,
+            // not guessed.
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "evtx");
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, '4', 'a', 'a',
+                         '{\"Event\": {\"System\": {\"Computer\": \"WORKSTATION1\", \
+                         \"EventID\": 4625, \
+                         \"Provider\": {\"#attributes\": {\"Name\": \"Microsoft-Windows-Security-Auditing\"}}, \
+                         \"Channel\": \"Security\", \
+                         \"Execution\": {\"#attributes\": {\"ProcessID\": 456}}}}}')",
+                duckdb::params![
+                    source_file_id.to_string(),
+                    SequenceCounter::new().next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+
+            assert_eq!(rows[0].host, "WORKSTATION1");
+            assert_eq!(rows[0].event_code, "4625");
+            assert_eq!(rows[0].subsystem, "Microsoft-Windows-Security-Auditing");
+            assert_eq!(
+                rows[0].category, "",
+                "EVTX's Channel is which log the entry was routed to, not a \
+                 developer-set classification like AUL's category — must stay empty"
+            );
+            assert_eq!(
+                rows[0].process, "",
+                "EVTX only has a numeric PID generically, not a process name — must stay empty"
+            );
+        }
+
+        #[test]
+        fn fetch_window_extracts_aul_subsystem_and_category() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "aul");
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, 'Default', 'a', 'a',
+                         '{\"subsystem\": \"com.apple.mDNSResponder\", \"category\": \"mDNS\"}')",
+                duckdb::params![
+                    source_file_id.to_string(),
+                    SequenceCounter::new().next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+
+            assert_eq!(rows[0].subsystem, "com.apple.mDNSResponder");
+            assert_eq!(rows[0].category, "mDNS");
+        }
+
+        #[test]
+        fn fetch_window_leaves_subsystem_and_category_empty_for_journald() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "journald");
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: SequenceCounter::new().next_sequence_number(),
+                },
+                "6",
+                "a",
+                "a",
+            );
+
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+
+            assert_eq!(rows[0].subsystem, "");
+            assert_eq!(rows[0].category, "");
+        }
+
+        #[test]
+        fn fetch_window_leaves_event_code_empty_for_non_evtx_sourcetypes() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "journald");
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: SequenceCounter::new().next_sequence_number(),
+                },
+                "6",
+                "a",
+                "a",
+            );
+
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+
+            assert_eq!(rows[0].event_code, "");
         }
 
         #[test]

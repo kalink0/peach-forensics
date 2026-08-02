@@ -26,6 +26,11 @@ CLAUDE.md
 *.logarchive/
 *.evtx.local
 
+# iLEAPP comparison output (LAVA db), dropped in the repo root ad hoc for
+# cross-checking Peach's own parsing against iLEAPP's — real forensic data,
+# never versioned.
+_lava_*.db
+
 # --- Editor / IDE ---
 .vscode/
 .idea/

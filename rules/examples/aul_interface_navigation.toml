@@ -1,0 +1,22 @@
+# AUL pattern-of-life: deliberate UI handling between app launches — Control
+# Center, Today view, widget visibility, home screen page scrolling.
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive interface navigation".
+
+[rule]
+name = "aul_interface_navigation"
+description = "Control Center, Today view, widgets, and home screen scrolling"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Control Center launched",
+    "Control Center Visible",
+    "Setting visibility of widget",
+    "Today view overlay",
+    "user-initiated scroll",
+]
+
+[rule.tag]
+value = "interface_navigation"

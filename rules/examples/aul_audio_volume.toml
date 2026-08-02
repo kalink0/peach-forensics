@@ -1,7 +1,8 @@
-# AUL pattern-of-life: physical volume button presses and playback state.
-# Substrings ported from iLEAPP's logarchive_audio_status artifact
-# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
-# See also: https://thesisfriday.com/index.php/2025/05/30/thesis-friday-8-aul-physical-buttons-volume/
+# AUL pattern-of-life: physical volume button presses and playback state
+# (routing to speaker/receiver/Bluetooth is a separate rule, aul_audio_routes).
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive audio status".
 
 [rule]
 name = "aul_audio_volume"

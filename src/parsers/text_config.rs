@@ -15,8 +15,10 @@ struct PatternConfig {
     multiline_start_pattern: Option<String>,
     /// Fixed UTC offset (e.g. `"+02:00"`, `"UTC"`) applied when
     /// `timestamp_format` doesn't carry its own timezone. Set explicitly per
-    /// source; see the `timezone-offset-precedence` project note for how
-    /// this is meant to interact with a future session-level default.
+    /// source — takes precedence over any future session-level default,
+    /// since a per-source override reflects the analyst's specific
+    /// knowledge about that source and shouldn't be silently overruled by a
+    /// broader setting.
     assume_offset: Option<String>,
 }
 

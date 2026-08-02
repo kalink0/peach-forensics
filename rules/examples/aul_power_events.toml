@@ -1,0 +1,21 @@
+# AUL pattern-of-life: boot and orderly-shutdown markers — the kernel iBoot
+# version line at startup, SpringBoard's orientation-deferral shutdown
+# notice, and locationd shutting down. Predicates from "Apple Unified Log
+# Predicates in iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive power events".
+
+[rule]
+name = "aul_power_events"
+description = "Boot and orderly shutdown markers"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "iBoot version",
+    "Deferring device orientation updates for reason: shutdown",
+    "locationd shutting down",
+]
+
+[rule.tag]
+value = "power_events"

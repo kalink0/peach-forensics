@@ -1,6 +1,7 @@
 # AUL pattern-of-life: WiFi association/scan/network-change events.
-# Substrings ported from iLEAPP's logarchive_wifi_status artifact
-# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive wifi status".
 
 [rule]
 name = "aul_wifi_status"
@@ -33,6 +34,12 @@ message_contains = [
     "to list of known networks",
     "{AUTOJOIN, SCAN*} Scanning 2Ghz Channels found:",
     "{AUTOJOIN, SCAN*} Scanning 5Ghz Channels found:",
+    "WFMacRandomisation",
+    "manual association",
+    "Copy password for Network",
+    "Attempting auto join association",
+    "Link went down",
+    "Total connection time",
 ]
 
 [rule.tag]

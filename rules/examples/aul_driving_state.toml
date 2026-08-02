@@ -1,0 +1,27 @@
+# AUL pattern-of-life: vehicular motion classification — wifid CMMotionActivity
+# driving start/stop, locationd vehicular episode markers, Driving Focus
+# engagement, and the pedestrian-after-driving alarm that marks the moment
+# someone exits a vehicle. Does not distinguish driver from passenger, and
+# the classifier fires on other transport too. Separate from
+# aul_motion_state (general walking/stationary transitions). Predicates
+# from "Apple Unified Log Predicates in iLEAPP: The Reference" (Alexis
+# Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive driving state".
+
+[rule]
+name = "aul_driving_state"
+description = "Vehicular motion classification (does not distinguish driver from passenger)"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "MotionState: Driving",
+    "vehicularStartTime",
+    "PedestrianAfterDriving",
+    "Engaging Driving",
+    "com.apple.donotdisturb.mode.driving",
+    "ATXModeDrivingFeaturizer",
+]
+
+[rule.tag]
+value = "driving_state"

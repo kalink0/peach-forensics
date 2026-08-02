@@ -7,14 +7,14 @@ use uuid::Uuid;
 /// sources like AUL `.logarchive`s, directory), assigned fresh at import
 /// time — not derived from file content or path.
 ///
-/// Peach only ever reads evidence (section 0.1); integrity hashing is the
-/// acquisition tool's job, not Peach's. `source_file_id` exists solely so
-/// [`EventId`] can always point back to "this loaded source, this position
-/// within it" — that only needs uniqueness, not content-derivation.
-/// Consequence: re-loading the same file twice is **not** detected or
-/// deduplicated — it produces two independent sources with duplicate
-/// entries. See the `source-file-id-design` project note for the full
-/// rationale.
+/// Peach only ever reads evidence; integrity hashing is the acquisition
+/// tool's job, not Peach's. `source_file_id` exists solely so [`EventId`]
+/// can always point back to "this loaded source, this position within it"
+/// — that only needs uniqueness, not content-derivation. Consequence:
+/// re-loading the same file twice is **not** detected or deduplicated — it
+/// produces two independent sources with duplicate entries, deliberately:
+/// detecting that would mean hashing every source up front, which doesn't
+/// scale to multi-GB evidence files and isn't this identifier's job anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SourceFileId(Uuid);
 

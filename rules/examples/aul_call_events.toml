@@ -1,0 +1,30 @@
+# AUL pattern-of-life: telephony from the OS side, independent of the call
+# history database — callservicesd call tracking start/end, Phone app open
+# requests that name the originating process (a touch, Siri, or a Bluetooth
+# head unit), Phone tab navigation, and keypad tone requests (actionIDs
+# 1200-1209 map to keypad digits 0-9, so a hand-dialed number can sometimes
+# be reconstructed from sound requests). Number payloads redact to
+# <private>. Predicates from "Apple Unified Log Predicates in iLEAPP: The
+# Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive call events".
+
+[rule]
+name = "aul_call_events"
+description = "Phone call tracking, call-app navigation, and keypad tone requests"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Started tracking call",
+    "Dialed call",
+    "Call started outgoing",
+    "All calls ended",
+    "Received trusted open application request",
+    "Resuming to tab type",
+    "tab bar tab changed",
+    "Incoming Request : actionID 120",
+]
+
+[rule.tag]
+value = "call_events"

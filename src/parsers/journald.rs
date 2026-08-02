@@ -16,7 +16,7 @@ use crate::parsers::{LogParser, ParserConfig};
 /// implementation detail, so it was rejected in favor of implementing the
 /// format directly. The alternative `journald` crate binds against
 /// `libsystemd`, which is Linux-only and would break the Windows/macOS
-/// legs of the CI matrix (section 9, milestone 1).
+/// legs of Peach's cross-platform CI matrix.
 ///
 /// Format reference: <https://systemd.io/JOURNAL_FILE_FORMAT/>. Rather than
 /// following the hash-table/entry-array linked lists real `libsystemd`
@@ -38,10 +38,23 @@ use crate::parsers::{LogParser, ParserConfig};
 /// sd-journal's own naming for these — they come from the `ENTRY` object's
 /// header, not a stored field, in both implementations).
 ///
+/// Both the "regular" and "compact" (`HEADER_INCOMPATIBLE_COMPACT`, systemd
+/// 254+ — the default on every current distro, verified against this
+/// format's own source: `journal-def.h`'s `EntryObject`/`DataObject`
+/// definitions) entry formats are implemented — forensic parsers don't get
+/// to treat "the format most machines actually produce" as optional just
+/// because support for it didn't exist yet when the rest of the parser was
+/// written. Compact mode changes two things, both handled here: each
+/// `ENTRY` object's item array shrinks from 16 bytes/item (8-byte object
+/// offset + 8-byte hash) to 4 bytes/item (just a 32-bit object offset, no
+/// hash, per `write_entry_item()` in `journal-file.c` — raw byte offset,
+/// not scaled, which is also why compact-mode files are capped at 4 GiB);
+/// and every `DATA` object gains 8 extra bytes before its payload (compact
+/// mode's `tail_entry_array_offset`/`tail_entry_array_n_entries`, unused by
+/// this parser's flat-scan design — see below — but still present in the
+/// byte layout and must be skipped over to find the real payload).
+///
 /// Known limitations, surfaced rather than silently worked around:
-/// - The "compact" entry format (systemd 254+, `HEADER_INCOMPATIBLE_COMPACT`)
-///   uses a different, narrower entry-item encoding and is not implemented —
-///   parsing such a file fails with a clear error rather than misreading it.
 /// - Only LZ4-compressed field values are decompressed (journald's default
 ///   compression since systemd ~246). XZ/ZSTD-compressed fields are left
 ///   visible with a placeholder value noting the unsupported algorithm,
@@ -51,9 +64,9 @@ use crate::parsers::{LogParser, ParserConfig};
 ///   Linux since systemd unified the on-disk format around v246; older
 ///   big-endian archives are out of scope).
 /// - A single corrupt/truncated object aborts the whole parse, consistent
-///   with the EVTX parser — an opt-in "skip and log bad records" mode is
-///   tracked separately (see the `parser-error-handling-roadmap` project
-///   note) and needs a `LogParser`-wide change, not a one-off here.
+///   with the EVTX parser — an opt-in "skip and log bad records" mode would
+///   need a `LogParser`-wide change, not a one-off here, so it isn't done
+///   yet.
 ///
 /// No config-driven field-mapping, like EVTX/AUL — `ParserConfig.extra` is
 /// unused.
@@ -75,8 +88,15 @@ const SIGNATURE: [u8; 8] = *b"LPKSHHRH";
 
 const OBJECT_HEADER_SIZE: u64 = 16;
 const DATA_OBJECT_FIXED_SIZE: u64 = 48;
+/// Extra bytes before a compact-mode `DATA` object's payload — the
+/// `tail_entry_array_offset`/`tail_entry_array_n_entries` `le32` pair that
+/// only exists in `DataObject`'s `compact` union arm (`journal-def.h`).
+const DATA_OBJECT_COMPACT_EXTRA: u64 = 8;
 const ENTRY_FIXED_SIZE: u64 = 48;
+/// Regular-mode entry item: `{ object_offset: le64, hash: le64 }`.
 const ENTRY_ITEM_SIZE: u64 = 16;
+/// Compact-mode entry item: `{ object_offset: le32 }` — no hash field.
+const ENTRY_ITEM_SIZE_COMPACT: u64 = 4;
 
 const OBJECT_TYPE_DATA: u8 = 1;
 const OBJECT_TYPE_ENTRY: u8 = 3;
@@ -104,6 +124,10 @@ const MIN_HEADER_LEN: usize = 144;
 struct Header {
     header_size: u64,
     tail_object_offset: u64,
+    /// `HEADER_INCOMPATIBLE_COMPACT` — changes `ENTRY`/`DATA` object byte
+    /// layout, not the header's own layout, so this is the only header
+    /// field that needs to be threaded down into object parsing.
+    compact: bool,
 }
 
 fn parse_header(bytes: &[u8]) -> anyhow::Result<Header> {
@@ -118,17 +142,13 @@ fn parse_header(bytes: &[u8]) -> anyhow::Result<Header> {
     }
 
     let incompatible_flags = read_u32(bytes, 12);
-    if incompatible_flags & INCOMPATIBLE_COMPACT != 0 {
-        bail!(
-            "journal file uses the compact entry format (systemd 254+), which is not supported yet"
-        );
-    }
     let unknown_flags = incompatible_flags & !KNOWN_INCOMPATIBLE_FLAGS;
     if unknown_flags != 0 {
         bail!(
             "journal file uses unrecognized incompatible feature flags ({unknown_flags:#x}) — refusing to guess at the format rather than risk misreading it"
         );
     }
+    let compact = incompatible_flags & INCOMPATIBLE_COMPACT != 0;
 
     let header_size = read_u64(bytes, 88);
     let tail_object_offset = read_u64(bytes, 136);
@@ -146,6 +166,7 @@ fn parse_header(bytes: &[u8]) -> anyhow::Result<Header> {
     Ok(Header {
         header_size,
         tail_object_offset,
+        compact,
     })
 }
 
@@ -201,7 +222,7 @@ fn parse_bytes(bytes: &[u8]) -> anyhow::Result<Vec<ParsedRecord>> {
         let object = read_object_header(bytes, offset)
             .with_context(|| format!("failed to read object at offset {offset}"))?;
         if object.object_type == OBJECT_TYPE_ENTRY {
-            let record = parse_entry_object(bytes, offset, object.size)
+            let record = parse_entry_object(bytes, offset, object.size, header.compact)
                 .with_context(|| format!("failed to parse ENTRY object at offset {offset}"))?;
             records.push(record);
         }
@@ -211,7 +232,12 @@ fn parse_bytes(bytes: &[u8]) -> anyhow::Result<Vec<ParsedRecord>> {
     Ok(records)
 }
 
-fn parse_entry_object(bytes: &[u8], offset: u64, size: u64) -> anyhow::Result<ParsedRecord> {
+fn parse_entry_object(
+    bytes: &[u8],
+    offset: u64,
+    size: u64,
+    compact: bool,
+) -> anyhow::Result<ParsedRecord> {
     let fixed_start = offset + OBJECT_HEADER_SIZE;
     let items_start = fixed_start + ENTRY_FIXED_SIZE;
     if items_start > offset + size {
@@ -222,22 +248,33 @@ fn parse_entry_object(bytes: &[u8], offset: u64, size: u64) -> anyhow::Result<Pa
     let realtime = read_u64(bytes, (fixed_start + 8) as usize);
     let monotonic = read_u64(bytes, (fixed_start + 16) as usize);
 
+    let item_size = if compact {
+        ENTRY_ITEM_SIZE_COMPACT
+    } else {
+        ENTRY_ITEM_SIZE
+    };
     let items_end = offset + size;
     let item_area = items_end - items_start;
-    if !item_area.is_multiple_of(ENTRY_ITEM_SIZE) {
+    if !item_area.is_multiple_of(item_size) {
         bail!("ENTRY object item area ({item_area} bytes) isn't a whole number of entry items");
     }
-    let n_items = item_area / ENTRY_ITEM_SIZE;
+    let n_items = item_area / item_size;
 
     let mut fields = serde_json::Map::new();
     let mut message = None;
     let mut level = None;
 
     for i in 0..n_items {
-        let item_offset = (items_start + i * ENTRY_ITEM_SIZE) as usize;
-        let data_object_offset = read_u64(bytes, item_offset);
-        let (key, value) =
-            read_data_object_field(bytes, data_object_offset).with_context(|| {
+        let item_offset = (items_start + i * item_size) as usize;
+        // Compact items are a bare `le32` object offset (no hash field);
+        // regular items are `le64` — see this module's doc comment.
+        let data_object_offset = if compact {
+            read_u32(bytes, item_offset) as u64
+        } else {
+            read_u64(bytes, item_offset)
+        };
+        let (key, value) = read_data_object_field(bytes, data_object_offset, compact)
+            .with_context(|| {
                 format!("entry item {i}: failed to resolve DATA object at {data_object_offset}")
             })?;
         if key == "MESSAGE" {
@@ -278,7 +315,11 @@ fn parse_entry_object(bytes: &[u8], offset: u64, size: u64) -> anyhow::Result<Pa
 
 /// Resolves a `DATA` object to its `(field_name, value)` pair, decompressing
 /// the payload if needed. Journald payloads are `FIELD=VALUE` bytes.
-fn read_data_object_field(bytes: &[u8], offset: u64) -> anyhow::Result<(String, String)> {
+fn read_data_object_field(
+    bytes: &[u8],
+    offset: u64,
+    compact: bool,
+) -> anyhow::Result<(String, String)> {
     let object = read_object_header(bytes, offset)?;
     if object.object_type != OBJECT_TYPE_DATA {
         bail!(
@@ -287,7 +328,17 @@ fn read_data_object_field(bytes: &[u8], offset: u64) -> anyhow::Result<(String, 
         );
     }
 
-    let payload_start = offset + OBJECT_HEADER_SIZE + DATA_OBJECT_FIXED_SIZE;
+    // Compact mode's `DataObject` union arm adds an 8-byte
+    // `tail_entry_array_offset`/`tail_entry_array_n_entries` pair before the
+    // payload that the regular arm doesn't have — see this module's doc
+    // comment. This parser never reads those two fields (no hash-table/
+    // array-chain traversal), just skips past them to find the payload.
+    let compact_extra = if compact {
+        DATA_OBJECT_COMPACT_EXTRA
+    } else {
+        0
+    };
+    let payload_start = offset + OBJECT_HEADER_SIZE + DATA_OBJECT_FIXED_SIZE + compact_extra;
     let payload_end = offset + object.size;
     if payload_start > payload_end {
         bail!("DATA object at offset {offset} is smaller than its fixed header");
@@ -360,6 +411,7 @@ mod tests {
     /// exercise the real binary parsing logic rather than a stand-in.
     struct FakeJournalBuilder {
         bytes: Vec<u8>,
+        compact: bool,
     }
 
     impl FakeJournalBuilder {
@@ -367,12 +419,25 @@ mod tests {
             let mut bytes = vec![0u8; 208];
             bytes[0..8].copy_from_slice(&SIGNATURE);
             bytes[88..96].copy_from_slice(&208u64.to_le_bytes());
-            Self { bytes }
+            Self {
+                bytes,
+                compact: false,
+            }
         }
 
         fn set_incompatible_flags(&mut self, flags: u32) -> &mut Self {
             self.bytes[12..16].copy_from_slice(&flags.to_le_bytes());
             self
+        }
+
+        /// Marks this journal `HEADER_INCOMPATIBLE_COMPACT` — sets the
+        /// header flag *and* switches every subsequent
+        /// `push_data_object*`/`push_entry_object` call on this builder to
+        /// compact-mode byte layout, so a test doesn't have to keep the two
+        /// in sync by hand.
+        fn compact(&mut self) -> &mut Self {
+            self.compact = true;
+            self.set_incompatible_flags(INCOMPATIBLE_COMPACT)
         }
 
         fn push_data_object(&mut self, field: &str) -> u64 {
@@ -390,13 +455,23 @@ mod tests {
 
         fn push_data_object_raw(&mut self, payload: &[u8], flags: u8) -> u64 {
             let offset = self.bytes.len() as u64;
-            let size = OBJECT_HEADER_SIZE + DATA_OBJECT_FIXED_SIZE + payload.len() as u64;
+            let compact_extra = if self.compact {
+                DATA_OBJECT_COMPACT_EXTRA
+            } else {
+                0
+            };
+            let size =
+                OBJECT_HEADER_SIZE + DATA_OBJECT_FIXED_SIZE + compact_extra + payload.len() as u64;
             self.bytes.push(OBJECT_TYPE_DATA);
             self.bytes.push(flags);
             self.bytes.extend_from_slice(&[0u8; 6]);
             self.bytes.extend_from_slice(&size.to_le_bytes());
             self.bytes
                 .extend_from_slice(&[0u8; DATA_OBJECT_FIXED_SIZE as usize]);
+            if self.compact {
+                self.bytes
+                    .extend_from_slice(&[0u8; DATA_OBJECT_COMPACT_EXTRA as usize]);
+            }
             self.bytes.extend_from_slice(payload);
             self.pad_align8();
             offset
@@ -404,8 +479,13 @@ mod tests {
 
         fn push_entry_object(&mut self, seqnum: u64, realtime: u64, item_offsets: &[u64]) -> u64 {
             let offset = self.bytes.len() as u64;
+            let item_size = if self.compact {
+                ENTRY_ITEM_SIZE_COMPACT
+            } else {
+                ENTRY_ITEM_SIZE
+            };
             let size =
-                OBJECT_HEADER_SIZE + ENTRY_FIXED_SIZE + item_offsets.len() as u64 * ENTRY_ITEM_SIZE;
+                OBJECT_HEADER_SIZE + ENTRY_FIXED_SIZE + item_offsets.len() as u64 * item_size;
             self.bytes.push(OBJECT_TYPE_ENTRY);
             self.bytes.push(0);
             self.bytes.extend_from_slice(&[0u8; 6]);
@@ -416,8 +496,13 @@ mod tests {
             self.bytes.extend_from_slice(&[0u8; 16]); // boot_id
             self.bytes.extend_from_slice(&0u64.to_le_bytes()); // xor_hash
             for &item_offset in item_offsets {
-                self.bytes.extend_from_slice(&item_offset.to_le_bytes());
-                self.bytes.extend_from_slice(&0u64.to_le_bytes()); // hash, unused
+                if self.compact {
+                    self.bytes
+                        .extend_from_slice(&(item_offset as u32).to_le_bytes());
+                } else {
+                    self.bytes.extend_from_slice(&item_offset.to_le_bytes());
+                    self.bytes.extend_from_slice(&0u64.to_le_bytes()); // hash, unused
+                }
             }
             self.pad_align8();
             self.bytes[136..144].copy_from_slice(&offset.to_le_bytes());
@@ -496,15 +581,59 @@ mod tests {
     }
 
     #[test]
-    fn compact_format_flag_is_rejected_with_a_clear_error() {
+    fn parses_a_single_entry_in_compact_format() {
         let mut builder = FakeJournalBuilder::new();
-        builder.set_incompatible_flags(INCOMPATIBLE_COMPACT);
+        builder.compact();
+        let message_offset = builder.push_data_object("MESSAGE=hello compact world");
+        let priority_offset = builder.push_data_object("PRIORITY=6");
+        builder.push_entry_object(1, 1_704_067_200_000_000, &[message_offset, priority_offset]);
         let bytes = builder.finish();
 
-        let result = parse_bytes(&bytes);
+        let records = parse_bytes(&bytes).unwrap();
 
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("compact"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message.as_deref(), Some("hello compact world"));
+        assert_eq!(records[0].level.as_deref(), Some("6"));
+        assert_eq!(
+            records[0].timestamp_utc,
+            DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn decompresses_lz4_field_values_in_compact_format() {
+        let mut builder = FakeJournalBuilder::new();
+        builder.compact();
+        let message_offset =
+            builder.push_data_object_lz4("MESSAGE=this value was lz4-compressed on disk");
+        builder.push_entry_object(1, 0, &[message_offset]);
+        let bytes = builder.finish();
+
+        let records = parse_bytes(&bytes).unwrap();
+
+        assert_eq!(
+            records[0].message.as_deref(),
+            Some("this value was lz4-compressed on disk")
+        );
+    }
+
+    #[test]
+    fn multiple_entries_are_returned_in_scan_order_in_compact_format() {
+        let mut builder = FakeJournalBuilder::new();
+        builder.compact();
+        let first_offset = builder.push_data_object("MESSAGE=first");
+        builder.push_entry_object(1, 100, &[first_offset]);
+        let second_offset = builder.push_data_object("MESSAGE=second");
+        builder.push_entry_object(2, 200, &[second_offset]);
+        let bytes = builder.finish();
+
+        let records = parse_bytes(&bytes).unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].message.as_deref(), Some("first"));
+        assert_eq!(records[1].message.as_deref(), Some("second"));
     }
 
     #[test]

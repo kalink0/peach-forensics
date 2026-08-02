@@ -1,6 +1,8 @@
-# AUL pattern-of-life: motion/activity state transitions (e.g. walking bouts).
-# Substring ported from iLEAPP's logarchive_motionstate artifact
-# (github.com/abrignoni/iLEAPP, scripts/artifacts/logarchive.py).
+# AUL pattern-of-life: motion/activity state transitions (e.g. walking bouts;
+# vehicle-specific driving detection is a separate rule, aul_driving_state).
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive motion state transitions".
 
 [rule]
 name = "aul_motion_state"

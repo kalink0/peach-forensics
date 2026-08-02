@@ -1,0 +1,22 @@
+# AUL pattern-of-life: sosd status broadcasts and flow state, including the
+# paired-device trigger entry documented from an Apple Watch. These
+# broadcasts have been observed on devices with no known SOS use, so
+# presence alone does not show an actual SOS call — payloads redact.
+# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
+# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive emergency SOS engine".
+
+[rule]
+name = "aul_emergency_sos"
+description = "Emergency SOS engine status/flow (presence alone is not proof of a call)"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "broadcasting SOSStatus",
+    "flowStartedOnEitherDevice",
+    "sosTriggeredOnPairedDevice",
+]
+
+[rule.tag]
+value = "emergency_sos"

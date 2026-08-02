@@ -1,0 +1,26 @@
+# AUL pattern-of-life: the `category KeyboardSignposts` predicate from
+# "logarchive keyboard activity" (see aul_keyboard_activity.toml) — a
+# separate rule file because Peach's rule grammar ANDs every condition
+# within one [rule.match] block, while the source treats this as an
+# independent alternative to the message-substring predicates, not an
+# additional constraint on them. Same tag value, so either rule tagging an
+# entry produces the same result. Predicates from "Apple Unified Log
+# Predicates in iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive keyboard activity".
+#
+# High volume warning from the source: over 200,000 signpost rows on a
+# single real-device image. Import-time tagging will materialize an
+# import_tags row per match — expect this rule alone to noticeably grow a
+# session's DuckDB file on a real device history.
+
+[rule]
+name = "aul_keyboard_activity_signposts"
+description = "Keyboard touch signposts (subsystem UIKitCore / com.apple.TextInput)"
+
+[rule.match]
+sourcetype = "aul"
+category = "KeyboardSignposts"
+
+[rule.tag]
+value = "keyboard_activity"

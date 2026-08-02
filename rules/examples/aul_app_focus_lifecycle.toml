@@ -1,0 +1,30 @@
+# AUL pattern-of-life: finer-grained companion to aul_app_launch — which app
+# holds focus moment to moment (an empty value means the home screen), cold
+# starts vs. resumes ("Bootstrapping ... with intent foreground-interactive"
+# means the app was fully closed; iOS 16 spells it `application<`, iOS 17+
+# spells it `app<`), scene lifecycle changes, icon taps tied to launches,
+# and force-kills from the app switcher. A force-kill right after an event
+# of interest is itself worth noticing. Predicates from "Apple Unified Log
+# Predicates in iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive app focus and lifecycle".
+
+[rule]
+name = "aul_app_focus_lifecycle"
+description = "Foreground app focus changes, cold starts vs. resumes, force-kills"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "/device/app/inFocus",
+    "Bootstrapping app<",
+    "Bootstrapping application<",
+    "killed from app switcher",
+    "elementWithFocusBundleID changed",
+    "Icon tapped",
+    "Initiating launch from icon view",
+    "Scene lifecycle state did change",
+]
+
+[rule.tag]
+value = "app_focus_lifecycle"

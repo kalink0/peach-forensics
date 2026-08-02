@@ -1,0 +1,26 @@
+# AUL pattern-of-life: Bluetooth discovery and pairing rather than routine
+# reconnection — bluetoothd "Device found: CBDevice" records that carry the
+# accessory name, Bluetooth address, and product identifiers in the clear,
+# plus pairing session lifecycle entries including rapport Continuity
+# pairing. Separate from aul_bluetooth_status (connect/disconnect of
+# already-paired devices). Predicates from "Apple Unified Log Predicates in
+# iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive bluetooth pairing".
+
+[rule]
+name = "aul_bluetooth_pairing"
+description = "Bluetooth device discovery and pairing (not routine reconnection)"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Device found: CBDevice",
+    "pairing complete",
+    "pairing started",
+    "numeric comparison",
+    "Running SDP",
+]
+
+[rule.tag]
+value = "bluetooth_pairing"

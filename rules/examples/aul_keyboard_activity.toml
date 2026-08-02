@@ -1,0 +1,23 @@
+# AUL pattern-of-life: per-keystroke evidence of active typing, attributed
+# to the app receiving it — keyboard touch signposts plus keyboard sound
+# requests for character/delete/modifier keys. Text content is not
+# recorded, only the fact that typing happened. Predicates from "Apple
+# Unified Log Predicates in iLEAPP: The Reference" (Alexis Brignoni):
+# leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
+# — "logarchive keyboard activity". The source also matches on
+# `category KeyboardSignposts`, not just message substrings.
+
+[rule]
+name = "aul_keyboard_activity"
+description = "Active typing — keyboard touch signposts and key-sound requests"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Incoming Request : actionID 1104",
+    "Incoming Request : actionID 1155",
+    "Incoming Request : actionID 1156",
+]
+
+[rule.tag]
+value = "keyboard_activity"

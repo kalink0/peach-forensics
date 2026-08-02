@@ -21,9 +21,8 @@ use raw_extraction_provider::RawExtractionProvider;
 /// `.tracev3` files, plus `dsc`/`uuidtext`/`timesync` reference data needed
 /// to resolve the actual log strings), not a single file. That's fine here:
 /// since [`crate::model::event_id::SourceFileId`] is a randomly-assigned id
-/// rather than a content hash (see the `source-file-id-design` project
-/// note), nothing about `event_id` assignment cares whether `path` is a
-/// file or a directory.
+/// rather than a content hash, nothing about `event_id` assignment cares
+/// whether `path` is a file or a directory.
 ///
 /// One `.logarchive` = one peach source. It typically holds several
 /// `.tracev3` files whose entries are interleaved in time, so there's no
@@ -278,7 +277,7 @@ fn order_entries(mut entries: Vec<(f64, String, usize, LogData)>) -> Vec<LogData
 /// forced into an INFO/WARN/ERROR scheme nobody asked for. `raw`/`fields`
 /// both hold the full serialized `LogData` — for a binary source there's no
 /// literal "original line", so the complete structured extraction before
-/// any field-mapping is the most faithful equivalent of "raw" (section 0.1).
+/// any field-mapping is the most faithful equivalent of "raw".
 ///
 /// `fields` is serialized from `entry` once; `raw` is then rendered from
 /// `fields` rather than serialized from `entry` a second time — same bytes

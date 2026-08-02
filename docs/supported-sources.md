@@ -1,7 +1,10 @@
 # Supported Source Types
 
 Kept intentionally short and current — update this alongside any parser change
-so it never drifts from what's actually implemented.
+so it never drifts from what's actually implemented. For the extra
+Host/Process/Event ID/Subsystem/Category columns the timeline view pulls out
+of `fields` on top of the core mapping described here, see
+[field-extraction.md](field-extraction.md).
 
 ## Implemented
 
@@ -57,10 +60,19 @@ Single `.evtx` file. Wraps the `evtx` crate.
 
 - `level` is the raw `Event.System.Level` JSON value verbatim (usually a small
   integer per the Windows Event Schema, e.g. 2=Error, 3=Warning,
-  4=Informational) — not remapped, same reasoning as AUL's `LogType`.
-- `message` is always empty: the crate doesn't render human-readable event text
-  (that needs the OS's message-resource DLLs/templates, which it deliberately
-  doesn't ship). `EventData` is preserved in full in `raw`/`fields` instead.
+  4=Informational) — not remapped, same reasoning as AUL's `LogType`. The
+  timeline view's Level column appends the standard name for display
+  (`"2 (Error)"`) without touching the stored value — see
+  [field-extraction.md](field-extraction.md).
+- `message` is `Event.RenderingInfo.Message` when the file has it, empty
+  otherwise. `RenderingInfo` is an *optional* part of the Windows Event
+  schema (`RenderingInfoType`, `minOccurs="0"`) — present when the file was
+  produced by something that rendered the event before writing it out (e.g.
+  Windows Event Forwarding's collector side), absent for a plain live
+  `winevt\Logs\*.evtx` read directly, since rendering needs the source
+  machine's message-resource DLLs/templates, which this crate deliberately
+  doesn't ship or emulate. `EventData` is preserved in full in `raw`/`fields`
+  either way, so nothing is lost when `message` is empty.
 - No config-driven field-mapping, like AUL.
 - A single unparseable record aborts the whole parse (the crate's per-record
   error carries no partial data — not even a timestamp — so there's nothing to
@@ -86,9 +98,9 @@ alternative binds against `libsystemd`, Linux-only).
   than following the hash-table/entry-array chains real `libsystemd` uses for
   keyed lookups — simpler, and more robust against a journal whose index
   structures are partially corrupted.
+- Both the "regular" and "compact" (`HEADER_INCOMPATIBLE_COMPACT`, systemd
+  254+ — the default on every current distro) entry formats are implemented.
 - **Known limitations:**
-  - The "compact" entry format (systemd 254+) is not implemented; such files
-    fail to parse with an explicit error rather than being misread.
   - Only LZ4-compressed field values are decompressed (journald's default).
     XZ/ZSTD-compressed fields stay visible with a placeholder value noting the
     unsupported algorithm, rather than being silently dropped.

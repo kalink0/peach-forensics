@@ -8,8 +8,8 @@ use crate::db::timeline_queries::Query;
 ///
 /// Selecting several values in the same row is meant as "match any of
 /// these" — but the search grammar has no operator precedence or
-/// parentheses (see the `search-grammar-roadmap` project note), so appending
-/// several bare `field=value` terms joined by `OR` would silently mean
+/// parentheses, so appending several bare `field=value` terms joined by
+/// `OR` would silently mean
 /// something else entirely as soon as any other `AND`-ed term is also
 /// present (`level=ERROR tag=a OR tag=b` parses left-to-right as
 /// `(level=ERROR AND tag=a) OR tag=b`, not `level=ERROR AND (tag=a OR
@@ -61,7 +61,7 @@ impl FilterBar {
             ui.label("Search:");
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.text)
-                    .hint_text(r#"e.g. source=evtx tag=auth_failure NOT level=INFO "login""#)
+                    .hint_text(r#"e.g. sourcetype=evtx tag=auth_failure NOT level=INFO "login""#)
                     .desired_width(400.0),
             );
             changed |= response.changed();

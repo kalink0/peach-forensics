@@ -16,12 +16,43 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::persist;
 
+/// Window chrome color scheme. Deliberately toolkit-agnostic (no `egui`
+/// import here) — turning this into actual colors is `crate::ui::theme`'s
+/// job, so this module stays plain data like the rest of `Settings`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Theme {
+    /// Follow the OS light/dark preference.
+    #[default]
+    System,
+    Light,
+    Dark,
+    /// Phosphor-green terminal look, shared with crush's "Geek" theme.
+    Geek,
+    /// Continuously hue-cycling palette, animated every frame — shared
+    /// signature with crush's "Rainbow" theme (same ~12.5s cycle, same
+    /// HSV formula).
+    Rainbow,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     /// Overrides [`persist::default_sessions_dir`] when set. `None` (the
     /// default, and what a fresh install has) means "use the OS-standard
     /// per-user data directory".
     pub sessions_dir: Option<PathBuf>,
+    /// Window chrome theme, applied on startup and whenever changed via
+    /// View > Theme. `#[serde(default)]` so `config.toml` files saved
+    /// before this field existed still load fine.
+    #[serde(default)]
+    pub theme: Theme,
+    /// Worker threads for parsing a multi-file folder load (EVTX/journald/
+    /// Text) in parallel — `None` (the default) auto-picks from available
+    /// CPU parallelism via [`default_load_threads`]. Irrelevant for AUL or
+    /// a single-file load: both are always exactly one parse unit, nothing
+    /// to spread across threads. `#[serde(default)]` for the same
+    /// backward-compat reason `theme` has it.
+    #[serde(default)]
+    pub load_threads: Option<usize>,
 }
 
 impl Settings {
@@ -36,6 +67,24 @@ impl Settings {
             .with_context(|| format!("failed to create sessions directory {}", dir.display()))?;
         Ok(dir.clone())
     }
+
+    /// The thread count a folder load should actually use — the configured
+    /// override if set, otherwise [`default_load_threads`].
+    pub fn effective_load_threads(&self) -> usize {
+        self.load_threads.unwrap_or_else(default_load_threads)
+    }
+}
+
+/// Auto-picked worker thread count for parsing a multi-file folder load —
+/// capped at 8 even on many-core machines, the same cap crush uses for its
+/// own "Indexing Threads" default: past a handful of threads, contention
+/// on the single DuckDB writer (see `app.rs::run_load`) dominates, so more
+/// parser threads stop helping well before core count does.
+pub fn default_load_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(8)
 }
 
 fn config_file_path() -> anyhow::Result<PathBuf> {
@@ -101,6 +150,8 @@ mod tests {
         let path = temp_config_path("round-trip");
         let settings = Settings {
             sessions_dir: Some(PathBuf::from("/tmp/some-case-drive/peach-sessions")),
+            theme: Theme::Geek,
+            load_threads: Some(3),
         };
 
         save_to(&path, &settings).unwrap();
@@ -116,6 +167,49 @@ mod tests {
         assert!(!path.exists());
 
         assert_eq!(load_from(&path), Settings::default());
+    }
+
+    #[test]
+    fn load_from_a_file_predating_the_theme_field_defaults_to_system() {
+        let path = temp_config_path("no-theme-field");
+        std::fs::write(&path, b"sessions_dir = \"/tmp/some-case-drive\"\n").unwrap();
+
+        let loaded = load_from(&path);
+
+        assert_eq!(loaded.theme, Theme::System);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn load_from_a_file_predating_the_load_threads_field_defaults_to_automatic() {
+        let path = temp_config_path("no-load-threads-field");
+        std::fs::write(&path, b"sessions_dir = \"/tmp/some-case-drive\"\n").unwrap();
+
+        let loaded = load_from(&path);
+
+        assert_eq!(loaded.load_threads, None);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn effective_load_threads_falls_back_to_the_automatic_default() {
+        let settings = Settings::default();
+        assert_eq!(settings.effective_load_threads(), default_load_threads());
+    }
+
+    #[test]
+    fn effective_load_threads_uses_the_configured_override() {
+        let settings = Settings {
+            load_threads: Some(3),
+            ..Settings::default()
+        };
+        assert_eq!(settings.effective_load_threads(), 3);
+    }
+
+    #[test]
+    fn default_load_threads_is_at_least_one_and_capped_at_eight() {
+        let threads = default_load_threads();
+        assert!((1..=8).contains(&threads));
     }
 
     #[test]
@@ -140,6 +234,7 @@ mod tests {
         assert!(!dir.exists());
         let settings = Settings {
             sessions_dir: Some(dir.clone()),
+            ..Settings::default()
         };
 
         let resolved = settings.sessions_dir().unwrap();
