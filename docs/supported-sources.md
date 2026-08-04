@@ -64,15 +64,26 @@ Single `.evtx` file. Wraps the `evtx` crate.
   timeline view's Level column appends the standard name for display
   (`"2 (Error)"`) without touching the stored value — see
   [field-extraction.md](field-extraction.md).
-- `message` is `Event.RenderingInfo.Message` when the file has it, empty
-  otherwise. `RenderingInfo` is an *optional* part of the Windows Event
-  schema (`RenderingInfoType`, `minOccurs="0"`) — present when the file was
+- `message` is `Event.RenderingInfo.Message` when the file has it.
+  `RenderingInfo` is an *optional* part of the Windows Event schema
+  (`RenderingInfoType`, `minOccurs="0"`) — present when the file was
   produced by something that rendered the event before writing it out (e.g.
   Windows Event Forwarding's collector side), absent for a plain live
-  `winevt\Logs\*.evtx` read directly, since rendering needs the source
+  `winevt\Logs\*.evtx` read directly, since real rendering needs the source
   machine's message-resource DLLs/templates, which this crate deliberately
-  doesn't ship or emulate. `EventData` is preserved in full in `raw`/`fields`
-  either way, so nothing is lost when `message` is empty.
+  doesn't ship or emulate.
+  - When `RenderingInfo.Message` is absent, Peach falls back to a built-in
+    message template for a curated set of common Security-auditing events
+    (logons, process creation, service installs, account/group management,
+    audit log clearing, PowerShell ScriptBlock logging — see
+    [field-extraction.md](field-extraction.md#message-templates-evtx) for
+    the exact list and how placeholders resolve). A template-rendered
+    message is Peach's own reconstruction from `EventData`, not text the
+    source embedded, so it's always prefixed `[Peach] ` — never mistake it
+    for something Windows itself wrote. Anything outside that curated set
+    still leaves `message` empty, same as before this existed.
+  - `EventData` is preserved in full in `raw`/`fields` regardless, so
+    nothing is ever lost when `message` is empty or template-derived.
 - No config-driven field-mapping, like AUL.
 - A single unparseable record aborts the whole parse (the crate's per-record
   error carries no partial data — not even a timestamp — so there's nothing to

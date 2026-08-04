@@ -7,6 +7,7 @@ use crate::model::log_entry::{LogEntry, ParsedRecord};
 
 pub mod aul;
 pub mod evtx;
+mod evtx_templates;
 pub mod journald;
 pub mod text_config;
 

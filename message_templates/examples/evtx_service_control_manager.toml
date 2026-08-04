@@ -1,0 +1,11 @@
+# Message template for Service Control Manager — see
+# `evtx_security_auditing.toml`'s header comment for the placeholder
+# mechanism this relies on. Distinct from Security-Auditing's 4697 (also "a
+# service was installed"): this is the System-log event a service install
+# always produces, regardless of whether object-access auditing for
+# services is enabled, so it's the more reliably-present of the two.
+
+[[template]]
+provider = "Service Control Manager"
+event_id = 7045
+message = "A service was installed in the system. Service: {ServiceName}, image path: {ImagePath}, start type: {StartType}, account: {AccountName}"

@@ -57,16 +57,23 @@ enum SourceKind {
 ///
 /// One shared enum/receiver for every picker rather than one per button:
 /// only one native dialog can sensibly be open at a time anyway (see
-/// `PeachApp::file_pick_rx`'s doc comment), and `SourcePath` alone already
-/// covers three different buttons (AUL folder, a single EVTX/journald/text
-/// file, or a folder of them) — they all just set the same field on success.
+/// `PeachApp::file_pick_rx`'s doc comment), and `SourcePaths` alone already
+/// covers four different buttons (AUL folder, one-or-several EVTX/journald/
+/// text files, or a folder of them) — they all just feed the same
+/// `source_path`/`pending_cli_sources` pair on success (see
+/// `PeachApp::ui`'s handler for how a multi-file pick fans out across the
+/// two).
 ///
 /// No `SessionFile` variant: switching sessions goes exclusively through
 /// "Manage sessions...", not a raw filesystem picker — see that button's
 /// doc comment for why a native file dialog stopped being a good fit for
 /// this once sessions could have a display name.
 enum FilePickOutcome {
-    SourcePath(Option<PathBuf>),
+    /// Always at least one path when `Some` — never an empty `Vec` (every
+    /// producing site is either a single-path `pick_file`/`pick_folder`
+    /// result mapped into a one-element `Vec`, or `pick_files`, which
+    /// itself never resolves to `Some(vec![])`).
+    SourcePaths(Option<Vec<PathBuf>>),
     ParserConfigFile(Option<PathBuf>),
     RuleFiles(Option<Vec<PathBuf>>),
     ExportTarget(Option<PathBuf>),
@@ -853,8 +860,23 @@ impl eframe::App for PeachApp {
             match rx.try_recv() {
                 Ok(outcome) => {
                     match outcome {
-                        FilePickOutcome::SourcePath(Some(picked)) => {
-                            self.source_path = Some(picked);
+                        FilePickOutcome::SourcePaths(Some(picked)) => {
+                            // `picked` is never empty (see `FilePickOutcome::
+                            // SourcePaths`'s doc comment) — `[0]` and
+                            // `[1..]` are both always in bounds.
+                            self.source_path = Some(picked[0].clone());
+                            // Same "next queued source becomes the new
+                            // `source_path` once the current load finishes"
+                            // flow `--add-source` already drives (see the
+                            // `pending_cli_sources.pop_front()` handler in
+                            // this same match, below) — a multi-file pick
+                            // just seeds that queue directly instead of via
+                            // the CLI. Pushed to the *front*, in order, so
+                            // these take priority over anything already
+                            // queued rather than landing after it.
+                            for path in picked[1..].iter().rev() {
+                                self.pending_cli_sources.push_front(path.clone());
+                            }
                         }
                         FilePickOutcome::ParserConfigFile(Some(picked)) => {
                             self.parser_config_path = Some(picked);
@@ -866,7 +888,7 @@ impl eframe::App for PeachApp {
                             self.start_export(picked);
                         }
                         // The analyst cancelled the dialog — nothing to update.
-                        FilePickOutcome::SourcePath(None)
+                        FilePickOutcome::SourcePaths(None)
                         | FilePickOutcome::ParserConfigFile(None)
                         | FilePickOutcome::RuleFiles(None)
                         | FilePickOutcome::ExportTarget(None) => {}
@@ -1169,33 +1191,40 @@ impl eframe::App for PeachApp {
                     {
                         let task = rfd::AsyncFileDialog::new().pick_folder();
                         self.file_pick_rx = Some(spawn_dialog_pick(task, |picked| {
-                            FilePickOutcome::SourcePath(
-                                picked.map(|h: rfd::FileHandle| h.path().to_path_buf()),
+                            FilePickOutcome::SourcePaths(
+                                picked.map(|h: rfd::FileHandle| vec![h.path().to_path_buf()]),
                             )
                         }));
                     }
                 } else {
                     let (file_label, extension_filter) = match self.source_kind {
-                        SourceKind::Evtx => ("Choose .evtx file...", Some(("EVTX", "evtx"))),
+                        SourceKind::Evtx => ("Choose .evtx file(s)...", Some(("EVTX", "evtx"))),
                         SourceKind::Journald => {
-                            ("Choose .journal file...", Some(("journald", "journal")))
+                            ("Choose .journal file(s)...", Some(("journald", "journal")))
                         }
-                        SourceKind::Text => ("Choose log file...", None),
+                        SourceKind::Text => ("Choose log file(s)...", None),
                         SourceKind::Aul => unreachable!("handled above"),
                     };
                     if ui
                         .add_enabled(self.file_pick_rx.is_none(), egui::Button::new(file_label))
+                        .on_hover_text(
+                            "Select several to queue them as separate sources, loaded one \
+                             after another — each still needs its own \"Load\" click, same as \
+                             a single file",
+                        )
                         .clicked()
                     {
                         let mut dialog = rfd::AsyncFileDialog::new();
                         if let Some((name, ext)) = extension_filter {
                             dialog = dialog.add_filter(name, &[ext]);
                         }
-                        let task = dialog.pick_file();
+                        let task = dialog.pick_files();
                         self.file_pick_rx = Some(spawn_dialog_pick(task, |picked| {
-                            FilePickOutcome::SourcePath(
-                                picked.map(|h: rfd::FileHandle| h.path().to_path_buf()),
-                            )
+                            FilePickOutcome::SourcePaths(picked.map(
+                                |handles: Vec<rfd::FileHandle>| {
+                                    handles.iter().map(|h| h.path().to_path_buf()).collect()
+                                },
+                            ))
                         }));
                     }
                     if ui
@@ -1211,8 +1240,8 @@ impl eframe::App for PeachApp {
                     {
                         let task = rfd::AsyncFileDialog::new().pick_folder();
                         self.file_pick_rx = Some(spawn_dialog_pick(task, |picked| {
-                            FilePickOutcome::SourcePath(
-                                picked.map(|h: rfd::FileHandle| h.path().to_path_buf()),
+                            FilePickOutcome::SourcePaths(
+                                picked.map(|h: rfd::FileHandle| vec![h.path().to_path_buf()]),
                             )
                         }));
                     }

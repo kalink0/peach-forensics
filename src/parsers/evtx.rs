@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use evtx::{EvtxParser as EvtxCrateParser, ParserSettings, SerializedEvtxRecord};
 
 use crate::model::log_entry::ParsedRecord;
+use crate::parsers::evtx_templates;
 use crate::parsers::{LogParser, ParserConfig};
 
 /// Wraps the `evtx` crate to parse Windows Event Log (`.evtx`) files.
@@ -14,18 +15,23 @@ use crate::parsers::{LogParser, ParserConfig};
 /// 4=Informational) — not remapped into an invented ERROR/WARN/INFO scheme,
 /// consistent with how [`crate::parsers::aul`] handles `LogType`.
 ///
-/// `message` is `Event.RenderingInfo.Message` when present, `None`
-/// otherwise. `RenderingInfo` is an *optional* sibling of `System`/
-/// `EventData` under `Event` (`RenderingInfoType`, `minOccurs="0"` in
-/// Microsoft's own MS-EVEN6 schema, bundled with the `evtx` crate) — present
-/// when the file was produced by something that rendered the event before
-/// writing it out (e.g. Windows Event Forwarding's collector side), absent
-/// for a plain live `winevt\Logs\*.evtx` read directly, since rendering
-/// needs the source machine's message-resource DLLs/templates, which this
-/// crate deliberately doesn't ship or emulate. Never fabricated — if the
-/// file didn't embed it, `message` stays empty, same as before. `EventData`
-/// is preserved in full in `raw`/`fields` regardless, so nothing is lost
-/// either way.
+/// `message` is `Event.RenderingInfo.Message` when present, falling back to
+/// [`evtx_templates::render_for_event`]'s built-in template for this
+/// `(provider, event_id)` when there is one, `None` otherwise.
+/// `RenderingInfo` is an *optional* sibling of `System`/`EventData` under
+/// `Event` (`RenderingInfoType`, `minOccurs="0"` in Microsoft's own
+/// MS-EVEN6 schema, bundled with the `evtx` crate) — present when the file
+/// was produced by something that rendered the event before writing it out
+/// (e.g. Windows Event Forwarding's collector side), absent for a plain
+/// live `winevt\Logs\*.evtx` read directly, since real rendering needs the
+/// source machine's message-resource DLLs/templates, which this crate
+/// deliberately doesn't ship or emulate — the template fallback exists for
+/// exactly that common case. A template-rendered message is Peach's own
+/// reconstruction, not source-provided text, so it's visibly prefixed (see
+/// `evtx_templates`'s module doc comment) rather than presented as if it
+/// were a real `RenderingInfo.Message`; a real one always takes precedence
+/// when present. `EventData` is preserved in full in `raw`/`fields`
+/// regardless, so nothing is lost either way.
 ///
 /// No config-driven field-mapping, like AUL — `ParserConfig.extra` is
 /// unused.
@@ -97,7 +103,8 @@ fn to_parsed_record(
     let message = record
         .data
         .pointer("/Event/RenderingInfo/Message")
-        .and_then(json_value_to_plain_string);
+        .and_then(json_value_to_plain_string)
+        .or_else(|| template_rendered_message(&record.data));
 
     let event = record
         .data
@@ -117,6 +124,27 @@ fn to_parsed_record(
         raw,
         fields,
     })
+}
+
+/// [`evtx_templates::render_for_event`]'s result for this record's
+/// `(Event.System.Provider_attributes.Name, Event.System.EventID)`, or
+/// `None` when either is missing/not the expected JSON type — a record
+/// this malformed has no template lookup to even attempt, not an error
+/// worth surfacing (the record's raw `Event.System` is preserved in
+/// `fields`/`raw` regardless). `Provider_attributes` (not `Provider`) and a
+/// plain-number `EventID` are both a direct consequence of parsing with
+/// `separate_json_attributes(true)`, same as `timeline_queries::
+/// extracted_field_sql`'s paths — see this module's struct-level doc
+/// comment.
+fn template_rendered_message(data: &serde_json::Value) -> Option<String> {
+    let provider = data
+        .pointer("/Event/System/Provider_attributes/Name")
+        .and_then(|v| v.as_str())?;
+    let event_id = data
+        .pointer("/Event/System/EventID")
+        .and_then(|v| v.as_u64())? as u32;
+    let event_data = data.pointer("/Event/EventData");
+    evtx_templates::render_for_event(provider, event_id, event_data)
 }
 
 /// EVTX timestamps are already absolute (UTC) — unlike the text parser,
@@ -179,11 +207,11 @@ mod tests {
     }
 
     #[test]
-    fn message_is_none_without_rendering_info() {
-        // The common case: a plain live winevt\Logs\*.evtx read directly
-        // has no RenderingInfo (needs a message-resource DLL/template this
-        // crate doesn't ship or emulate) — message stays empty, not
-        // fabricated from EventData or anything else.
+    fn message_is_none_without_rendering_info_or_a_matching_template() {
+        // No RenderingInfo (the common case for a plain live
+        // winevt\Logs\*.evtx read directly) and no `Provider`/`EventID` to
+        // even attempt a built-in-template lookup against — message stays
+        // empty, not fabricated from EventData or anything else.
         let record = sample_record(
             1,
             jiff::Timestamp::from_second(0).unwrap(),
@@ -193,6 +221,69 @@ mod tests {
         let parsed = to_parsed_record(record).unwrap();
 
         assert_eq!(parsed.message, None);
+    }
+
+    #[test]
+    fn message_falls_back_to_a_built_in_template_when_the_provider_and_event_id_match() {
+        // 4624 ("An account was successfully logged on") is one of the
+        // shipped `message_templates/examples/evtx_security_auditing.toml`
+        // entries — this exercises the real embedded template, not a
+        // hand-built stand-in, so a change to the shipped wording that
+        // breaks the placeholder contract would show up here too.
+        let record = sample_record(
+            1,
+            jiff::Timestamp::from_second(0).unwrap(),
+            serde_json::json!({
+                "Event": {
+                    "System": {
+                        "Provider_attributes": {"Name": "Microsoft-Windows-Security-Auditing"},
+                        "EventID": 4624
+                    },
+                    "EventData": {"TargetUserName": "bob", "TargetDomainName": "CORP"}
+                }
+            }),
+        );
+
+        let parsed = to_parsed_record(record).unwrap();
+
+        let message = parsed
+            .message
+            .expect("expected a template-rendered message");
+        assert!(
+            message.starts_with(evtx_templates::RENDERED_PREFIX),
+            "template-rendered messages must be visibly marked as Peach's own \
+             reconstruction, not source-provided text: {message}"
+        );
+        assert!(message.contains("bob"));
+        assert!(message.contains("CORP"));
+    }
+
+    #[test]
+    fn rendering_info_message_takes_precedence_over_a_matching_template() {
+        // A real, source-provided message must never be overwritten by
+        // Peach's own reconstruction — even when a built-in template for
+        // this exact (provider, event_id) also exists.
+        let record = sample_record(
+            1,
+            jiff::Timestamp::from_second(0).unwrap(),
+            serde_json::json!({
+                "Event": {
+                    "System": {
+                        "Provider_attributes": {"Name": "Microsoft-Windows-Security-Auditing"},
+                        "EventID": 4624
+                    },
+                    "EventData": {"TargetUserName": "bob"},
+                    "RenderingInfo": {"Message": "the real, source-provided text"}
+                }
+            }),
+        );
+
+        let parsed = to_parsed_record(record).unwrap();
+
+        assert_eq!(
+            parsed.message.as_deref(),
+            Some("the real, source-provided text")
+        );
     }
 
     #[test]

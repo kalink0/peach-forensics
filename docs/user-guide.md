@@ -6,18 +6,38 @@ you already know which sourcetype you're loading.
 
 ## Loading a source
 
-1. Pick a **Sourcetype**: `AUL (.logarchive)` or `Text (config-based)`.
+1. Pick a **Sourcetype**: `AUL (.logarchive)`, `EVTX`, `journald`, or
+   `Text (config-based)`.
 2. Click the picker button:
    - AUL expects a folder — the `.logarchive` bundle itself (it contains
      `Persist`/`Special`/`Signpost`/`HighVolume` subfolders plus `dsc`/`uuidtext`/
      `timesync` reference data). One `.logarchive` becomes one source.
-   - Text expects a single file, plus a **parser config** (TOML) — see below.
+   - EVTX/journald/Text's **"Choose ... file(s)..."** button supports
+     selecting several files at once (e.g. `Application.evtx` +
+     `Security.evtx` + `System.evtx` together) — the first one becomes the
+     current source, the rest queue up ("N more source(s) queued", same as
+     `--add-source`) and become the current source in turn as each load
+     finishes. Each still needs its own **Load** click; a multi-select
+     doesn't load itself automatically, since different queued files can
+     need different settings (sourcetype, parser config) before loading.
+   - Any of them also has a **"Choose folder..."** button, which recursively
+     loads every matching file under that folder (and subfolders) as
+     separate sources in one go — no per-file **Load** click needed, but
+     also no per-file control over settings first. Text expects a
+     **parser config** (TOML) either way — see below.
 3. Optionally choose one or more **tagging rules** (TOML, multi-select) — see
    [Tagging](#tagging).
 4. Click **Load**. Loading runs in the background so the UI stays responsive; a
    large AUL source can take a while and insert millions of rows.
 
 Peach never auto-detects a format — you always confirm the sourcetype yourself.
+
+A file that `--add-source`, a multi-select pick, or **"Choose folder..."**
+finds but that produces zero timeline entries (a real parse error, or a
+file that parsed cleanly but matched nothing — e.g. an EVTX channel that's
+never logged anything) shows up as **"N file(s) skipped"** next to the load
+result, rather than silently vanishing from the count. Hover it for the
+exact path and reason per file.
 
 ### Text parser configs
 
@@ -174,7 +194,15 @@ language. Filters apply live as you type — there's no separate "search" button
 
 - Bare words / `"quoted phrases"` — substring match against `message` OR `raw`.
 - `field=value` / `field:value` — exact match. Recognized fields: `level`,
-  `source` (sourcetype), `tag` (from tagging rules), `message`, `raw`.
+  `source` (sourcetype), `tag` (from tagging rules), `message`, `raw`,
+  and every column the **Columns** picker can show — `event_id`, `host`,
+  `process`, `subsystem`, `category`. Each of those is empty/no-match for
+  whichever sourcetypes don't populate that column in the first place (e.g.
+  `event_id=` only ever matches EVTX) — see
+  [field-extraction.md](field-extraction.md) for exactly which sourcetype
+  populates which.
+- `field!=value` — negated exact match; shorthand for `NOT field=value`
+  (identical result, just without the extra word).
 - `field~value` — regex match on that field instead of exact/substring.
 - `tag=*` — has at least one tag, whichever. Combined with negation,
   `NOT tag=*` means "untagged" — there's no separate keyword for it.

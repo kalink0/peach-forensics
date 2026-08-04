@@ -1,0 +1,85 @@
+# Message templates for Microsoft-Windows-Security-Auditing — the classic
+# Windows Security-log auditing events an IR analyst reaches for first.
+# `message` placeholders (`{FieldName}`) are resolved against this record's
+# `Event.EventData` fields (see `parsers::evtx_templates`'s doc comment for
+# the full mechanism and why an unresolved placeholder is left literal
+# rather than silently dropped). Field names are Microsoft's own
+# Security-Auditing schema field names, not guessed — cross-checked against
+# Microsoft's published auditing event reference
+# (https://learn.microsoft.com/windows/security/threat-protection/auditing/)
+# for each event ID below.
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4624
+message = "An account was successfully logged on. Account: {TargetUserName} (domain {TargetDomainName}), logon type {LogonType}, from {WorkstationName} ({IpAddress}:{IpPort}), logon process {LogonProcessName}/{AuthenticationPackageName}"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4625
+message = "An account failed to log on. Account: {TargetUserName} (domain {TargetDomainName}), logon type {LogonType}, from {WorkstationName} ({IpAddress}:{IpPort}), failure reason: {FailureReason} (status {Status}, sub status {SubStatus})"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4634
+message = "An account was logged off. Account: {TargetUserName} (domain {TargetDomainName}), logon type {LogonType}"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4648
+message = "A logon was attempted using explicit credentials. Subject: {SubjectUserName} (domain {SubjectDomainName}), target account: {TargetUserName}, target server: {TargetServerName}, process: {ProcessName}, from {IpAddress}"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4672
+message = "Special privileges assigned to new logon. Account: {SubjectUserName} (domain {SubjectDomainName}), privileges: {PrivilegeList}"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4688
+message = "A new process has been created. Process: {NewProcessName} (PID {NewProcessId}), command line: {CommandLine}, parent: {ParentProcessName}, creator: {SubjectUserName} (domain {SubjectDomainName})"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4697
+message = "A service was installed in the system. Service: {ServiceName}, file: {ServiceFileName}, start type: {ServiceStartType}, account: {ServiceAccount}, installed by: {SubjectUserName} (domain {SubjectDomainName})"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4720
+message = "A user account was created. Account: {TargetUserName} (domain {TargetDomainName}), created by: {SubjectUserName} (domain {SubjectDomainName})"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4724
+message = "An attempt was made to reset an account's password. Target: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName} (domain {SubjectDomainName})"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4728
+message = "A member was added to a security-enabled global group. Member: {MemberName}, group: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName}"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4732
+message = "A member was added to a security-enabled local group. Member: {MemberName}, group: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName}"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4738
+message = "A user account was changed. Account: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName} (domain {SubjectDomainName})"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4740
+message = "A user account was locked out. Account: {TargetUserName} (domain {TargetDomainName}), caller computer: {TargetServerName}"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4756
+message = "A member was added to a security-enabled universal group. Member: {MemberName}, group: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName}"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4776
+message = "The domain controller attempted to validate credentials for an account. Account: {TargetUserName}, workstation: {Workstation}, package: {PackageName}, status: {Status}"

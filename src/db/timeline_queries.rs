@@ -4,8 +4,10 @@ use crate::model::event_id::EventId;
 
 /// A Splunk-inspired v1 search grammar — whitespace-separated terms,
 /// implicit `AND`, explicit `OR`, `NOT`/`-` negation, `field=value` /
-/// `field:value` for exact filters, `field~value` for regex, quoted
-/// phrases, bare words as free text against `message` and `raw`.
+/// `field:value` for exact filters, `field!=value` for negated exact
+/// filters (sugar for `NOT field=value` — see [`parse_term_kind`]),
+/// `field~value` for regex, quoted phrases, bare words as free text against
+/// `message` and `raw`.
 /// Left-associative, no parentheses, no operator precedence — deliberately
 /// deferred, not an oversight (see [`crate::ui::filter_bar`]'s doc comment
 /// for why the multi-select filter buttons work around this with a single
@@ -24,6 +26,32 @@ pub enum Field {
     Tag,
     Message,
     Raw,
+    /// `event_id=` — EVTX's `Event.System.EventID` (e.g. `4625`), the same
+    /// value the "Event ID" column shows (see `extracted_field_sql`'s doc
+    /// comment). Exact match by default, like `Level`/`Sourcetype` — an
+    /// event ID is a whole number, not free text to substring-search.
+    /// `NULL`/no match for every sourcetype other than `evtx`, same as the
+    /// column itself.
+    EventId,
+    /// `host=` — the "Host" column's value (journald's `_HOSTNAME`, EVTX's
+    /// `Event.System.Computer`; empty/no match for AUL/`text_config`). Exact
+    /// match, same reasoning as `EventId` — a hostname is a discrete value
+    /// to match exactly, not free text; use `host~` for partial matches.
+    Host,
+    /// `process=` — the "Process" column's value (journald's
+    /// `SYSLOG_IDENTIFIER`/`_COMM`, AUL's `process`; empty/no match for
+    /// EVTX/`text_config`). Exact match, same reasoning as `Host`.
+    Process,
+    /// `subsystem=` — the "Subsystem" column's value (AUL's `subsystem`,
+    /// EVTX's `Event.System.Provider_attributes.Name`; empty/no match for
+    /// journald/`text_config`). Exact match, same reasoning as `Host`.
+    Subsystem,
+    /// `category=` — the "Category" column's value (AUL's `category`;
+    /// empty/no match for every other sourcetype — see
+    /// `extracted_field_sql`'s doc comment on why EVTX's superficially
+    /// similar `Channel` deliberately isn't mapped here). Exact match, same
+    /// reasoning as `Host`.
+    Category,
     /// `timestamp_utc >= value`. `value` is parsed at compile time (not
     /// here) since a malformed timestamp still needs to produce a valid,
     /// always-false query rather than a parse error — see
@@ -42,6 +70,11 @@ impl Field {
             "tag" => Some(Self::Tag),
             "message" => Some(Self::Message),
             "raw" => Some(Self::Raw),
+            "event_id" => Some(Self::EventId),
+            "host" => Some(Self::Host),
+            "process" => Some(Self::Process),
+            "subsystem" => Some(Self::Subsystem),
+            "category" => Some(Self::Category),
             "after" => Some(Self::After),
             "before" => Some(Self::Before),
             _ => None,
@@ -113,10 +146,18 @@ impl Query {
                 _ => (false, token.as_str()),
             };
 
+            let (kind, negate_operator) = parse_term_kind(raw);
             terms.push(Term {
                 connector,
-                negate: negate || negate_prefix,
-                kind: parse_term_kind(raw),
+                // Three independent ways to negate a term (`NOT`, a `-`
+                // prefix, `field!=value`'s own built-in negation) combine
+                // via OR, not XOR — `-field!=value` still just means "not",
+                // same as any one of them alone. Consistent with how `NOT`
+                // and `-` already combined before `!=` existed; a
+                // double-negation-cancels reading would be surprising for
+                // something this rarely stacked, not more correct.
+                negate: negate || negate_prefix || negate_operator,
+                kind,
             });
             connector = Connector::And;
             negate = false;
@@ -155,7 +196,34 @@ fn tokenize(input: &str) -> Vec<String> {
     tokens
 }
 
-fn parse_term_kind(raw: &str) -> TermKind {
+/// Also returns whether the term parsed with its own built-in negation
+/// (currently only `field!=value`) — the caller ORs this into the term's
+/// `NOT`/`-`-prefix negation rather than this function returning a
+/// `TermKind` that somehow carries negation itself, since negation is a
+/// `Term`-level concept (see `Term::negate`), not a `TermKind` one.
+fn parse_term_kind(raw: &str) -> (TermKind, bool) {
+    // Checked before the single-char separator scan below: that scan's
+    // `char_indices` search for `=`/`:`/`~` would otherwise land on the
+    // `=` inside `!=` first, treating the `!` as part of the field name
+    // (so `level!=ERROR` would look for a field literally called
+    // `"level!"`, fail to find one, and silently fall through to
+    // free-text) — checking the two-char operator first is what makes
+    // `!=` actually reachable at all.
+    if let Some(idx) = raw.find("!=") {
+        let field_str = &raw[..idx];
+        let value = &raw[idx + 2..];
+        if let Some(field) = Field::parse(field_str) {
+            return (
+                TermKind::Field {
+                    field,
+                    value: value.to_string(),
+                    is_regex: false,
+                },
+                true,
+            );
+        }
+    }
+
     if let Some((idx, sep)) = raw
         .char_indices()
         .find(|(_, c)| matches!(c, '=' | ':' | '~'))
@@ -163,14 +231,17 @@ fn parse_term_kind(raw: &str) -> TermKind {
         let field_str = &raw[..idx];
         let value = &raw[idx + sep.len_utf8()..];
         if let Some(field) = Field::parse(field_str) {
-            return TermKind::Field {
-                field,
-                value: value.to_string(),
-                is_regex: sep == '~',
-            };
+            return (
+                TermKind::Field {
+                    field,
+                    value: value.to_string(),
+                    is_regex: sep == '~',
+                },
+                false,
+            );
         }
     }
-    TermKind::FreeText(raw.to_string())
+    (TermKind::FreeText(raw.to_string()), false)
 }
 
 fn escape_like(input: &str) -> String {
@@ -297,11 +368,16 @@ fn compile_term_kind(kind: &TermKind) -> (String, Vec<Value>) {
             is_regex,
         } => {
             let column = match field {
-                Field::Level => "le.level",
-                Field::Sourcetype => "s.sourcetype",
-                Field::SourceFile => "s.path",
-                Field::Message => "le.message",
-                Field::Raw => "le.raw",
+                Field::Level => "le.level".to_string(),
+                Field::Sourcetype => "s.sourcetype".to_string(),
+                Field::SourceFile => "s.path".to_string(),
+                Field::Message => "le.message".to_string(),
+                Field::Raw => "le.raw".to_string(),
+                Field::EventId => event_code_case_sql("le.fields", "s.sourcetype"),
+                Field::Host => host_case_sql("le.fields", "s.sourcetype"),
+                Field::Process => process_case_sql("le.fields", "s.sourcetype"),
+                Field::Subsystem => subsystem_case_sql("le.fields", "s.sourcetype"),
+                Field::Category => category_case_sql("le.fields", "s.sourcetype"),
                 Field::Tag | Field::After | Field::Before => unreachable!("handled above"),
             };
             if *is_regex {
@@ -311,7 +387,13 @@ fn compile_term_kind(kind: &TermKind) -> (String, Vec<Value>) {
                 )
             } else {
                 match field {
-                    Field::Level | Field::Sourcetype => {
+                    Field::Level
+                    | Field::Sourcetype
+                    | Field::EventId
+                    | Field::Host
+                    | Field::Process
+                    | Field::Subsystem
+                    | Field::Category => {
                         (format!("{column} = ?"), vec![Value::Text(value.clone())])
                     }
                     Field::SourceFile | Field::Message | Field::Raw => (
@@ -608,33 +690,76 @@ pub fn fetch_full_entry(conn: &Connection, event_id: EventId) -> anyhow::Result<
 /// aliases a caller evaluating this against some other query shape might
 /// use.
 fn extracted_field_sql(fields_ref: &str, sourcetype_ref: &str) -> String {
+    let host_case = host_case_sql(fields_ref, sourcetype_ref);
+    let process_case = process_case_sql(fields_ref, sourcetype_ref);
+    let event_code_case = event_code_case_sql(fields_ref, sourcetype_ref);
+    let subsystem_case = subsystem_case_sql(fields_ref, sourcetype_ref);
+    let category_case = category_case_sql(fields_ref, sourcetype_ref);
+    format!(
+        "{host_case} AS host,
+         {process_case} AS process,
+         {event_code_case} AS event_code,
+         {subsystem_case} AS subsystem,
+         {category_case} AS category"
+    )
+}
+
+/// Every `*_case_sql` function below returns a bare `CASE ... END`
+/// expression (no `AS` alias) — factored out of [`extracted_field_sql`] so
+/// each can also back `compile_term_kind`'s matching `host=`/`process=`/
+/// `event_id=`/`subsystem=`/`category=` filter (with their usual
+/// `!=`/`~` variants too). One shared expression per field, not two
+/// independently-maintained copies of the same mapping (one for the
+/// display column, one for the filter), means a column and its filter can
+/// never quietly drift apart on what the field even means.
+fn host_case_sql(fields_ref: &str, sourcetype_ref: &str) -> String {
     format!(
         "CASE {sourcetype_ref}
             WHEN 'journald' THEN json_extract_string({fields_ref}, '$._HOSTNAME')
             WHEN 'evtx' THEN json_extract_string({fields_ref}, '$.Event.System.Computer')
             ELSE NULL
-         END AS host,
-         CASE {sourcetype_ref}
+         END"
+    )
+}
+
+fn process_case_sql(fields_ref: &str, sourcetype_ref: &str) -> String {
+    format!(
+        "CASE {sourcetype_ref}
             WHEN 'journald' THEN COALESCE(
                 json_extract_string({fields_ref}, '$.SYSLOG_IDENTIFIER'),
                 json_extract_string({fields_ref}, '$._COMM')
             )
             WHEN 'aul' THEN json_extract_string({fields_ref}, '$.process')
             ELSE NULL
-         END AS process,
-         CASE {sourcetype_ref}
+         END"
+    )
+}
+
+fn event_code_case_sql(fields_ref: &str, sourcetype_ref: &str) -> String {
+    format!(
+        "CASE {sourcetype_ref}
             WHEN 'evtx' THEN json_extract_string({fields_ref}, '$.Event.System.EventID')
             ELSE NULL
-         END AS event_code,
-         CASE {sourcetype_ref}
+         END"
+    )
+}
+
+fn subsystem_case_sql(fields_ref: &str, sourcetype_ref: &str) -> String {
+    format!(
+        "CASE {sourcetype_ref}
             WHEN 'aul' THEN json_extract_string({fields_ref}, '$.subsystem')
             WHEN 'evtx' THEN json_extract_string({fields_ref}, '$.Event.System.Provider_attributes.Name')
             ELSE NULL
-         END AS subsystem,
-         CASE {sourcetype_ref}
+         END"
+    )
+}
+
+fn category_case_sql(fields_ref: &str, sourcetype_ref: &str) -> String {
+    format!(
+        "CASE {sourcetype_ref}
             WHEN 'aul' THEN json_extract_string({fields_ref}, '$.category')
             ELSE NULL
-         END AS category"
+         END"
     )
 }
 
@@ -927,6 +1052,54 @@ mod tests {
     }
 
     #[test]
+    fn event_id_is_recognized_as_an_exact_match_field() {
+        assert_eq!(
+            Query::parse("event_id=4625").terms[0].kind,
+            TermKind::Field {
+                field: Field::EventId,
+                value: "4625".to_string(),
+                is_regex: false
+            }
+        );
+    }
+
+    #[test]
+    fn host_process_subsystem_and_category_are_all_recognized_exact_match_fields() {
+        assert_eq!(
+            Query::parse("host=WORKSTATION1").terms[0].kind,
+            TermKind::Field {
+                field: Field::Host,
+                value: "WORKSTATION1".to_string(),
+                is_regex: false
+            }
+        );
+        assert_eq!(
+            Query::parse("process=systemd").terms[0].kind,
+            TermKind::Field {
+                field: Field::Process,
+                value: "systemd".to_string(),
+                is_regex: false
+            }
+        );
+        assert_eq!(
+            Query::parse("subsystem=com.apple.mDNSResponder").terms[0].kind,
+            TermKind::Field {
+                field: Field::Subsystem,
+                value: "com.apple.mDNSResponder".to_string(),
+                is_regex: false
+            }
+        );
+        assert_eq!(
+            Query::parse("category=mDNS").terms[0].kind,
+            TermKind::Field {
+                field: Field::Category,
+                value: "mDNS".to_string(),
+                is_regex: false
+            }
+        );
+    }
+
+    #[test]
     fn field_filters_recognize_equals_and_colon() {
         assert_eq!(
             Query::parse("level=ERROR").terms[0].kind,
@@ -971,6 +1144,56 @@ mod tests {
         let query = Query::parse("-level=INFO NOT tag=noise");
         assert!(query.terms[0].negate);
         assert!(query.terms[1].negate);
+    }
+
+    #[test]
+    fn not_equal_operator_negates_and_parses_as_an_exact_field_match() {
+        let query = Query::parse("level!=ERROR");
+        assert_eq!(query.terms.len(), 1);
+        assert!(query.terms[0].negate);
+        assert_eq!(
+            query.terms[0].kind,
+            TermKind::Field {
+                field: Field::Level,
+                value: "ERROR".to_string(),
+                is_regex: false
+            }
+        );
+    }
+
+    #[test]
+    fn not_equal_operator_compiles_the_same_as_not_field_equals() {
+        // `!=` is sugar, not a separate code path in `compile_term_kind` —
+        // this pins that the two really do produce identical SQL/params,
+        // not just "both happen to set `negate`".
+        let via_operator = Query::parse("level!=ERROR").compile();
+        let via_not_keyword = Query::parse("NOT level=ERROR").compile();
+        assert_eq!(via_operator.where_clause, via_not_keyword.where_clause);
+        assert_eq!(via_operator.params, via_not_keyword.params);
+    }
+
+    #[test]
+    fn not_equal_operator_combines_with_a_dash_prefix_without_double_negating() {
+        // See `Query::parse`'s doc comment on `negate_operator`: every
+        // negation source ORs together, so stacking `-` on top of `!=`
+        // still just means "not," not "not not."
+        let query = Query::parse("-level!=ERROR");
+        assert!(query.terms[0].negate);
+    }
+
+    #[test]
+    fn not_equal_on_an_unrecognized_field_falls_back_to_free_text() {
+        assert_eq!(
+            Query::parse("bogus!=foo").terms[0].kind,
+            TermKind::FreeText("bogus!=foo".to_string())
+        );
+    }
+
+    #[test]
+    fn tag_not_equal_wildcard_means_untagged_same_as_not_tag_equals_wildcard() {
+        let via_operator = Query::parse("tag!=*").compile();
+        let via_not_keyword = Query::parse("NOT tag=*").compile();
+        assert_eq!(via_operator.where_clause, via_not_keyword.where_clause);
     }
 
     #[test]
@@ -1427,6 +1650,62 @@ mod tests {
         }
 
         #[test]
+        fn event_id_filter_matches_exactly_and_only_evtx_entries() {
+            // Three rows: an EVTX 4625 (must match), an EVTX 4624 (must
+            // not — exact match, not a prefix/substring match), and an AUL
+            // entry whose `fields` happens to contain the string "4625"
+            // somewhere irrelevant (must not match either — `event_id=`
+            // only ever looks at EVTX's `Event.System.EventID`, same as
+            // the "Event ID" column itself).
+            let conn = open_test_db();
+
+            let evtx_source = SourceFileId::new_random();
+            insert_source(&conn, evtx_source, "evtx");
+            let mut evtx_seq = SequenceCounter::new();
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, '0', 'a', 'a', '{\"Event\": {\"System\": {\"EventID\": 4625}}}')",
+                duckdb::params![
+                    evtx_source.to_string(),
+                    evtx_seq.next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, '0', 'b', 'b', '{\"Event\": {\"System\": {\"EventID\": 4624}}}')",
+                duckdb::params![
+                    evtx_source.to_string(),
+                    evtx_seq.next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+
+            let aul_source = SourceFileId::new_random();
+            insert_source(&conn, aul_source, "aul");
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, 'Default', 'contains 4625 in the message', 'c', '{}')",
+                duckdb::params![
+                    aul_source.to_string(),
+                    SequenceCounter::new().next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+
+            let rows = fetch_window(&conn, &Query::parse("event_id=4625"), 0, 10).unwrap();
+
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].message, "a");
+        }
+
+        #[test]
         fn fetch_window_extracts_aul_subsystem_and_category() {
             let conn = open_test_db();
             let source_file_id = SourceFileId::new_random();
@@ -1448,6 +1727,92 @@ mod tests {
 
             assert_eq!(rows[0].subsystem, "com.apple.mDNSResponder");
             assert_eq!(rows[0].category, "mDNS");
+        }
+
+        #[test]
+        fn subsystem_and_category_filters_match_exactly_against_aul_entries() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "aul");
+            let mut seq = SequenceCounter::new();
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, 'Default', 'a', 'a',
+                         '{\"subsystem\": \"com.apple.mDNSResponder\", \"category\": \"mDNS\"}')",
+                duckdb::params![
+                    source_file_id.to_string(),
+                    seq.next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, 'Default', 'b', 'b',
+                         '{\"subsystem\": \"com.apple.wifi\", \"category\": \"WiFi\"}')",
+                duckdb::params![
+                    source_file_id.to_string(),
+                    seq.next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+
+            let by_subsystem = fetch_window(
+                &conn,
+                &Query::parse("subsystem=com.apple.mDNSResponder"),
+                0,
+                10,
+            )
+            .unwrap();
+            assert_eq!(by_subsystem.len(), 1);
+            assert_eq!(by_subsystem[0].message, "a");
+
+            let by_category = fetch_window(&conn, &Query::parse("category=WiFi"), 0, 10).unwrap();
+            assert_eq!(by_category.len(), 1);
+            assert_eq!(by_category[0].message, "b");
+        }
+
+        #[test]
+        fn host_and_process_filters_match_exactly_against_journald_entries() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "journald");
+            let mut seq = SequenceCounter::new();
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, '6', 'a', 'a',
+                         '{\"_HOSTNAME\": \"host-a\", \"SYSLOG_IDENTIFIER\": \"sshd\"}')",
+                duckdb::params![
+                    source_file_id.to_string(),
+                    seq.next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, '6', 'b', 'b',
+                         '{\"_HOSTNAME\": \"host-b\", \"SYSLOG_IDENTIFIER\": \"cron\"}')",
+                duckdb::params![
+                    source_file_id.to_string(),
+                    seq.next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+
+            let by_host = fetch_window(&conn, &Query::parse("host=host-a"), 0, 10).unwrap();
+            assert_eq!(by_host.len(), 1);
+            assert_eq!(by_host[0].message, "a");
+
+            let by_process = fetch_window(&conn, &Query::parse("process=cron"), 0, 10).unwrap();
+            assert_eq!(by_process.len(), 1);
+            assert_eq!(by_process[0].message, "b");
         }
 
         #[test]

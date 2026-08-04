@@ -1,0 +1,8 @@
+# Message template for Microsoft-Windows-PowerShell — see
+# `evtx_security_auditing.toml`'s header comment for the placeholder
+# mechanism this relies on.
+
+[[template]]
+provider = "Microsoft-Windows-PowerShell"
+event_id = 4104
+message = "PowerShell script block executed (part {MessageNumber}/{MessageTotal}, ID {ScriptBlockId}, path {Path}): {ScriptBlockText}"

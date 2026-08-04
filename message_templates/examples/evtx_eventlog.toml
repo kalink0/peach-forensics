@@ -1,0 +1,8 @@
+# Message template for Microsoft-Windows-Eventlog — see
+# `evtx_security_auditing.toml`'s header comment for the placeholder
+# mechanism this relies on.
+
+[[template]]
+provider = "Microsoft-Windows-Eventlog"
+event_id = 1102
+message = "The audit log was cleared. Cleared by: {SubjectUserName} (domain {SubjectDomainName})"
