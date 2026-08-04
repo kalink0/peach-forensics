@@ -31,11 +31,24 @@ jobs:
 
           # Reference points: the existing "nightly" tag and the latest stable
           # (non-prerelease) release. Whichever is newer is the baseline.
-          nightly_sha=$(gh api "repos/${{ github.repository }}/commits/nightly" --jq .sha 2>/dev/null || true)
+          #
+          # `gh api` writes the raw JSON error body to stdout even on a
+          # failed (non-2xx) request, so a trailing `|| true` inside a
+          # command substitution is not enough to discard it — the failed
+          # call's stdout (e.g. `{"message": "No commit found ..."}`) would
+          # otherwise end up assigned to the variable. Reset explicitly to
+          # empty on failure instead.
+          nightly_sha=""
+          if sha=$(gh api "repos/${{ github.repository }}/commits/nightly" --jq .sha 2>/dev/null); then
+            nightly_sha="$sha"
+          fi
+
           latest_tag=$(gh release list --repo "${{ github.repository }}" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
           latest_sha=""
           if [ -n "$latest_tag" ]; then
-            latest_sha=$(gh api "repos/${{ github.repository }}/commits/$latest_tag" --jq .sha 2>/dev/null || true)
+            if sha=$(gh api "repos/${{ github.repository }}/commits/$latest_tag" --jq .sha 2>/dev/null); then
+              latest_sha="$sha"
+            fi
           fi
 
           ref_sha=""
