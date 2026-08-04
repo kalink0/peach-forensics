@@ -119,6 +119,12 @@ Three modes:
 - **Copy message** — copies just the `message` field to the clipboard.
 - **Copy whole event as text** — copies timestamp, level, tags, message, and
   `raw` (the full original record/line) as a plain-text block.
+- **View raw/fields...** — same data as "Copy whole event as text", shown in
+  a read-only, scrollable, selectable window instead of only going to the
+  clipboard: `raw` (the full original record/line) and `fields` (the
+  source-specific JSON — for AUL/EVTX/journald this largely overlaps `raw`,
+  but for a `text_config` source it's genuinely different: `raw` is the
+  literal original line, `fields` is what the regex captured out of it).
 - **Show context around this event** (± 1 / 5 / 15 / 60 min) — replaces the
   search box with an `after=.../before=...` window centered on the clicked
   row, so you see everything around it rather than only whatever the
@@ -146,6 +152,20 @@ palette. The color is a deterministic hash of the value, not
 assignment-order-based: the same level/tag string always gets the same color,
 in this session and every future one, rather than shifting depending on what
 order things were loaded in.
+
+### Notes
+
+**Notes...** (also in the row context menu) opens a dialog listing every note
+on that event, with Edit/Delete per note and a field to add another —
+independent of tags entirely: a note needs no tag to exist, and a tag needs no
+note. Stored in the session's `event_notes` table (SQLite), separate from
+`analyst_tags`' own unused `note` column for the same reason.
+
+Any row with at least one note shows a 📝 marker in the Tags column (hover for
+the full text) regardless of whether the **Notes** column itself is enabled —
+that column is opt-in via the **Columns** picker, same as
+Sourcetype/Host/Process/Event ID/Subsystem/Category, and shows every note on
+each row directly in the table (joined with " | "; hover for one-per-line).
 
 ## Search
 
@@ -200,14 +220,29 @@ for tags and search state) created automatically when Peach starts — nothing t
 set up. Every successful load and every search-box change is saved into the
 current session immediately; there's no separate "save" action.
 
-Peach does **not** reopen your last session automatically. Click **Load
-session...** and pick a `.sqlite` file to switch to it — this reads the
-already-parsed `.duckdb` directly, so it works even if the original evidence file
-is no longer reachable, and nothing gets re-parsed.
+Peach does **not** reopen your last session automatically. Click **Manage
+sessions...** (File menu, or next to the "Session: ..." label in the controls
+panel — same dialog either way) and **Open** one to switch to it — this reads
+the already-parsed `.duckdb` directly, so it works even if the original
+evidence file is no longer reachable, and nothing gets re-parsed.
 
 Session files live in the OS-standard per-user data directory (not yet
 user-configurable): `~/.local/share/peach/sessions/` on Linux, similar
 platform-appropriate locations on macOS/Windows.
+
+**Manage sessions...** lists every session found there, each with Open/
+Rename/Delete. **Rename...** sets a display name shown instead of the raw
+`session-YYYYMMDD-HHMMSS` id everywhere a session is listed (including the
+"Session: ..." label once it's the one open) — the underlying `.duckdb`/
+`.sqlite` files and the id itself never change, only that label, so renaming
+never risks breaking anything path-based. Works on the currently-open
+session too, unlike Delete.
+
+There's deliberately no separate "Load session..." file picker anymore: a
+native file dialog can only show real filenames, and once a session has a
+display name that stopped being a useful way to find one again — "Manage
+sessions..." is the only path now, so the friendly name is always what you
+see.
 
 ## Command line
 

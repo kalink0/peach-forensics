@@ -9,19 +9,22 @@ use rayon::prelude::*;
 use crate::config::{self, Settings, Theme};
 use crate::db::timeline_queries::{self, Query};
 use crate::db::timeline_schema::setup_timeline_schema;
-use crate::model::event_id::SourceFileId;
+use crate::export::{self, ExportOutcome};
+use crate::model::event_id::{EventId, SourceFileId};
 use crate::model::log_entry::LogEntry;
 use crate::parsers::aul::AulParser;
 use crate::parsers::evtx::EvtxFileParser;
 use crate::parsers::journald::JournaldFileParser;
 use crate::parsers::text_config::TextConfigParser;
-use crate::parsers::{LogParser, ParserConfig, parse_source_streaming};
+use crate::parsers::{LogParser, ParserConfig, StreamingProgress, parse_source_streaming};
 use crate::session::persist::{self, LoadedSource, SessionPaths};
 use crate::tagging::engine::{apply_import_time, re_tag};
 use crate::tagging::rule::Rule;
 use crate::tagging::rule_file;
 use crate::ui::about_dialog::{self, AboutDialog};
 use crate::ui::filter_bar::FilterBar;
+use crate::ui::note_dialog::{NoteDialog, NoteDialogOutcome};
+use crate::ui::raw_fields_dialog::RawFieldsDialog;
 use crate::ui::session_dialog::{self, SessionManagerDialog, SessionManagerOutcome};
 use crate::ui::settings_dialog::{SettingsDialog, SettingsOutcome};
 use crate::ui::tag_dialog::{TagDialog, TagDialogOutcome};
@@ -36,21 +39,91 @@ enum SourceKind {
     Text,
 }
 
+/// What a background-spawned native file/folder dialog resolved to, sent
+/// back over [`PeachApp::file_pick_rx`] once the analyst closes it.
+///
+/// `rfd::FileDialog`'s synchronous `pick_*` methods block the calling
+/// thread until the dialog closes — called directly from `ui()` (the only
+/// place they used to be called from), that's the UI thread, so the whole
+/// window stops repainting and the OS reports it as "not responding" the
+/// moment the native dialog loses focus. `rfd::AsyncFileDialog` fixes this,
+/// but its `Future` still has to be *created* on the main thread (native
+/// dialog setup needs it, most strictly on macOS) — only *awaiting* it can
+/// happen elsewhere. So each picker below creates the dialog inline in
+/// `ui()`, then hands the resulting `Future` to a spawned thread that
+/// blocks on it (via `pollster`, the same minimal blocking-executor
+/// approach rfd's own docs use) and reports back through this channel —
+/// same `mpsc` request/poll shape as [`LoadOutcome`]/[`RetagOutcome`].
+///
+/// One shared enum/receiver for every picker rather than one per button:
+/// only one native dialog can sensibly be open at a time anyway (see
+/// `PeachApp::file_pick_rx`'s doc comment), and `SourcePath` alone already
+/// covers three different buttons (AUL folder, a single EVTX/journald/text
+/// file, or a folder of them) — they all just set the same field on success.
+///
+/// No `SessionFile` variant: switching sessions goes exclusively through
+/// "Manage sessions...", not a raw filesystem picker — see that button's
+/// doc comment for why a native file dialog stopped being a good fit for
+/// this once sessions could have a display name.
+enum FilePickOutcome {
+    SourcePath(Option<PathBuf>),
+    ParserConfigFile(Option<PathBuf>),
+    RuleFiles(Option<Vec<PathBuf>>),
+    ExportTarget(Option<PathBuf>),
+}
+
+/// Spawns a thread that blocks on `task` (an already-created
+/// `rfd::AsyncFileDialog` future) and sends its result, converted to a
+/// [`FilePickOutcome`] by `to_outcome`, back over the returned channel.
+/// `to_outcome` is where the `FileHandle` -> `PathBuf` conversion happens,
+/// so this stays generic over both the single-pick (`Option<FileHandle>`)
+/// and multi-pick (`Option<Vec<FileHandle>>`) shapes every `pick_*` method
+/// returns.
+fn spawn_dialog_pick<T, F>(
+    task: impl std::future::Future<Output = Option<T>> + Send + 'static,
+    to_outcome: F,
+) -> mpsc::Receiver<FilePickOutcome>
+where
+    T: Send + 'static,
+    F: FnOnce(Option<T>) -> FilePickOutcome + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let picked = pollster::block_on(task);
+        let _ = tx.send(to_outcome(picked));
+    });
+    rx
+}
+
 enum LoadOutcome {
     /// Sent every [`LOAD_BATCH_SIZE`] entries, and whenever a file
     /// finishes, during a load — running totals across every file when
-    /// the source is a folder (never reset mid-load). `inserted` isn't a
-    /// fraction of a known total: a source's total *entry* count generally
-    /// isn't knowable without a full parse pass, which would mean parsing
-    /// twice (against the streaming design `run_load`'s doc comment
-    /// explains) just to show an ETA. `bytes_done`/`bytes_total` fill that
-    /// gap with a real, data-based fraction instead — known upfront from
-    /// file sizes, at file-level granularity (jumps per completed file,
-    /// not smoothly within one — see `run_load`).
+    /// the source is a folder (never reset mid-load). `inserted` isn't
+    /// generally a fraction of a known total: a source's total *entry*
+    /// count generally isn't knowable without a full parse pass, which
+    /// would mean parsing twice (against the streaming design `run_load`'s
+    /// doc comment explains) just to show an ETA. `bytes_done`/
+    /// `bytes_total` fill that gap with a real, data-based fraction
+    /// instead — known upfront from file sizes, at file-level granularity
+    /// (jumps per completed file, not smoothly within one — see
+    /// `run_load`).
+    ///
+    /// `total_entries` is the one exception: `Some` only for AUL, and only
+    /// once its own parsing phase has finished (see
+    /// `AulParser::parse_streaming`'s doc comment on why that's the one
+    /// point its total is knowable at all) — from then on `inserted` *is*
+    /// a fraction of `total_entries`, covering exactly the phase
+    /// (DB insert + tagging) that the byte-progress bar can't: it's
+    /// already at 100% by the time parsing hands off to this phase, so
+    /// without this field that phase — often the larger share of total
+    /// load time — would show only a raw climbing count with no sense of
+    /// how much is left. `None` for every other sourcetype, and for AUL
+    /// itself before parsing finishes.
     Progress {
         inserted: usize,
         bytes_done: u64,
         bytes_total: u64,
+        total_entries: Option<usize>,
     },
     Done(Result<(LoadSummary, std::time::Duration), String>),
 }
@@ -81,6 +154,8 @@ enum LoadState {
         inserted_so_far: usize,
         bytes_done: u64,
         bytes_total: u64,
+        /// See [`LoadOutcome::Progress`]'s doc comment.
+        total_entries: Option<usize>,
     },
     Done {
         inserted: usize,
@@ -110,9 +185,23 @@ enum RetagState {
     Failed(String),
 }
 
+enum ExportState {
+    Idle,
+    Running { rows_written: usize, path: PathBuf },
+    Done { rows_written: usize, path: PathBuf },
+    Failed(String),
+}
+
 pub struct PeachApp {
     db_path: PathBuf,
     session_paths: SessionPaths,
+    /// The current session's analyst-chosen label (`session_state`'s
+    /// `display_name`), if one was ever set — shown instead of
+    /// `session_paths.id` in the controls panel. Loaded fresh whenever
+    /// `session_paths` changes (`new`, `load_session`) and refreshed after
+    /// a rename via the "Manage sessions" dialog (see
+    /// `handle_session_dialog`).
+    session_display_name: Option<String>,
     /// Every session `.sqlite` path this run has ever pointed
     /// `session_paths` at — including ones since abandoned by switching
     /// away via `load_session`. `on_exit` empty-cleans all of them, not
@@ -133,17 +222,28 @@ pub struct PeachApp {
     /// pattern-of-life categorization is the normal AUL workflow, not an
     /// advanced feature (see `docs/`).
     use_builtin_aul_rules: bool,
+    /// The still-open native file/folder dialog, if any — see
+    /// [`FilePickOutcome`] for the full reasoning. Every picker button
+    /// shares this one field rather than getting its own: the OS only ever
+    /// shows one native dialog at a time regardless, so tracking more than
+    /// one in-flight here would just be state that can never legitimately
+    /// hold more than one value.
+    file_pick_rx: Option<mpsc::Receiver<FilePickOutcome>>,
     load_state: LoadState,
     load_rx: Option<mpsc::Receiver<LoadOutcome>>,
     retag_state: RetagState,
     retag_rx: Option<mpsc::Receiver<RetagOutcome>>,
+    export_state: ExportState,
+    export_rx: Option<mpsc::Receiver<ExportOutcome>>,
     timeline: TimelineView,
     filter_bar: FilterBar,
-    available_levels: Vec<String>,
+    available_levels: Vec<(String, String)>,
     available_tags: Vec<String>,
     pending_cli_sources: VecDeque<PathBuf>,
     cleanup_dirs: Vec<PathBuf>,
     tag_dialog: TagDialog,
+    note_dialog: NoteDialog,
+    raw_fields_dialog: RawFieldsDialog,
     session_dialog: SessionManagerDialog,
     settings: Settings,
     settings_dialog: SettingsDialog,
@@ -197,6 +297,26 @@ fn source_kind_for_path(path: &Path) -> SourceKind {
     }
 }
 
+/// Whether the "Built-in AUL pattern-of-life rules" checkbox is worth
+/// showing at all. That rule pack only ever matches AUL entries (it's a
+/// hard-coded `sourcetype = "aul"` condition on every rule in it — see
+/// `tagging::builtin`), so displaying the checkbox while the analyst is
+/// about to load something else, with no AUL data loaded either, would
+/// offer a control that provably cannot affect anything currently
+/// relevant: neither the upcoming load nor a re-tag of what's already in
+/// the timeline. True either when an AUL load is about to happen (current
+/// `source_kind`) or when the session already holds at least one loaded
+/// AUL source that "Re-tag now" could apply the pack to.
+fn aul_builtin_rules_checkbox_is_relevant(
+    source_kind: SourceKind,
+    loaded_sources: &[LoadedSource],
+) -> bool {
+    source_kind == SourceKind::Aul
+        || loaded_sources
+            .iter()
+            .any(|source| source.sourcetype == "aul")
+}
+
 impl PeachApp {
     fn new(add_sources: Vec<PathBuf>, cleanup_dirs: Vec<PathBuf>) -> Self {
         let settings = config::load();
@@ -226,22 +346,30 @@ impl PeachApp {
             timeline: TimelineView::new(db_path, session_paths.sqlite_path.clone()),
             visited_sessions: vec![session_paths.sqlite_path.clone()],
             session_paths,
+            // A session `new_session_id()` just minted has no
+            // `session_state` row yet — nothing to load.
+            session_display_name: None,
             loaded_sources: Vec::new(),
             source_kind,
             source_path,
             parser_config_path: None,
             rule_paths: Vec::new(),
             use_builtin_aul_rules: true,
+            file_pick_rx: None,
             load_state: LoadState::Idle,
             load_rx: None,
             retag_state: RetagState::Idle,
             retag_rx: None,
+            export_state: ExportState::Idle,
+            export_rx: None,
             filter_bar: FilterBar::new(),
             available_levels: Vec::new(),
             available_tags: Vec::new(),
             pending_cli_sources,
             cleanup_dirs,
             tag_dialog: TagDialog::Closed,
+            note_dialog: NoteDialog::Closed,
+            raw_fields_dialog: RawFieldsDialog::Closed,
             session_dialog: SessionManagerDialog::Closed,
             settings,
             settings_dialog: SettingsDialog::Closed,
@@ -261,6 +389,7 @@ impl PeachApp {
         let conn = persist::open_session_db(&session_paths.sqlite_path)?;
         let loaded_sources = persist::load_loaded_sources(&conn)?;
         let search_query = persist::load_search_query(&conn)?.unwrap_or_default();
+        let display_name = persist::load_display_name(&conn)?;
 
         self.db_path = session_paths.duckdb_path.clone();
         self.timeline = TimelineView::new(self.db_path.clone(), session_paths.sqlite_path.clone());
@@ -269,6 +398,7 @@ impl PeachApp {
                 .push(session_paths.sqlite_path.clone());
         }
         self.session_paths = session_paths;
+        self.session_display_name = display_name;
         self.loaded_sources = loaded_sources;
         self.timeline.refresh();
         self.available_levels = self.timeline.distinct_levels();
@@ -302,6 +432,36 @@ impl PeachApp {
         });
     }
 
+    /// Kicks off a background export of the timeline's *current* filter
+    /// (see `export`'s module doc comment) to `out_path` — same
+    /// spawn-a-thread-and-poll shape as `start_load`/`start_retag`.
+    /// `ExportFormat::from_path` decides CSV vs. JSON from `out_path`'s
+    /// extension, which the save dialog's filters already steer toward.
+    fn start_export(&mut self, out_path: PathBuf) {
+        let Some(conn) = self.timeline.try_clone_conn() else {
+            self.export_state =
+                ExportState::Failed("failed to open a database connection for export".into());
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        self.export_rx = Some(rx);
+        self.export_state = ExportState::Running {
+            rows_written: 0,
+            path: out_path.clone(),
+        };
+
+        let session_sqlite_path = self.session_paths.sqlite_path.clone();
+        let query = self.timeline.query().clone();
+        let format = export::ExportFormat::from_path(&out_path);
+
+        std::thread::spawn(move || {
+            let result =
+                export::export_to_file(&conn, &session_sqlite_path, &query, format, &out_path, &tx)
+                    .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(ExportOutcome::Done(result));
+        });
+    }
+
     fn start_load(&mut self) {
         let Some(source_path) = self.source_path.clone() else {
             return;
@@ -317,6 +477,7 @@ impl PeachApp {
             inserted_so_far: 0,
             bytes_done: 0,
             bytes_total: 0,
+            total_entries: None,
         };
 
         let source_kind = self.source_kind;
@@ -384,6 +545,62 @@ impl PeachApp {
                     let _ = persist::save_search_query(&conn, &query_text);
                 }
             }
+            RowAction::ManageNotes { event_id } => {
+                let notes = persist::open_session_db(&self.session_paths.sqlite_path)
+                    .and_then(|conn| persist::notes_for_event(&conn, event_id))
+                    .unwrap_or_default();
+                self.note_dialog = NoteDialog::open(event_id, notes);
+            }
+            RowAction::ViewRawFields { entry } => {
+                self.raw_fields_dialog = RawFieldsDialog::open(entry);
+            }
+        }
+    }
+
+    /// Same overall pattern as `handle_tag_dialog`, but every outcome here
+    /// re-fetches this one event's notes and feeds them back into the
+    /// dialog (`set_notes`) instead of the dialog just closing — an
+    /// add/edit/delete should be visible immediately in the still-open
+    /// "Notes" window, not only after reopening it.
+    fn handle_note_dialog(&mut self, ctx: &egui::Context) {
+        if !self.note_dialog.is_open() {
+            return;
+        }
+        let Some(outcome) = self.note_dialog.ui(ctx) else {
+            return;
+        };
+        let Ok(conn) = persist::open_session_db(&self.session_paths.sqlite_path) else {
+            return;
+        };
+        let event_id = match outcome {
+            NoteDialogOutcome::Add { event_id, text } => {
+                let _ = persist::insert_event_note(&conn, event_id, &text);
+                Some(event_id)
+            }
+            NoteDialogOutcome::Update { note_id, text } => {
+                let _ = persist::update_event_note(&conn, note_id, &text);
+                self.note_dialog_event_id()
+            }
+            NoteDialogOutcome::Delete { note_id } => {
+                let _ = persist::delete_event_note(&conn, note_id);
+                self.note_dialog_event_id()
+            }
+        };
+        if let Some(event_id) = event_id
+            && let Ok(notes) = persist::notes_for_event(&conn, event_id)
+        {
+            self.note_dialog.set_notes(notes);
+        }
+        self.timeline.refresh();
+    }
+
+    /// The event a still-open `NoteDialog` is showing, if any — needed by
+    /// `Update`/`Delete` outcomes, which only carry a `note_id`, not the
+    /// `event_id` it belongs to (unlike `Add`, which does).
+    fn note_dialog_event_id(&self) -> Option<EventId> {
+        match &self.note_dialog {
+            NoteDialog::Open { event_id, .. } => Some(*event_id),
+            NoteDialog::Closed => None,
         }
     }
 
@@ -493,11 +710,44 @@ impl PeachApp {
         }
     }
 
+    /// Opens the "Manage sessions" dialog — the *only* way to switch
+    /// sessions now (there used to also be a "Load session..." native file
+    /// picker, removed once sessions could have a display name: that
+    /// picker showed raw `session-YYYYMMDD-HHMMSS.sqlite` filenames with no
+    /// way to show the friendly name instead, which defeated the point of
+    /// renaming for exactly the moment it mattered most — finding the
+    /// right session again later). Called from both the File menu and a
+    /// button next to the session label in the controls panel, so this
+    /// isn't duplicated between them.
+    fn open_session_manager_dialog(&mut self) {
+        let Ok(dir) = self.settings.sessions_dir() else {
+            return;
+        };
+        // Only clone a connection if the current session's `.duckdb`
+        // already exists — `try_clone_conn` lazily *creates* it on first
+        // call, and this dialog otherwise has no reason to touch a session
+        // nothing has been loaded into yet. Doing that unconditionally here
+        // used to leave behind an empty-but-no-longer-"empty" `.duckdb`
+        // (data schema, zero rows) just from opening this dialog, which
+        // then defeated the on-exit empty-session cleanup
+        // (`delete_if_empty`) since it only checks file *existence*, not
+        // row count.
+        let current_conn = if self.db_path.exists() {
+            self.timeline.try_clone_conn()
+        } else {
+            None
+        };
+        self.session_dialog =
+            SessionManagerDialog::open(&dir, &self.session_paths.id, current_conn);
+    }
+
     /// Renders the "Manage sessions" dialog if open and switches to
     /// whichever session the analyst picked via its Open button — deletion
-    /// is handled entirely inside the dialog itself (it only ever touches
-    /// session files on disk, not `PeachApp`'s own state), so the only
-    /// outcome this side needs to react to is `Open`.
+    /// and renaming are both handled entirely inside the dialog itself (it
+    /// only ever touches session files on disk, not `PeachApp`'s own
+    /// state), so the only state this side needs to keep in sync is its
+    /// own displayed name when the session just renamed happens to be the
+    /// one currently open.
     fn handle_session_dialog(&mut self, ctx: &egui::Context) {
         if !self.session_dialog.is_open() {
             return;
@@ -511,7 +761,24 @@ impl PeachApp {
                     self.load_state = LoadState::Failed(format!("{err:#}"));
                 }
             }
+            SessionManagerOutcome::Renamed { id } => {
+                if id == self.session_paths.id {
+                    self.session_display_name = self.load_current_session_display_name();
+                }
+            }
         }
+    }
+
+    /// Reads the current session's `display_name` (see
+    /// `session::persist::load_display_name`) fresh from its `.sqlite`
+    /// file — `None` on any failure or if none was ever set, same
+    /// best-effort reasoning as everything else that reads session state
+    /// for display purposes only.
+    fn load_current_session_display_name(&self) -> Option<String> {
+        persist::open_session_db(&self.session_paths.sqlite_path)
+            .ok()
+            .and_then(|conn| persist::load_display_name(&conn).ok())
+            .flatten()
     }
 
     /// Renders the "Settings" dialog if open and persists a confirmed
@@ -582,6 +849,39 @@ impl eframe::App for PeachApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         theme::tick(ui.ctx(), self.settings.theme, &mut self.rainbow_start);
 
+        if let Some(rx) = &self.file_pick_rx {
+            match rx.try_recv() {
+                Ok(outcome) => {
+                    match outcome {
+                        FilePickOutcome::SourcePath(Some(picked)) => {
+                            self.source_path = Some(picked);
+                        }
+                        FilePickOutcome::ParserConfigFile(Some(picked)) => {
+                            self.parser_config_path = Some(picked);
+                        }
+                        FilePickOutcome::RuleFiles(Some(picked)) => {
+                            self.rule_paths = picked;
+                        }
+                        FilePickOutcome::ExportTarget(Some(picked)) => {
+                            self.start_export(picked);
+                        }
+                        // The analyst cancelled the dialog — nothing to update.
+                        FilePickOutcome::SourcePath(None)
+                        | FilePickOutcome::ParserConfigFile(None)
+                        | FilePickOutcome::RuleFiles(None)
+                        | FilePickOutcome::ExportTarget(None) => {}
+                    }
+                    self.file_pick_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ui.ctx().request_repaint();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.file_pick_rx = None;
+                }
+            }
+        }
+
         if let Some(rx) = &self.load_rx {
             // Drain everything queued this frame, not just one message: a
             // large source can flush several `Progress` updates between
@@ -593,11 +893,13 @@ impl eframe::App for PeachApp {
                         inserted,
                         bytes_done,
                         bytes_total,
+                        total_entries,
                     }) => {
                         self.load_state = LoadState::Loading {
                             inserted_so_far: inserted,
                             bytes_done,
                             bytes_total,
+                            total_entries,
                         };
                     }
                     Ok(LoadOutcome::Done(result)) => {
@@ -690,6 +992,49 @@ impl eframe::App for PeachApp {
             }
         }
 
+        if let Some(rx) = &self.export_rx {
+            // Drain everything queued this frame, same reasoning as
+            // `load_rx`: a large export can flush several `Progress`
+            // updates between frames.
+            loop {
+                match rx.try_recv() {
+                    Ok(ExportOutcome::Progress { rows_written }) => {
+                        if let ExportState::Running { path, .. } = &self.export_state {
+                            self.export_state = ExportState::Running {
+                                rows_written,
+                                path: path.clone(),
+                            };
+                        }
+                    }
+                    Ok(ExportOutcome::Done(result)) => {
+                        match result {
+                            Ok(rows_written) => {
+                                let path = match &self.export_state {
+                                    ExportState::Running { path, .. } => path.clone(),
+                                    _ => PathBuf::new(),
+                                };
+                                self.export_state = ExportState::Done { rows_written, path };
+                            }
+                            Err(err) => self.export_state = ExportState::Failed(err),
+                        }
+                        self.export_rx = None;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        ui.ctx().request_repaint();
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.export_state = ExportState::Failed(
+                            "export worker disconnected unexpectedly".to_string(),
+                        );
+                        self.export_rx = None;
+                        break;
+                    }
+                }
+            }
+        }
+
         let can_switch_session = !matches!(self.load_state, LoadState::Loading { .. })
             && !matches!(self.retag_state, RetagState::Running);
 
@@ -697,51 +1042,35 @@ impl eframe::App for PeachApp {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui
-                        .add_enabled(can_switch_session, egui::Button::new("Load session..."))
-                        .clicked()
-                    {
-                        ui.close();
-                        if let Some(picked) = rfd::FileDialog::new()
-                            .set_directory(
-                                self.settings
-                                    .sessions_dir()
-                                    .unwrap_or_else(|_| std::env::temp_dir()),
-                            )
-                            .add_filter("Session", &["sqlite"])
-                            .pick_file()
-                            && let Err(err) = self.load_session(picked)
-                        {
-                            self.load_state = LoadState::Failed(format!("{err:#}"));
-                        }
-                    }
-                    if ui
                         .add_enabled(can_switch_session, egui::Button::new("Manage sessions..."))
                         .clicked()
                     {
                         ui.close();
-                        if let Ok(dir) = self.settings.sessions_dir() {
-                            // Only clone a connection if the current session's
-                            // `.duckdb` already exists — `try_clone_conn`
-                            // lazily *creates* it on first call, and this
-                            // dialog otherwise has no reason to touch a
-                            // session nothing has been loaded into yet. Doing
-                            // that unconditionally here used to leave behind
-                            // an empty-but-no-longer-"empty" `.duckdb` (data
-                            // schema, zero rows) just from opening this
-                            // dialog, which then defeated the on-exit
-                            // empty-session cleanup (`delete_if_empty`) since
-                            // it only checks file *existence*, not row count.
-                            let current_conn = if self.db_path.exists() {
-                                self.timeline.try_clone_conn()
-                            } else {
-                                None
-                            };
-                            self.session_dialog = SessionManagerDialog::open(
-                                &dir,
-                                &self.session_paths.id,
-                                current_conn,
-                            );
-                        }
+                        self.open_session_manager_dialog();
+                    }
+                    ui.separator();
+                    let can_export = self.timeline.total_rows() > 0
+                        && self.file_pick_rx.is_none()
+                        && !matches!(self.export_state, ExportState::Running { .. });
+                    if ui
+                        .add_enabled(can_export, egui::Button::new("Export (current filter)..."))
+                        .on_hover_text(
+                            "Exports exactly what the timeline is showing right now — clear \
+                             the search box first to export everything.",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        let task = rfd::AsyncFileDialog::new()
+                            .add_filter("CSV", &["csv"])
+                            .add_filter("JSON", &["json"])
+                            .set_file_name("peach_export.csv")
+                            .save_file();
+                        self.file_pick_rx = Some(spawn_dialog_pick(task, |picked| {
+                            FilePickOutcome::ExportTarget(
+                                picked.map(|h: rfd::FileHandle| h.path().to_path_buf()),
+                            )
+                        }));
                     }
                     ui.separator();
                     if ui.button("Settings...").clicked() {
@@ -792,21 +1121,22 @@ impl eframe::App for PeachApp {
 
         egui::Panel::top("controls").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(format!("Session: {}", self.session_paths.id));
+                ui.label(format!(
+                    "Session: {}",
+                    self.session_display_name
+                        .as_deref()
+                        // An empty string means the analyst cleared a
+                        // previously-set name (see `session_dialog`'s
+                        // "Rename..." Save handler) — same fallback to the
+                        // raw id as `SessionEntry::label()` uses.
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(&self.session_paths.id)
+                ));
                 if ui
-                    .add_enabled(can_switch_session, egui::Button::new("Load session..."))
+                    .add_enabled(can_switch_session, egui::Button::new("Manage sessions..."))
                     .clicked()
-                    && let Some(picked) = rfd::FileDialog::new()
-                        .set_directory(
-                            self.settings
-                                .sessions_dir()
-                                .unwrap_or_else(|_| std::env::temp_dir()),
-                        )
-                        .add_filter("Session", &["sqlite"])
-                        .pick_file()
-                    && let Err(err) = self.load_session(picked)
                 {
-                    self.load_state = LoadState::Failed(format!("{err:#}"));
+                    self.open_session_manager_dialog();
                 }
             });
 
@@ -830,10 +1160,19 @@ impl eframe::App for PeachApp {
 
             ui.horizontal(|ui| {
                 if self.source_kind == SourceKind::Aul {
-                    if ui.button("Choose .logarchive folder...").clicked()
-                        && let Some(picked) = rfd::FileDialog::new().pick_folder()
+                    if ui
+                        .add_enabled(
+                            self.file_pick_rx.is_none(),
+                            egui::Button::new("Choose .logarchive folder..."),
+                        )
+                        .clicked()
                     {
-                        self.source_path = Some(picked);
+                        let task = rfd::AsyncFileDialog::new().pick_folder();
+                        self.file_pick_rx = Some(spawn_dialog_pick(task, |picked| {
+                            FilePickOutcome::SourcePath(
+                                picked.map(|h: rfd::FileHandle| h.path().to_path_buf()),
+                            )
+                        }));
                     }
                 } else {
                     let (file_label, extension_filter) = match self.source_kind {
@@ -844,25 +1183,38 @@ impl eframe::App for PeachApp {
                         SourceKind::Text => ("Choose log file...", None),
                         SourceKind::Aul => unreachable!("handled above"),
                     };
-                    if ui.button(file_label).clicked() {
-                        let mut dialog = rfd::FileDialog::new();
+                    if ui
+                        .add_enabled(self.file_pick_rx.is_none(), egui::Button::new(file_label))
+                        .clicked()
+                    {
+                        let mut dialog = rfd::AsyncFileDialog::new();
                         if let Some((name, ext)) = extension_filter {
                             dialog = dialog.add_filter(name, &[ext]);
                         }
-                        if let Some(picked) = dialog.pick_file() {
-                            self.source_path = Some(picked);
-                        }
+                        let task = dialog.pick_file();
+                        self.file_pick_rx = Some(spawn_dialog_pick(task, |picked| {
+                            FilePickOutcome::SourcePath(
+                                picked.map(|h: rfd::FileHandle| h.path().to_path_buf()),
+                            )
+                        }));
                     }
                     if ui
-                        .button("Choose folder...")
+                        .add_enabled(
+                            self.file_pick_rx.is_none(),
+                            egui::Button::new("Choose folder..."),
+                        )
                         .on_hover_text(
                             "Recursively loads every matching file found in the folder \
                              (and its subfolders) as separate sources",
                         )
                         .clicked()
-                        && let Some(picked) = rfd::FileDialog::new().pick_folder()
                     {
-                        self.source_path = Some(picked);
+                        let task = rfd::AsyncFileDialog::new().pick_folder();
+                        self.file_pick_rx = Some(spawn_dialog_pick(task, |picked| {
+                            FilePickOutcome::SourcePath(
+                                picked.map(|h: rfd::FileHandle| h.path().to_path_buf()),
+                            )
+                        }));
                     }
                 }
                 if let Some(source_path) = &self.source_path {
@@ -872,12 +1224,21 @@ impl eframe::App for PeachApp {
 
             if self.source_kind == SourceKind::Text {
                 ui.horizontal(|ui| {
-                    if ui.button("Choose parser config (TOML)...").clicked()
-                        && let Some(picked) = rfd::FileDialog::new()
-                            .add_filter("TOML", &["toml"])
-                            .pick_file()
+                    if ui
+                        .add_enabled(
+                            self.file_pick_rx.is_none(),
+                            egui::Button::new("Choose parser config (TOML)..."),
+                        )
+                        .clicked()
                     {
-                        self.parser_config_path = Some(picked);
+                        let task = rfd::AsyncFileDialog::new()
+                            .add_filter("TOML", &["toml"])
+                            .pick_file();
+                        self.file_pick_rx = Some(spawn_dialog_pick(task, |picked| {
+                            FilePickOutcome::ParserConfigFile(
+                                picked.map(|h: rfd::FileHandle| h.path().to_path_buf()),
+                            )
+                        }));
                     }
                     if let Some(config_path) = &self.parser_config_path {
                         ui.label(config_path.display().to_string());
@@ -886,24 +1247,33 @@ impl eframe::App for PeachApp {
             }
 
             ui.horizontal(|ui| {
-                ui.checkbox(
-                    &mut self.use_builtin_aul_rules,
-                    "Built-in AUL pattern-of-life rules",
-                )
-                .on_hover_text(
-                    "Applies the bundled AUL rule pack (screen lock, WiFi, app launches, \
-                         etc.) on every load and re-tag, regardless of which rule files are \
-                         also selected below. Only ever matches AUL entries.",
-                );
+                if aul_builtin_rules_checkbox_is_relevant(self.source_kind, &self.loaded_sources) {
+                    ui.checkbox(
+                        &mut self.use_builtin_aul_rules,
+                        "Built-in AUL pattern-of-life rules",
+                    )
+                    .on_hover_text(
+                        "Applies the bundled AUL rule pack (screen lock, WiFi, app launches, \
+                             etc.) on every load and re-tag, regardless of which rule files are \
+                             also selected below. Only ever matches AUL entries.",
+                    );
+                }
 
                 if ui
-                    .button("Choose tagging rules (TOML, optional)...")
+                    .add_enabled(
+                        self.file_pick_rx.is_none(),
+                        egui::Button::new("Choose tagging rules (TOML, optional)..."),
+                    )
                     .clicked()
-                    && let Some(picked) = rfd::FileDialog::new()
-                        .add_filter("TOML", &["toml"])
-                        .pick_files()
                 {
-                    self.rule_paths = picked;
+                    let task = rfd::AsyncFileDialog::new()
+                        .add_filter("TOML", &["toml"])
+                        .pick_files();
+                    self.file_pick_rx = Some(spawn_dialog_pick(task, |picked| {
+                        FilePickOutcome::RuleFiles(picked.map(|handles: Vec<rfd::FileHandle>| {
+                            handles.iter().map(|h| h.path().to_path_buf()).collect()
+                        }))
+                    }));
                 }
                 if self.rule_paths.is_empty() {
                     ui.label("(no extra rule files selected)");
@@ -940,6 +1310,25 @@ impl eframe::App for PeachApp {
                 }
             });
 
+            match &self.export_state {
+                ExportState::Idle => {}
+                ExportState::Running { rows_written, .. } => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!("Exporting... {rows_written} rows so far"));
+                    });
+                }
+                ExportState::Done { rows_written, path } => {
+                    ui.label(format!(
+                        "Export complete: {rows_written} rows to {}",
+                        path.display()
+                    ));
+                }
+                ExportState::Failed(err) => {
+                    ui.colored_label(egui::Color32::RED, format!("Export failed: {err}"));
+                }
+            }
+
             let can_load = !matches!(self.load_state, LoadState::Loading { .. })
                 && !matches!(self.retag_state, RetagState::Running)
                 && self.source_path.is_some()
@@ -958,26 +1347,50 @@ impl eframe::App for PeachApp {
                         inserted_so_far,
                         bytes_done,
                         bytes_total,
+                        total_entries,
                     } => {
                         ui.spinner();
-                        if *inserted_so_far > 0 {
-                            ui.label(format!("Loading... {inserted_so_far} entries so far"));
-                        } else {
-                            ui.label("Loading...");
-                        }
                         // Data-based progress — file-level granularity (jumps
                         // per completed file, not smooth within one large
                         // file; see `run_load`'s doc comment for why entry
-                        // count can't drive a real fraction here either).
+                        // count can't drive a real fraction here either) —
+                        // except for AUL, where `on_bytes_progress` advances
+                        // per `.tracev3` file within the one `.logarchive`.
                         if *bytes_total > 0 {
                             let fraction = *bytes_done as f32 / *bytes_total as f32;
                             ui.add(egui::ProgressBar::new(fraction).desired_width(200.0).text(
                                 format!(
-                                    "{:.1} / {:.1} MB",
+                                    "Parsing: {:.1} / {:.1} MB",
                                     *bytes_done as f64 / 1_000_000.0,
                                     *bytes_total as f64 / 1_000_000.0
                                 ),
                             ));
+                        }
+                        // Once AUL's parsing phase ends, `bytes_done` is
+                        // already pinned at `bytes_total` (100%) while the
+                        // DB insert + tagging phase — often the larger share
+                        // of total load time — is still running; without
+                        // this second bar that phase would show only a raw
+                        // climbing count with no sense of how much is left.
+                        // `total_entries` stays `None` for every other
+                        // sourcetype (see `LoadOutcome::Progress`'s doc
+                        // comment), so this just falls through to the same
+                        // plain count they've always shown.
+                        match total_entries {
+                            Some(total) if *total > 0 => {
+                                let fraction = *inserted_so_far as f32 / *total as f32;
+                                ui.add(
+                                    egui::ProgressBar::new(fraction).desired_width(200.0).text(
+                                        format!("Writing: {inserted_so_far} / {total} entries"),
+                                    ),
+                                );
+                            }
+                            _ if *inserted_so_far > 0 => {
+                                ui.label(format!("Loading... {inserted_so_far} entries so far"));
+                            }
+                            _ => {
+                                ui.label("Loading...");
+                            }
                         }
                     }
                     LoadState::Done {
@@ -1030,6 +1443,8 @@ impl eframe::App for PeachApp {
         self.poll_tag_preview(ui.ctx());
         self.update_tag_preview_request();
         self.handle_tag_dialog(ui.ctx());
+        self.handle_note_dialog(ui.ctx());
+        self.raw_fields_dialog.ui(ui.ctx());
         self.handle_session_dialog(ui.ctx());
         self.handle_settings_dialog(ui.ctx());
         self.about_dialog.ui(ui.ctx());
@@ -1086,16 +1501,30 @@ fn collect_source_files(source_kind: SourceKind, source_path: &Path) -> Vec<Path
 }
 
 /// Real byte size of `path` — if it's a file, its own size; if it's a
-/// directory (AUL's `.logarchive` case), the sum of every file inside it,
-/// recursively. `path.metadata().len()` on a directory returns a small,
-/// meaningless number (just the directory entry itself, not its contents),
-/// so that shortcut can't be used for AUL.
+/// directory (AUL's `.logarchive` case — the only sourcetype
+/// [`collect_source_files`] ever hands a directory to this function, since
+/// every other sourcetype's folder pick resolves to individual files
+/// first), the sum of just its `.tracev3` files. `path.metadata().len()`
+/// on a directory returns a small, meaningless number (just the directory
+/// entry itself, not its contents), so that shortcut can't be used for
+/// AUL. Restricted to `.tracev3` rather than every file under the
+/// directory (dsc/uuidtext/timesync too) so this total matches exactly
+/// what [`AulParser`]'s own `on_bytes_progress` reporting sums to (see its
+/// doc comment) — otherwise the progress bar would stall short of 100%
+/// instead of reaching it cleanly. iLEAPP's `ImportProgress` makes the
+/// same restriction for the same reason.
 fn path_byte_size(path: &Path) -> u64 {
     if path.is_dir() {
         walkdir::WalkDir::new(path)
             .into_iter()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_file())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("tracev3"))
+            })
             .filter_map(|entry| entry.metadata().ok())
             .map(|metadata| metadata.len())
             .sum()
@@ -1273,6 +1702,11 @@ fn run_sequential(
             inserted: total_inserted,
             bytes_done,
             bytes_total,
+            // The file this send reports on just finished entirely (insert
+            // + tagging included), so whatever `total_entries` it may have
+            // reported mid-file is moot now — and the next file (if any)
+            // starts its own count from scratch.
+            total_entries: None,
         });
     }
     summary.inserted = total_inserted;
@@ -1285,10 +1719,13 @@ fn run_sequential(
 /// rather than returned fresh, so [`LoadOutcome::Progress`] keeps
 /// reporting one running total, not a per-file count that resets and
 /// confuses "how far along is this." `bytes_done_before`/`bytes_total`
-/// are passed straight through into every progress send during this
-/// file's parsing — byte progress only advances once a whole file
-/// finishes (see [`run_sequential`]/[`run_parallel`]), so it stays flat
-/// while this one is in flight; only `inserted` keeps climbing live.
+/// seed the running byte count for this file's parsing — for most
+/// sourcetypes (a single real file) that count only advances once this
+/// whole call returns (see [`run_sequential`]/[`run_parallel`]), so it
+/// stays flat while this one is in flight and only `inserted` climbs
+/// live. AUL is the exception: its parser reports incremental progress
+/// per `.tracev3` file via `on_bytes_progress`, so for an AUL source
+/// `bytes_done` also climbs during the call, not just at the end.
 ///
 /// `Ok(None)` — not an error — when the file parsed cleanly but matched
 /// zero entries: still worth a note in the skip report ([`run_load`]), but
@@ -1305,24 +1742,62 @@ fn load_one_file(
     let mut batch: Vec<LogEntry> = Vec::with_capacity(LOAD_BATCH_SIZE);
     let mut inserted_this_file = 0usize;
     let mut tags_applied = 0usize;
+    // Interior mutability, not `&mut total_inserted` directly: the
+    // progress-reporting closures below need to read the running insert
+    // count for their own progress sends, and the entry-sink closure needs
+    // to mutate it — two separate `FnMut` closures can't both hold a
+    // `&mut` (or a `&mut` and a `&`) to the same location, but both can
+    // hold a `&Cell` and stay within Rust's aliasing rules. Written back to
+    // `*total_inserted` once `parse_source_streaming` returns.
+    let inserted_cell = std::cell::Cell::new(*total_inserted);
+    let bytes_done_cell = std::cell::Cell::new(bytes_done_before);
+    let total_entries_cell: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
+    let send_progress = |inserted: usize, bytes_done: u64, total_entries: Option<usize>| {
+        // Best-effort: if the UI thread has already dropped its receiver
+        // (e.g. app shutting down mid-load), there's nobody to tell and the
+        // load itself must still proceed.
+        let _ = progress_tx.send(LoadOutcome::Progress {
+            inserted,
+            bytes_done,
+            bytes_total,
+            total_entries,
+        });
+    };
 
-    let source_file_id = parse_source_streaming(ctx.parser, file_path, ctx.config, |entry| {
-        inserted_this_file += 1;
-        *total_inserted += 1;
-        batch.push(entry);
-        if batch.len() >= LOAD_BATCH_SIZE {
-            tags_applied += flush_batch(conn, &mut batch, ctx.rules, ctx.sourcetype)?;
-            // Best-effort: if the UI thread has already dropped its
-            // receiver (e.g. app shutting down mid-load), there's nobody
-            // to tell and the load itself must still proceed.
-            let _ = progress_tx.send(LoadOutcome::Progress {
-                inserted: *total_inserted,
-                bytes_done: bytes_done_before,
-                bytes_total,
-            });
-        }
-        Ok(())
-    })?;
+    let source_file_id = parse_source_streaming(
+        ctx.parser,
+        file_path,
+        ctx.config,
+        |entry| {
+            inserted_this_file += 1;
+            inserted_cell.set(inserted_cell.get() + 1);
+            batch.push(entry);
+            if batch.len() >= LOAD_BATCH_SIZE {
+                tags_applied += flush_batch(conn, &mut batch, ctx.rules, ctx.sourcetype)?;
+                send_progress(
+                    inserted_cell.get(),
+                    bytes_done_cell.get(),
+                    total_entries_cell.get(),
+                );
+            }
+            Ok(())
+        },
+        &mut StreamingProgress {
+            on_bytes: &mut |delta| {
+                bytes_done_cell.set(bytes_done_cell.get() + delta);
+                send_progress(
+                    inserted_cell.get(),
+                    bytes_done_cell.get(),
+                    total_entries_cell.get(),
+                );
+            },
+            on_total_known: &mut |total| {
+                total_entries_cell.set(Some(total));
+                send_progress(inserted_cell.get(), bytes_done_cell.get(), Some(total));
+            },
+        },
+    )?;
+    *total_inserted = inserted_cell.get();
     tags_applied += flush_batch(conn, &mut batch, ctx.rules, ctx.sourcetype)?;
 
     if inserted_this_file == 0 {
@@ -1490,6 +1965,9 @@ fn run_parallel(
                 inserted: total_inserted,
                 bytes_done,
                 bytes_total,
+                // `run_parallel` never handles AUL (see `parse_file_for_worker`'s
+                // doc comment) — the only sourcetype that can ever populate this.
+                total_entries: None,
             });
         }
     });
@@ -1516,17 +1994,30 @@ fn parse_file_for_worker(ctx: &LoadContext, file_path: &Path, tx: &mpsc::SyncSen
     let mut batch: Vec<LogEntry> = Vec::with_capacity(LOAD_BATCH_SIZE);
     let mut inserted = 0usize;
 
-    let result = parse_source_streaming(ctx.parser, file_path, ctx.config, |entry| {
-        inserted += 1;
-        batch.push(entry);
-        if batch.len() >= LOAD_BATCH_SIZE {
-            let full_batch = std::mem::replace(&mut batch, Vec::with_capacity(LOAD_BATCH_SIZE));
-            let _ = tx.send(ParseEvent::Batch {
-                entries: full_batch,
-            });
-        }
-        Ok(())
-    });
+    // `on_bytes_progress` is a no-op here: `run_parallel` (this function's
+    // only caller) never runs for AUL — it's always exactly one atomic
+    // parse unit, so a multi-file folder load can only mean EVTX/journald/
+    // Text, none of which override `parse_streaming`'s progress reporting.
+    let result = parse_source_streaming(
+        ctx.parser,
+        file_path,
+        ctx.config,
+        |entry| {
+            inserted += 1;
+            batch.push(entry);
+            if batch.len() >= LOAD_BATCH_SIZE {
+                let full_batch = std::mem::replace(&mut batch, Vec::with_capacity(LOAD_BATCH_SIZE));
+                let _ = tx.send(ParseEvent::Batch {
+                    entries: full_batch,
+                });
+            }
+            Ok(())
+        },
+        &mut StreamingProgress {
+            on_bytes: &mut |_| {},
+            on_total_known: &mut |_| {},
+        },
+    );
 
     match result {
         Ok(source_file_id) => {
@@ -1699,6 +2190,43 @@ pub fn run(add_sources: Vec<PathBuf>, cleanup_dirs: Vec<PathBuf>) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::log_entry::ParsedRecord;
+    use chrono::Utc;
+
+    fn loaded_source(sourcetype: &str) -> LoadedSource {
+        LoadedSource {
+            path: "/evidence/test".to_string(),
+            sourcetype: sourcetype.to_string(),
+            parser_config_path: None,
+        }
+    }
+
+    #[test]
+    fn aul_builtin_checkbox_is_relevant_when_source_kind_is_aul() {
+        assert!(aul_builtin_rules_checkbox_is_relevant(SourceKind::Aul, &[]));
+    }
+
+    #[test]
+    fn aul_builtin_checkbox_is_relevant_when_an_aul_source_is_already_loaded() {
+        let loaded = [loaded_source("evtx"), loaded_source("aul")];
+        assert!(aul_builtin_rules_checkbox_is_relevant(
+            SourceKind::Evtx,
+            &loaded
+        ));
+    }
+
+    #[test]
+    fn aul_builtin_checkbox_is_not_relevant_for_a_non_aul_source_kind_with_no_aul_loaded() {
+        let loaded = [loaded_source("evtx"), loaded_source("journald")];
+        assert!(!aul_builtin_rules_checkbox_is_relevant(
+            SourceKind::Evtx,
+            &loaded
+        ));
+        assert!(!aul_builtin_rules_checkbox_is_relevant(
+            SourceKind::Text,
+            &[]
+        ));
+    }
 
     #[test]
     fn load_rules_with_no_files_and_no_builtin_pack_is_empty() {
@@ -2035,6 +2563,87 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    struct TotalKnownParser;
+
+    impl LogParser for TotalKnownParser {
+        fn sourcetype(&self) -> &str {
+            "test-total-known"
+        }
+
+        fn parse(&self, _path: &Path, _config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn parse_streaming(
+            &self,
+            _path: &Path,
+            _config: &ParserConfig,
+            sink: &mut dyn FnMut(ParsedRecord) -> anyhow::Result<()>,
+            progress: &mut StreamingProgress,
+        ) -> anyhow::Result<()> {
+            (progress.on_total_known)(2);
+            for message in ["first", "second"] {
+                sink(ParsedRecord {
+                    timestamp_utc: Utc::now(),
+                    level: None,
+                    message: Some(message.to_string()),
+                    raw: message.to_string(),
+                    fields: serde_json::Value::Null,
+                })?;
+            }
+            Ok(())
+        }
+    }
+
+    /// `load_one_file` (below `run_load`'s `SourceKind` dispatch, so this
+    /// injects a test-double parser directly via `LoadContext` — no real
+    /// AUL fixture needed) must surface `total_entries` in a `Progress`
+    /// send as soon as the parser reports it, not just once a full
+    /// `LOAD_BATCH_SIZE` batch flushes — otherwise a small/test-sized
+    /// source would never show it at all.
+    #[test]
+    fn load_one_file_surfaces_total_entries_as_soon_as_the_parser_reports_it() {
+        let base = temp_test_dir("load-one-file-total-entries");
+        let db_path = base.join("test.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        setup_timeline_schema(&conn).unwrap();
+        let config = ParserConfig::from_toml_str(
+            "[parser]\nname = \"test\"\nsourcetype = \"test-total-known\"\n",
+        )
+        .unwrap();
+        let ctx = LoadContext {
+            parser: &TotalKnownParser,
+            config: &config,
+            sourcetype: "test-total-known",
+            rules: &[],
+            parser_config_path: None,
+        };
+        let file_path = base.join("fake-source");
+        std::fs::write(&file_path, b"unused").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut total_inserted = 0usize;
+
+        let result = load_one_file(&ctx, &file_path, &conn, &mut total_inserted, 0, 100, &tx)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result.0, 0, "no rules selected, so no tags applied");
+        assert_eq!(total_inserted, 2);
+        let total_entries_seen: Vec<Option<usize>> = rx
+            .try_iter()
+            .map(|msg| match msg {
+                LoadOutcome::Progress { total_entries, .. } => total_entries,
+                LoadOutcome::Done(_) => None,
+            })
+            .collect();
+        assert!(
+            total_entries_seen.contains(&Some(2)),
+            "expected a Progress message with total_entries = Some(2), got {total_entries_seen:?}"
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     /// Same folder-load scenario as
     /// `run_load_recurses_a_folder_loading_good_files_and_skipping_a_bad_one`,
     /// but run twice with different `thread_count`s — the aggregate result
@@ -2090,14 +2699,28 @@ mod tests {
     }
 
     #[test]
-    fn path_byte_size_sums_a_directorys_files_recursively() {
+    fn path_byte_size_sums_a_directorys_tracev3_files_recursively() {
         let dir = temp_test_dir("byte-size-dir");
-        std::fs::write(dir.join("a"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.join("a.tracev3"), vec![0u8; 100]).unwrap();
         let nested = dir.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("b"), vec![0u8; 50]).unwrap();
+        std::fs::write(nested.join("b.tracev3"), vec![0u8; 50]).unwrap();
 
         assert_eq!(path_byte_size(&dir), 150);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn path_byte_size_of_a_directory_ignores_non_tracev3_files() {
+        // dsc/uuidtext/timesync data lives alongside the .tracev3 files in
+        // both AUL layouts — excluded so this total matches what
+        // AulParser's own on_bytes_progress reporting sums to.
+        let dir = temp_test_dir("byte-size-dir-mixed");
+        std::fs::write(dir.join("a.tracev3"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.join("some_uuidtext_file"), vec![0u8; 999]).unwrap();
+
+        assert_eq!(path_byte_size(&dir), 100);
 
         std::fs::remove_dir_all(dir).unwrap();
     }

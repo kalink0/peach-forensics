@@ -103,6 +103,7 @@ pub struct LoadedSource {
 
 const LOADED_SOURCES_KEY: &str = "loaded_sources";
 const SEARCH_QUERY_KEY: &str = "search_query";
+const DISPLAY_NAME_KEY: &str = "display_name";
 
 pub fn open_session_db(sqlite_path: &Path) -> anyhow::Result<Connection> {
     let conn = Connection::open(sqlite_path)?;
@@ -148,12 +149,31 @@ pub fn load_search_query(conn: &Connection) -> anyhow::Result<Option<String>> {
     get_session_state(conn, SEARCH_QUERY_KEY)
 }
 
+/// A human-chosen display name for this session, shown instead of its id
+/// (`session-YYYYMMDD-HHMMSS`) wherever the analyst sees the session
+/// listed — never the underlying files: `SessionPaths::from_sqlite_path`
+/// derives the id straight from `<id>.sqlite`'s file stem, so renaming the
+/// files themselves would mean either keeping id and filename in sync
+/// forever or breaking that derivation. A separate `session_state` entry
+/// sidesteps both — the on-disk name never has to change for the analyst's
+/// own label to.
+pub fn save_display_name(conn: &Connection, name: &str) -> anyhow::Result<()> {
+    set_session_state(conn, DISPLAY_NAME_KEY, name)
+}
+
+pub fn load_display_name(conn: &Connection) -> anyhow::Result<Option<String>> {
+    get_session_state(conn, DISPLAY_NAME_KEY)
+}
+
 /// Records a manual, analyst-driven tag on one entry — a fourth tagging
 /// layer alongside import-time/re-tag/ad-hoc rule matching, kept separate
 /// from rule-produced `import_tags` precisely because it isn't rule-based:
 /// no `rule_name` to attribute it to. Allows duplicates on purpose (no
 /// uniqueness check) — a second manual tag with the same value is harmless
-/// and simpler than silently swallowing a re-click.
+/// and simpler than silently swallowing a re-click. `analyst_tags.note`
+/// stays unused here on purpose — a free-text note is its own concept, not
+/// something that only exists attached to a tag, so it's recorded via
+/// [`insert_event_note`]/[`event_notes`] instead, not this column.
 pub fn insert_analyst_tag(
     conn: &Connection,
     event_id: EventId,
@@ -219,6 +239,118 @@ pub fn all_analyst_tags(
         by_event.entry(event_id).or_default().push(tag_value);
     }
     Ok(by_event)
+}
+
+/// Records a free-text note on one entry — independent of tags entirely
+/// (no `tag_value`, no dependency on one existing): an analyst should be
+/// able to jot down an observation on any event without first having to
+/// invent or pick a tag for it. A separate table from `analyst_tags`
+/// rather than reusing its unused `note` column for exactly that reason —
+/// conflating "a tag with optional commentary" and "a standalone
+/// annotation" into one table would make the tag-less case awkward to
+/// express (what tag value would a note-only row even have?) and mix two
+/// different concepts the analyst thinks of separately. Allows duplicates
+/// on purpose, same reasoning as [`insert_analyst_tag`] — a running list of
+/// observations over time is a legitimate use, not something to dedupe
+/// away.
+pub fn insert_event_note(conn: &Connection, event_id: EventId, note: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO event_notes (event_id_source, event_id_seq, note, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            event_id.source_file_id.to_string(),
+            event_id.sequence_number.value() as i64,
+            note,
+            chrono::Utc::now().timestamp(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Every note in this session, grouped by [`EventId`] and ordered oldest
+/// first — loaded wholesale, same reasoning as [`all_analyst_tags`] (notes
+/// are manually curated one at a time, so this table stays small). Used to
+/// merge notes into the timeline's Tags column hover text.
+pub fn all_event_notes(
+    conn: &Connection,
+) -> anyhow::Result<std::collections::HashMap<EventId, Vec<String>>> {
+    let mut stmt = conn.prepare(
+        // `id` (autoincrement) as the primary sort key, not `created_at`:
+        // the latter is second-resolution (`chrono::Utc::now().timestamp()`),
+        // so two notes added within the same second would otherwise have no
+        // stable order between them.
+        "SELECT event_id_source, event_id_seq, note FROM event_notes ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let source_file_id: String = row.get(0)?;
+        let sequence_number: i64 = row.get(1)?;
+        let note: String = row.get(2)?;
+        Ok((source_file_id, sequence_number, note))
+    })?;
+
+    let mut by_event: std::collections::HashMap<EventId, Vec<String>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let (source_file_id, sequence_number, note) = row?;
+        let event_id = EventId {
+            source_file_id: source_file_id
+                .parse()
+                .map_err(|err| anyhow::anyhow!("invalid source_file_id in database: {err}"))?,
+            sequence_number: crate::model::event_id::SequenceNumber::from_raw(
+                sequence_number as u64,
+            ),
+        };
+        by_event.entry(event_id).or_default().push(note);
+    }
+    Ok(by_event)
+}
+
+/// `(id, note)` pairs for one event, oldest first — unlike [`all_event_notes`]
+/// (bulk, text-only, for the Tags column's hover preview), this keeps each
+/// note's row id so the "Notes" dialog can target a specific one for
+/// [`update_event_note`]/[`delete_event_note`]. Fetched fresh whenever that
+/// dialog opens or changes something, rather than filtered out of a bulk
+/// load — a single event's notes are always few, so a per-event query costs
+/// nothing extra and stays correct without the dialog having to track
+/// indices into a larger structure.
+pub fn notes_for_event(conn: &Connection, event_id: EventId) -> anyhow::Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, note FROM event_notes
+         WHERE event_id_source = ?1 AND event_id_seq = ?2
+         ORDER BY id",
+    )?;
+    let rows = stmt.query_map(
+        params![
+            event_id.source_file_id.to_string(),
+            event_id.sequence_number.value() as i64
+        ],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Overwrites one note's text in place, identified by its row id (from
+/// [`notes_for_event`]) — an analyst correcting a typo or refining an
+/// observation edits the existing note rather than leaving a stale one
+/// behind and adding a new one.
+pub fn update_event_note(conn: &Connection, note_id: i64, note: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE event_notes SET note = ?1 WHERE id = ?2",
+        params![note, note_id],
+    )?;
+    Ok(())
+}
+
+/// Removes one note by its row id (from [`notes_for_event`]) — a real
+/// filesystem-level SQL delete, no undo, same as
+/// `session_dialog::delete_session_files`'s reasoning: an analyst managing
+/// their own annotations should be able to retract one that turned out to
+/// be wrong, without that requiring a confirmation dialog the way deleting
+/// a whole session does (a single note is much lower stakes than a whole
+/// case's data).
+pub fn delete_event_note(conn: &Connection, note_id: i64) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM event_notes WHERE id = ?1", params![note_id])?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -348,6 +480,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn display_name_round_trips_and_defaults_to_none() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+
+        assert_eq!(load_display_name(&conn).unwrap(), None);
+
+        save_display_name(&conn, "Suspect laptop, 2026-08-01").unwrap();
+        assert_eq!(
+            load_display_name(&conn).unwrap(),
+            Some("Suspect laptop, 2026-08-01".to_string())
+        );
+
+        save_display_name(&conn, "renamed").unwrap();
+        assert_eq!(
+            load_display_name(&conn).unwrap(),
+            Some("renamed".to_string())
+        );
+    }
+
     use crate::model::event_id::{SequenceCounter, SourceFileId};
 
     #[test]
@@ -400,5 +552,124 @@ mod tests {
         setup_session_schema(&conn).unwrap();
 
         assert!(all_analyst_tags(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn insert_event_note_does_not_require_a_tag() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+        let event_id = EventId {
+            source_file_id: SourceFileId::new_random(),
+            sequence_number: SequenceCounter::new().next_sequence_number(),
+        };
+
+        insert_event_note(&conn, event_id, "looks suspicious").unwrap();
+
+        let by_event = all_event_notes(&conn).unwrap();
+        assert_eq!(
+            by_event.get(&event_id).unwrap(),
+            &vec!["looks suspicious".to_string()]
+        );
+        // No analyst tag was ever inserted for this event — the note stands
+        // entirely on its own.
+        assert!(all_analyst_tags(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn all_event_notes_orders_multiple_notes_on_one_event_oldest_first() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+        let event_id = EventId {
+            source_file_id: SourceFileId::new_random(),
+            sequence_number: SequenceCounter::new().next_sequence_number(),
+        };
+
+        insert_event_note(&conn, event_id, "first observation").unwrap();
+        insert_event_note(&conn, event_id, "second observation").unwrap();
+
+        let by_event = all_event_notes(&conn).unwrap();
+
+        assert_eq!(
+            by_event.get(&event_id).unwrap(),
+            &vec![
+                "first observation".to_string(),
+                "second observation".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn all_event_notes_is_empty_when_none_recorded() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+
+        assert!(all_event_notes(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn notes_for_event_returns_ids_ordered_oldest_first() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+        let event_id = EventId {
+            source_file_id: SourceFileId::new_random(),
+            sequence_number: SequenceCounter::new().next_sequence_number(),
+        };
+        let other_event_id = EventId {
+            source_file_id: SourceFileId::new_random(),
+            sequence_number: SequenceCounter::new().next_sequence_number(),
+        };
+
+        insert_event_note(&conn, event_id, "first").unwrap();
+        insert_event_note(&conn, event_id, "second").unwrap();
+        insert_event_note(&conn, other_event_id, "unrelated").unwrap();
+
+        let notes = notes_for_event(&conn, event_id).unwrap();
+
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].1, "first");
+        assert_eq!(notes[1].1, "second");
+        assert!(notes[0].0 < notes[1].0, "ids must be in insertion order");
+    }
+
+    #[test]
+    fn update_event_note_overwrites_the_text_in_place() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+        let event_id = EventId {
+            source_file_id: SourceFileId::new_random(),
+            sequence_number: SequenceCounter::new().next_sequence_number(),
+        };
+        insert_event_note(&conn, event_id, "typoo").unwrap();
+        let note_id = notes_for_event(&conn, event_id).unwrap()[0].0;
+
+        update_event_note(&conn, note_id, "typo fixed").unwrap();
+
+        let notes = notes_for_event(&conn, event_id).unwrap();
+        assert_eq!(notes.len(), 1, "update must not add a new row");
+        assert_eq!(notes[0], (note_id, "typo fixed".to_string()));
+    }
+
+    #[test]
+    fn delete_event_note_removes_only_the_targeted_note() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+        let event_id = EventId {
+            source_file_id: SourceFileId::new_random(),
+            sequence_number: SequenceCounter::new().next_sequence_number(),
+        };
+        insert_event_note(&conn, event_id, "keep me").unwrap();
+        insert_event_note(&conn, event_id, "delete me").unwrap();
+        let notes = notes_for_event(&conn, event_id).unwrap();
+        let to_delete = notes
+            .iter()
+            .find(|(_, text)| text == "delete me")
+            .unwrap()
+            .0;
+
+        delete_event_note(&conn, to_delete).unwrap();
+
+        let remaining = notes_for_event(&conn, event_id).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].1, "keep me");
     }
 }

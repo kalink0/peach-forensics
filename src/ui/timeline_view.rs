@@ -20,12 +20,22 @@ pub enum RowAction {
     /// "Tag all matching (advanced)..." — the clicked row's message seeds
     /// the pattern for a `message_contains` rule.
     TagAllMatching { event_id: EventId, message: String },
+    /// "Notes..." — view/add/edit/delete free-text notes on this event,
+    /// independent of any tag (see `session::persist`'s `*_event_note`
+    /// functions).
+    ManageNotes { event_id: EventId },
     /// "Show context around this event" — replaces the search query with
     /// an `after=.../before=...` window centered on the clicked row.
     /// Computed here (not in `app.rs`) since it needs the row's own
     /// timestamp, which `DisplayRow` already carries as a formatted
     /// string.
     ShowContext { query_text: String },
+    /// "View raw/fields..." — the complete `raw`/`fields` data for this one
+    /// event, already fetched (same synchronous single-row lookup "Copy
+    /// whole event as text" already does with `conn`, available right
+    /// here) so `app.rs` only has to open the dialog with it, not fetch it
+    /// again.
+    ViewRawFields { entry: timeline_queries::FullEntry },
 }
 
 /// How many rows to fetch per DuckDB query when the visible scroll window
@@ -38,18 +48,114 @@ struct RowCache {
     rows: Vec<DisplayRow>,
 }
 
-/// Display-only formatting of the Level column — appends a human-readable
-/// severity name to a sourcetype's raw numeric level digit (e.g. journald's
-/// `"6"` -> `"6 (info)"`, EVTX's `"2"` -> `"2 (Error)"`). The stored `level`
-/// value itself stays exactly what the parser read (see
-/// `parsers::journald`'s and `parsers::evtx`'s doc comments on why it's
-/// deliberately not remapped there) — this only touches what's rendered in
-/// the table, same forensic "raw stays raw" principle applied to the UI
-/// layer instead of the data layer. Any sourcetype/level combination without
-/// a mapping passes through unchanged.
-fn format_level(level: &str, sourcetype: &str) -> String {
-    let name = match sourcetype {
-        "journald" => match level {
+/// Every column the timeline table can show, in one place — drives the
+/// table's `.column()` calls, headers, and body cells all from the same
+/// data instead of three separately-maintained parallel sequences (the
+/// pre-drag-reorder code's actual bug-prone shape: adding a column meant
+/// touching four different spots that all had to agree on order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ColumnKind {
+    Timestamp,
+    Level,
+    Source,
+    Sourcetype,
+    Host,
+    Process,
+    EventCode,
+    Subsystem,
+    Category,
+    Tags,
+    Notes,
+    Message,
+}
+
+impl ColumnKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Timestamp => "Timestamp (UTC)",
+            Self::Level => "Level",
+            Self::Source => "Source",
+            Self::Sourcetype => "Sourcetype",
+            Self::Host => "Host",
+            Self::Process => "Process",
+            Self::EventCode => "Event ID",
+            Self::Subsystem => "Subsystem",
+            Self::Category => "Category",
+            Self::Tags => "Tags",
+            Self::Notes => "Notes",
+            Self::Message => "Message",
+        }
+    }
+
+    fn min_width(self) -> f32 {
+        match self {
+            Self::Timestamp => 170.0,
+            Self::Level => 80.0,
+            Self::Source => 140.0,
+            Self::Sourcetype => 90.0,
+            Self::Host => 110.0,
+            Self::Process => 110.0,
+            Self::EventCode => 70.0,
+            Self::Subsystem => 140.0,
+            Self::Category => 110.0,
+            Self::Tags => 140.0,
+            Self::Notes => 160.0,
+            Self::Message => 200.0,
+        }
+    }
+}
+
+/// The table's column order before any drag-and-drop reordering — also the
+/// full set of `ColumnKind`s that exist, so [`TimelineView::visible_columns`]
+/// has something to filter.
+const DEFAULT_COLUMN_ORDER: [ColumnKind; 12] = [
+    ColumnKind::Timestamp,
+    ColumnKind::Level,
+    ColumnKind::Source,
+    ColumnKind::Sourcetype,
+    ColumnKind::Host,
+    ColumnKind::Process,
+    ColumnKind::EventCode,
+    ColumnKind::Subsystem,
+    ColumnKind::Category,
+    ColumnKind::Tags,
+    ColumnKind::Notes,
+    ColumnKind::Message,
+];
+
+/// Moves `dragged` to just before `target`'s current position in `order` —
+/// the effect of dropping a dragged column header onto another one.
+/// Falls back to the end if `target` isn't found (shouldn't happen — every
+/// `ColumnKind` a drop can name is already in `order`, since `order` always
+/// holds the complete fixed set — but appending rather than panicking keeps
+/// a dropped drag harmless even if that invariant is ever violated). A
+/// no-op if `dragged == target`, or if `dragged` itself isn't found for the
+/// same reason.
+fn reorder_columns(order: &mut Vec<ColumnKind>, dragged: ColumnKind, target: ColumnKind) {
+    if dragged == target {
+        return;
+    }
+    let Some(from) = order.iter().position(|kind| *kind == dragged) else {
+        return;
+    };
+    order.remove(from);
+    let to = order
+        .iter()
+        .position(|kind| *kind == target)
+        .unwrap_or(order.len());
+    order.insert(to, dragged);
+}
+
+/// The human-readable severity name for a sourcetype's raw numeric level
+/// digit (e.g. journald's `"6"` -> `"info"`, EVTX's `"2"` -> `"Error"`),
+/// if this sourcetype/level combination has a confirmed mapping. Shared by
+/// [`format_level`] (the table's Level column) and
+/// `ui::filter_bar`'s quick Level-filter row (via
+/// [`TimelineView::distinct_levels`]), so both surfaces agree on the same
+/// name rather than each maintaining their own copy of this table.
+pub(crate) fn level_display_name(level: &str, sourcetype: &str) -> Option<&'static str> {
+    match sourcetype {
+        "journald" => Some(match level {
             "0" => "emerg",
             "1" => "alert",
             "2" => "crit",
@@ -58,25 +164,40 @@ fn format_level(level: &str, sourcetype: &str) -> String {
             "5" => "notice",
             "6" => "info",
             "7" => "debug",
-            _ => return level.to_string(),
-        },
+            _ => return None,
+        }),
         // Standard Windows Event Level values (`winmeta.xml`'s
         // `WINEVENT_LEVEL_*` constants) — defined once at the OS/schema
         // level and used consistently by every provider, unlike EventData
         // which varies per provider. 6-255 are provider-defined/reserved,
         // not part of this fixed set, so they pass through unmapped.
-        "evtx" => match level {
+        "evtx" => Some(match level {
             "0" => "LogAlways",
             "1" => "Critical",
             "2" => "Error",
             "3" => "Warning",
             "4" => "Informational",
             "5" => "Verbose",
-            _ => return level.to_string(),
-        },
-        _ => return level.to_string(),
-    };
-    format!("{level} ({name})")
+            _ => return None,
+        }),
+        _ => None,
+    }
+}
+
+/// Display-only formatting of the Level column — appends
+/// [`level_display_name`]'s human-readable severity name to a sourcetype's
+/// raw numeric level digit (e.g. `"6"` -> `"6 (info)"`). The stored `level`
+/// value itself stays exactly what the parser read (see
+/// `parsers::journald`'s and `parsers::evtx`'s doc comments on why it's
+/// deliberately not remapped there) — this only touches what's rendered in
+/// the table, same forensic "raw stays raw" principle applied to the UI
+/// layer instead of the data layer. Any sourcetype/level combination without
+/// a mapping passes through unchanged.
+fn format_level(level: &str, sourcetype: &str) -> String {
+    match level_display_name(level, sourcetype) {
+        Some(name) => format!("{level} ({name})"),
+        None => level.to_string(),
+    }
 }
 
 /// Display-only shortening of the Source column: the last path component for
@@ -154,6 +275,15 @@ pub struct TimelineView {
     show_event_code_column: bool,
     show_subsystem_column: bool,
     show_category_column: bool,
+    /// Whether the Notes column is shown — same opt-in-via-picker reasoning
+    /// as the columns above, defaulting to hidden since most rows have no
+    /// notes at all.
+    show_notes_column: bool,
+    /// Display order for every column (visible or not) — starts as
+    /// [`DEFAULT_COLUMN_ORDER`], rearranged by dragging a header onto
+    /// another one (see [`reorder_columns`]). Not persisted across
+    /// restarts, same as the `show_*_column` visibility flags above.
+    column_order: Vec<ColumnKind>,
 }
 
 impl TimelineView {
@@ -182,7 +312,36 @@ impl TimelineView {
             show_event_code_column: false,
             show_subsystem_column: false,
             show_category_column: false,
+            show_notes_column: false,
+            column_order: DEFAULT_COLUMN_ORDER.to_vec(),
         }
+    }
+
+    /// `column_order`, filtered down to whichever columns are actually
+    /// enabled right now — the always-shown ones (Timestamp/Level/Source/
+    /// Tags/Message) plus whichever optional ones the `show_*_column`
+    /// flags currently allow. Order is preserved from `column_order`, so a
+    /// drag-and-drop rearrangement still applies even while a column is
+    /// toggled off and back on.
+    fn visible_columns(&self) -> Vec<ColumnKind> {
+        self.column_order
+            .iter()
+            .copied()
+            .filter(|kind| match kind {
+                ColumnKind::Timestamp
+                | ColumnKind::Level
+                | ColumnKind::Source
+                | ColumnKind::Tags
+                | ColumnKind::Message => true,
+                ColumnKind::Sourcetype => self.show_sourcetype_column,
+                ColumnKind::Host => self.show_host_column,
+                ColumnKind::Process => self.show_process_column,
+                ColumnKind::EventCode => self.show_event_code_column,
+                ColumnKind::Subsystem => self.show_subsystem_column,
+                ColumnKind::Category => self.show_category_column,
+                ColumnKind::Notes => self.show_notes_column,
+            })
+            .collect()
     }
 
     /// Hands out a connection to the same open database instance as every
@@ -260,6 +419,13 @@ impl TimelineView {
         }
         self.query = query;
         self.recount();
+    }
+
+    /// The currently active filter — what "Export..." exports (see
+    /// `export`'s module doc comment on why there's no separate "export
+    /// everything" path).
+    pub fn query(&self) -> &Query {
+        &self.query
     }
 
     /// Kicks off the count on a background thread with its own connection
@@ -369,10 +535,51 @@ impl TimelineView {
     /// whatever `import_tags` looked like the *first* time this was called,
     /// even after later tagging added rows — see
     /// `distinct_tags_sees_tags_written_by_a_different_connection_afterward`.
-    pub fn distinct_levels(&self) -> Vec<String> {
-        self.try_clone_conn()
-            .and_then(|conn| timeline_queries::distinct_levels(&conn).ok())
-            .unwrap_or_default()
+    /// `(value, display-label)` pairs for the quick Level-filter row — one
+    /// entry per distinct `level` value across every loaded source, labeled
+    /// via [`level_display_name`] when every sourcetype using that value
+    /// agrees on what it means. A value used by two loaded sourcetypes with
+    /// genuinely different meanings for the same digit (e.g. journald's
+    /// `"2"` is `crit`, EVTX's `"2"` is `Error`) shows both names rather
+    /// than silently picking one — same "don't misrepresent a value" call
+    /// as `timeline_queries::extracted_field_sql`'s doc comment. Falls back
+    /// to the bare value when no loaded sourcetype has a confirmed mapping
+    /// for it (AUL's `LogType` names, a text log's ERROR/WARN/INFO, ...).
+    pub fn distinct_levels(&self) -> Vec<(String, String)> {
+        let Some(conn) = self.try_clone_conn() else {
+            return Vec::new();
+        };
+        let Ok(pairs) = timeline_queries::distinct_levels_by_sourcetype(&conn) else {
+            return Vec::new();
+        };
+
+        let mut names_by_level: Vec<(String, Vec<&'static str>)> = Vec::new();
+        for (level, sourcetype) in &pairs {
+            let entry = match names_by_level.iter_mut().find(|(v, _)| v == level) {
+                Some(entry) => entry,
+                None => {
+                    names_by_level.push((level.clone(), Vec::new()));
+                    names_by_level.last_mut().unwrap()
+                }
+            };
+            if let Some(name) = level_display_name(level, sourcetype)
+                && !entry.1.contains(&name)
+            {
+                entry.1.push(name);
+            }
+        }
+
+        names_by_level
+            .into_iter()
+            .map(|(level, names)| {
+                let label = if names.is_empty() {
+                    level.clone()
+                } else {
+                    format!("{level} ({})", names.join("/"))
+                };
+                (level, label)
+            })
+            .collect()
     }
 
     pub fn distinct_tags(&self) -> Vec<String> {
@@ -412,8 +619,8 @@ impl TimelineView {
     /// Fetches one window on a background thread with its own connections
     /// (a `try_clone_conn()` for the timeline, a fresh `rusqlite::Connection`
     /// for the small per-session SQLite file — `Connection` can't be moved
-    /// into an already-running thread) and merges in `analyst_tags` there
-    /// too — same reasoning as [`Self::recount`].
+    /// into an already-running thread) and merges in `analyst_tags` and
+    /// `event_notes` there too — same reasoning as [`Self::recount`].
     fn spawn_window_fetch(&mut self, offset: usize) {
         self.pending_window_offset = Some(offset);
         let query = self.query.clone();
@@ -430,19 +637,27 @@ impl TimelineView {
                 return;
             };
 
-            // Merge in analyst_tags (SQLite, a different database file than
-            // the DuckDB timeline) so the Tags column reflects both the
-            // rule-produced and manually-set tags on an entry, not just one
-            // of them — best-effort: a failure here just means analyst tags
-            // don't show up for this window, not that the fetch fails.
-            if let Ok(session_conn) = rusqlite::Connection::open(&session_sqlite_path)
-                && let Ok(analyst_tags) = persist::all_analyst_tags(&session_conn)
-            {
-                for row in &mut rows {
-                    if let Some(extra) = analyst_tags.get(&row.event_id) {
-                        row.tags.extend(extra.iter().cloned());
-                        row.tags.sort();
-                        row.tags.dedup();
+            // Merge in analyst_tags/event_notes (SQLite, a different
+            // database file than the DuckDB timeline) — the former so the
+            // Tags column reflects both rule-produced and manually-set
+            // tags, the latter (independent of tags entirely) for the Tags
+            // column's hover text. Best-effort: a failure here just means
+            // neither shows up for this window, not that the fetch fails.
+            if let Ok(session_conn) = rusqlite::Connection::open(&session_sqlite_path) {
+                if let Ok(analyst_tags) = persist::all_analyst_tags(&session_conn) {
+                    for row in &mut rows {
+                        if let Some(extra) = analyst_tags.get(&row.event_id) {
+                            row.tags.extend(extra.iter().cloned());
+                            row.tags.sort();
+                            row.tags.dedup();
+                        }
+                    }
+                }
+                if let Ok(notes) = persist::all_event_notes(&session_conn) {
+                    for row in &mut rows {
+                        if let Some(extra) = notes.get(&row.event_id) {
+                            row.notes.extend(extra.iter().cloned());
+                        }
                     }
                 }
             }
@@ -506,93 +721,80 @@ impl TimelineView {
                 ui.checkbox(&mut self.show_event_code_column, "Event ID");
                 ui.checkbox(&mut self.show_subsystem_column, "Subsystem");
                 ui.checkbox(&mut self.show_category_column, "Category");
+                ui.checkbox(&mut self.show_notes_column, "Notes");
+                ui.separator();
+                ui.weak("Drag a column header to reorder it.");
             });
         });
 
         let mut requested = None;
         let total_rows = self.total_rows;
-        let show_sourcetype_column = self.show_sourcetype_column;
-        let show_host_column = self.show_host_column;
-        let show_process_column = self.show_process_column;
-        let show_event_code_column = self.show_event_code_column;
-        let show_subsystem_column = self.show_subsystem_column;
-        let show_category_column = self.show_category_column;
+        let visible = self.visible_columns();
         let mut table = TableBuilder::new(ui)
             .striped(true)
             // Rows only sense hover by default — a right-click context
             // menu needs click sensing on the row's `response()`, or
             // `.context_menu()` never fires no matter what's inside it.
-            .sense(egui::Sense::click())
-            .column(Column::auto().at_least(170.0)) // Timestamp
-            .column(Column::auto().at_least(80.0)) // Level
-            .column(Column::auto().at_least(140.0)); // Source (file)
-        if show_sourcetype_column {
-            table = table.column(Column::auto().at_least(90.0)); // Sourcetype
+            .sense(egui::Sense::click());
+        for (i, kind) in visible.iter().enumerate() {
+            // Whichever column ends up last (order can change via drag-and-
+            // drop) gets the remaining width — same as `Message` always did
+            // back when it was hardcoded last; every other column is a
+            // fixed minimum width that grows to fit its content.
+            let column = if i + 1 == visible.len() {
+                Column::remainder()
+            } else {
+                Column::auto().at_least(kind.min_width())
+            };
+            table = table.column(column);
         }
-        if show_host_column {
-            table = table.column(Column::auto().at_least(110.0)); // Host
-        }
-        if show_process_column {
-            table = table.column(Column::auto().at_least(110.0)); // Process
-        }
-        if show_event_code_column {
-            table = table.column(Column::auto().at_least(70.0)); // Event ID
-        }
-        if show_subsystem_column {
-            table = table.column(Column::auto().at_least(140.0)); // Subsystem
-        }
-        if show_category_column {
-            table = table.column(Column::auto().at_least(110.0)); // Category
-        }
+
+        let mut pending_reorder: Option<(ColumnKind, ColumnKind)> = None;
         table
-            .column(Column::auto().at_least(140.0)) // Tags
-            .column(Column::remainder()) // Message
             .header(20.0, |mut header| {
-                header.col(|ui| {
-                    ui.strong("Timestamp (UTC)");
-                });
-                header.col(|ui| {
-                    ui.strong("Level");
-                });
-                header.col(|ui| {
-                    ui.strong("Source");
-                });
-                if show_sourcetype_column {
+                for kind in &visible {
                     header.col(|ui| {
-                        ui.strong("Sourcetype");
+                        // A drag source *and* a drop target at once: every
+                        // header cell can both be picked up and be dropped
+                        // onto. `dnd_drag_source` paints a floating copy at
+                        // the cursor while dragging; `dnd_release_payload`
+                        // on the same response fires once, the frame the
+                        // drag is released over this cell.
+                        //
+                        // Explicit `Id`, not `ui.id().with(...)`: the id
+                        // this closure's `ui` carries is table-internal
+                        // (egui_extras salts it from `(row_index,
+                        // col_index)`), not something worth depending on
+                        // for a drag/drop identity that has to stay stable
+                        // across frames regardless of column position.
+                        //
+                        // `with_main_justify(true)`: without it, the
+                        // draggable/droppable area is only as big as the
+                        // label text itself (`dnd_drag_source` derives its
+                        // interact rect from whatever `add_contents`
+                        // painted), which for a header cell can be far
+                        // smaller than the column's actual width — dropping
+                        // anywhere in the rest of the cell wouldn't
+                        // register at all. This makes the content fill the
+                        // whole cell instead, so the entire header is both
+                        // grabbable and a drop target.
+                        let id = egui::Id::new("timeline_column_header").with(*kind);
+                        let response = ui
+                            .dnd_drag_source(id, *kind, |ui| {
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center)
+                                        .with_main_justify(true),
+                                    |ui| {
+                                        ui.strong(kind.label());
+                                    },
+                                );
+                            })
+                            .response;
+                        if let Some(dragged) = response.dnd_release_payload::<ColumnKind>() {
+                            pending_reorder = Some((*dragged, *kind));
+                        }
                     });
                 }
-                if show_host_column {
-                    header.col(|ui| {
-                        ui.strong("Host");
-                    });
-                }
-                if show_process_column {
-                    header.col(|ui| {
-                        ui.strong("Process");
-                    });
-                }
-                if show_event_code_column {
-                    header.col(|ui| {
-                        ui.strong("Event ID");
-                    });
-                }
-                if show_subsystem_column {
-                    header.col(|ui| {
-                        ui.strong("Subsystem");
-                    });
-                }
-                if show_category_column {
-                    header.col(|ui| {
-                        ui.strong("Category");
-                    });
-                }
-                header.col(|ui| {
-                    ui.strong("Tags");
-                });
-                header.col(|ui| {
-                    ui.strong("Message");
-                });
             })
             .body(|body| {
                 body.rows(18.0, total_rows, |mut row| {
@@ -604,179 +806,204 @@ impl TimelineView {
                             .and_then(|i| cache.rows.get(i))
                     });
 
-                    let (ts_rect, _) = row.col(|ui| {
-                        ui.label(display.map(|d| d.timestamp_utc.as_str()).unwrap_or(""));
-                    });
-                    let (level_rect, _) = row.col(|ui| {
-                        if let Some(d) = display
-                            && !d.level.is_empty()
-                        {
-                            let color = categorical_color(&d.level, ui.visuals().dark_mode);
-                            ui.colored_label(color, format_level(&d.level, &d.sourcetype));
-                        }
-                    });
-                    let (source_rect, _) = row.col(|ui| {
-                        if let Some(d) = display
-                            && !d.source_path.is_empty()
-                        {
-                            let label = source_display_label(&d.source_path, &d.sourcetype);
-                            ui.label(label).on_hover_text(&d.source_path);
-                        }
-                    });
-                    let sourcetype_rect = if show_sourcetype_column {
+                    let mut full_row_rect: Option<egui::Rect> = None;
+                    for (i, kind) in visible.iter().enumerate() {
+                        let is_last = i + 1 == visible.len();
                         let (rect, _) = row.col(|ui| {
-                            ui.label(display.map(|d| d.sourcetype.as_str()).unwrap_or(""));
-                        });
-                        Some(rect)
-                    } else {
-                        None
-                    };
-                    let host_rect = if show_host_column {
-                        let (rect, _) = row.col(|ui| {
-                            ui.label(display.map(|d| d.host.as_str()).unwrap_or(""));
-                        });
-                        Some(rect)
-                    } else {
-                        None
-                    };
-                    let process_rect = if show_process_column {
-                        let (rect, _) = row.col(|ui| {
-                            ui.label(display.map(|d| d.process.as_str()).unwrap_or(""));
-                        });
-                        Some(rect)
-                    } else {
-                        None
-                    };
-                    let event_code_rect = if show_event_code_column {
-                        let (rect, _) = row.col(|ui| {
-                            ui.label(display.map(|d| d.event_code.as_str()).unwrap_or(""));
-                        });
-                        Some(rect)
-                    } else {
-                        None
-                    };
-                    let subsystem_rect = if show_subsystem_column {
-                        let (rect, _) = row.col(|ui| {
-                            ui.label(display.map(|d| d.subsystem.as_str()).unwrap_or(""));
-                        });
-                        Some(rect)
-                    } else {
-                        None
-                    };
-                    let category_rect = if show_category_column {
-                        let (rect, _) = row.col(|ui| {
-                            ui.label(display.map(|d| d.category.as_str()).unwrap_or(""));
-                        });
-                        Some(rect)
-                    } else {
-                        None
-                    };
-                    let (tags_rect, _) = row.col(|ui| {
-                        if let Some(d) = display {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
-                                for tag in &d.tags {
-                                    let color = categorical_color(tag, ui.visuals().dark_mode);
-                                    ui.colored_label(color, tag);
+                            let Some(d) = display else { return };
+                            match kind {
+                                ColumnKind::Timestamp => {
+                                    ui.label(d.timestamp_utc.as_str());
                                 }
-                            });
-                        }
-                    });
-                    row.col(|ui| {
-                        ui.label(display.map(|d| d.message.as_str()).unwrap_or(""));
+                                ColumnKind::Level => {
+                                    if !d.level.is_empty() {
+                                        let color =
+                                            categorical_color(&d.level, ui.visuals().dark_mode);
+                                        ui.colored_label(
+                                            color,
+                                            format_level(&d.level, &d.sourcetype),
+                                        );
+                                    }
+                                }
+                                ColumnKind::Source => {
+                                    if !d.source_path.is_empty() {
+                                        let label =
+                                            source_display_label(&d.source_path, &d.sourcetype);
+                                        ui.label(label).on_hover_text(&d.source_path);
+                                    }
+                                }
+                                ColumnKind::Sourcetype => {
+                                    ui.label(d.sourcetype.as_str());
+                                }
+                                ColumnKind::Host => {
+                                    ui.label(d.host.as_str());
+                                }
+                                ColumnKind::Process => {
+                                    ui.label(d.process.as_str());
+                                }
+                                ColumnKind::EventCode => {
+                                    ui.label(d.event_code.as_str());
+                                }
+                                ColumnKind::Subsystem => {
+                                    ui.label(d.subsystem.as_str());
+                                }
+                                ColumnKind::Category => {
+                                    ui.label(d.category.as_str());
+                                }
+                                ColumnKind::Tags => {
+                                    let response = ui
+                                        .horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 6.0;
+                                            for tag in &d.tags {
+                                                let color =
+                                                    categorical_color(tag, ui.visuals().dark_mode);
+                                                ui.colored_label(color, tag);
+                                            }
+                                            // A visible marker even when
+                                            // `d.tags` is empty: notes don't
+                                            // require a tag to exist (see
+                                            // `session::persist::insert_event_note`),
+                                            // so an untagged row can still
+                                            // have one, and hover text on an
+                                            // otherwise-empty cell would
+                                            // have nothing to hover over.
+                                            if !d.notes.is_empty() {
+                                                ui.label("📝");
+                                            }
+                                        })
+                                        .response;
+                                    if !d.notes.is_empty() {
+                                        response.on_hover_text(d.notes.join("\n"));
+                                    }
+                                }
+                                ColumnKind::Notes => {
+                                    if !d.notes.is_empty() {
+                                        // Multiple notes on one event joined
+                                        // with " | " for a single-line cell
+                                        // — the full, one-per-line text is
+                                        // still a hover away, same as the
+                                        // Tags column's 📝 marker.
+                                        ui.label(d.notes.join(" | "))
+                                            .on_hover_text(d.notes.join("\n"));
+                                    }
+                                }
+                                ColumnKind::Message => {
+                                    ui.label(d.message.as_str());
+                                }
+                            }
 
-                        if let Some(d) = display {
-                            let event_id = d.event_id;
-                            let message = d.message.clone();
-                            let conn = self.try_clone_conn();
-                            let timestamp = chrono::NaiveDateTime::parse_from_str(
-                                &d.timestamp_utc,
-                                "%Y-%m-%d %H:%M:%S%.f",
-                            )
-                            .ok();
-
-                            // Not `row.response().context_menu(...)`: that
-                            // response is a union of each cell's own
-                            // interact state, and empirically only the
-                            // Level/Tags cells ever registered hover or a
-                            // right-click — Timestamp/Message never did,
+                            // Whichever column is last owns the row's
+                            // right-click context menu — not tied to
+                            // `Message` specifically now that drag-and-drop
+                            // can put any column last, and it doesn't
+                            // matter which cell's closure runs this: the
+                            // interact rect below spans the whole row
+                            // regardless. Not `row.response().context_menu(...)`:
+                            // that response is a union of each cell's own
+                            // interact state, and empirically only some
+                            // cells ever registered hover or a right-click,
                             // for reasons not fully pinned down in
                             // egui_extras' per-cell layout internals.
                             // Explicitly interacting over the whole row's
-                            // rect (spanning every cell, computed from what
-                            // `row.col` already returned) sidesteps that
-                            // entirely.
-                            let mut full_row_rect = ts_rect
-                                .union(level_rect)
-                                .union(source_rect)
-                                .union(tags_rect)
-                                .union(ui.max_rect());
-                            for optional_rect in [
-                                sourcetype_rect,
-                                host_rect,
-                                process_rect,
-                                event_code_rect,
-                                subsystem_rect,
-                                category_rect,
-                            ]
-                            .into_iter()
-                            .flatten()
-                            {
-                                full_row_rect = full_row_rect.union(optional_rect);
-                            }
-                            let row_response = ui.interact(
-                                full_row_rect,
-                                ui.id().with(("row_context_menu", row_index)),
-                                egui::Sense::click(),
-                            );
+                            // rect (every earlier cell's rect, unioned as
+                            // they were returned, plus this cell's own via
+                            // `ui.max_rect()`) sidesteps that entirely.
+                            if is_last {
+                                let event_id = d.event_id;
+                                let message = d.message.clone();
+                                let conn = self.try_clone_conn();
+                                let timestamp = chrono::NaiveDateTime::parse_from_str(
+                                    &d.timestamp_utc,
+                                    "%Y-%m-%d %H:%M:%S%.f",
+                                )
+                                .ok();
 
-                            row_response.context_menu(|ui| {
-                                if ui.button("Copy message").clicked() {
-                                    ui.ctx().copy_text(message.clone());
-                                    ui.close();
-                                }
-                                if ui.button("Copy whole event as text").clicked() {
-                                    if let Some(text) = conn
-                                        .and_then(|conn| {
-                                            timeline_queries::fetch_full_entry(&conn, event_id).ok()
-                                        })
-                                        .flatten()
-                                        .map(|entry| entry.to_text())
-                                    {
-                                        ui.ctx().copy_text(text);
+                                let full_row_rect = full_row_rect
+                                    .map_or(ui.max_rect(), |acc| acc.union(ui.max_rect()));
+                                let row_response = ui.interact(
+                                    full_row_rect,
+                                    ui.id().with(("row_context_menu", row_index)),
+                                    egui::Sense::click(),
+                                );
+
+                                row_response.context_menu(|ui| {
+                                    if ui.button("Copy message").clicked() {
+                                        ui.ctx().copy_text(message.clone());
+                                        ui.close();
                                     }
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if let Some(timestamp) = timestamp {
-                                    ui.menu_button("Show context around this event", |ui| {
-                                        for minutes in [1, 5, 15, 60] {
-                                            if ui.button(format!("± {minutes} min")).clicked() {
-                                                requested = Some(RowAction::ShowContext {
-                                                    query_text: context_window_query(
-                                                        timestamp, minutes,
-                                                    ),
-                                                });
-                                                ui.close();
-                                            }
+                                    if ui.button("Copy whole event as text").clicked() {
+                                        // `.as_ref()`, not consuming `conn`
+                                        // by value: "View raw/fields..."
+                                        // below needs it too, and both
+                                        // buttons' bodies exist in the same
+                                        // frame's closure regardless of
+                                        // which one is actually clicked.
+                                        if let Some(text) = conn
+                                            .as_ref()
+                                            .and_then(|conn| {
+                                                timeline_queries::fetch_full_entry(conn, event_id)
+                                                    .ok()
+                                            })
+                                            .flatten()
+                                            .map(|entry| entry.to_text())
+                                        {
+                                            ui.ctx().copy_text(text);
                                         }
-                                    });
-                                }
-                                ui.separator();
-                                if ui.button("Tag this event...").clicked() {
-                                    requested = Some(RowAction::TagSingle { event_id });
-                                    ui.close();
-                                }
-                                if ui.button("Tag all matching (advanced)...").clicked() {
-                                    requested =
-                                        Some(RowAction::TagAllMatching { event_id, message });
-                                    ui.close();
-                                }
-                            });
-                        }
-                    });
+                                        ui.close();
+                                    }
+                                    if ui.button("View raw/fields...").clicked() {
+                                        if let Some(entry) = conn
+                                            .as_ref()
+                                            .and_then(|conn| {
+                                                timeline_queries::fetch_full_entry(conn, event_id)
+                                                    .ok()
+                                            })
+                                            .flatten()
+                                        {
+                                            requested = Some(RowAction::ViewRawFields { entry });
+                                        }
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if let Some(timestamp) = timestamp {
+                                        ui.menu_button("Show context around this event", |ui| {
+                                            for minutes in [1, 5, 15, 60] {
+                                                if ui.button(format!("± {minutes} min")).clicked()
+                                                {
+                                                    requested = Some(RowAction::ShowContext {
+                                                        query_text: context_window_query(
+                                                            timestamp, minutes,
+                                                        ),
+                                                    });
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
+                                    }
+                                    ui.separator();
+                                    if ui.button("Tag this event...").clicked() {
+                                        requested = Some(RowAction::TagSingle { event_id });
+                                        ui.close();
+                                    }
+                                    if ui.button("Tag all matching (advanced)...").clicked() {
+                                        requested =
+                                            Some(RowAction::TagAllMatching { event_id, message });
+                                        ui.close();
+                                    }
+                                    if ui.button("Notes...").clicked() {
+                                        requested = Some(RowAction::ManageNotes { event_id });
+                                        ui.close();
+                                    }
+                                });
+                            }
+                        });
+                        full_row_rect = Some(full_row_rect.map_or(rect, |acc| acc.union(rect)));
+                    }
                 });
             });
+        if let Some((dragged, target)) = pending_reorder {
+            reorder_columns(&mut self.column_order, dragged, target);
+        }
         requested
     }
 }
@@ -848,6 +1075,85 @@ mod tests {
         assert_eq!(
             source_display_label("/var/log/syslog", "journald"),
             "syslog"
+        );
+    }
+
+    #[test]
+    fn reorder_columns_moves_dragged_before_target() {
+        let mut order = vec![
+            ColumnKind::Timestamp,
+            ColumnKind::Level,
+            ColumnKind::Source,
+            ColumnKind::Message,
+        ];
+
+        // Drag Source onto Timestamp: Source should land right before it.
+        reorder_columns(&mut order, ColumnKind::Source, ColumnKind::Timestamp);
+
+        assert_eq!(
+            order,
+            vec![
+                ColumnKind::Source,
+                ColumnKind::Timestamp,
+                ColumnKind::Level,
+                ColumnKind::Message,
+            ]
+        );
+    }
+
+    #[test]
+    fn reorder_columns_dropping_onto_itself_is_a_no_op() {
+        let mut order = vec![ColumnKind::Timestamp, ColumnKind::Level];
+
+        reorder_columns(&mut order, ColumnKind::Level, ColumnKind::Level);
+
+        assert_eq!(order, vec![ColumnKind::Timestamp, ColumnKind::Level]);
+    }
+
+    #[test]
+    fn reorder_columns_dropping_onto_the_immediate_successor_is_a_no_op() {
+        // Moving `Level` to "just before `Source`" when it's already
+        // immediately before `Source` must leave the order unchanged, not
+        // remove-then-reinsert-at-the-same-spot in a way that looks like a
+        // change.
+        let mut order = vec![ColumnKind::Timestamp, ColumnKind::Level, ColumnKind::Source];
+
+        reorder_columns(&mut order, ColumnKind::Level, ColumnKind::Source);
+
+        assert_eq!(
+            order,
+            vec![ColumnKind::Timestamp, ColumnKind::Level, ColumnKind::Source]
+        );
+    }
+
+    #[test]
+    fn visible_columns_preserves_column_order_and_respects_visibility_flags() {
+        let db_path = temp_db_path("visible-columns");
+        let mut view = TimelineView::new(db_path, temp_sqlite_path("session"));
+        view.show_host_column = true;
+        view.show_category_column = true;
+        // Move Host ahead of Timestamp, so order is provably not just
+        // "always DEFAULT_COLUMN_ORDER filtered" — it must reflect the
+        // rearrangement too.
+        reorder_columns(
+            &mut view.column_order,
+            ColumnKind::Host,
+            ColumnKind::Timestamp,
+        );
+
+        let visible = view.visible_columns();
+
+        assert_eq!(
+            visible,
+            vec![
+                ColumnKind::Host,
+                ColumnKind::Timestamp,
+                ColumnKind::Level,
+                ColumnKind::Source,
+                ColumnKind::Category,
+                ColumnKind::Tags,
+                ColumnKind::Message,
+            ]
         );
     }
 
@@ -1140,6 +1446,82 @@ mod tests {
             .as_ref()
             .expect("window fetch should have landed");
         assert_eq!(cache.rows.len(), 3);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    /// A manual analyst tag and an independent event note, written to the
+    /// session SQLite file by a different connection (same setup as
+    /// `distinct_tags_sees_tags_written_by_a_different_connection_afterward`,
+    /// but exercising the `analyst_tags`/`event_notes` merge paths instead
+    /// of `import_tags`), must show up on the matching rows' `tags`/`notes`
+    /// once the window fetch picks them up — on *different* rows here,
+    /// specifically to pin down that a note needs no tag to exist: the
+    /// note-only row must still surface its note with `tags` empty.
+    #[test]
+    fn ensure_window_merges_analyst_tags_and_notes() {
+        let db_path = temp_db_path("window-analyst-notes");
+        let sqlite_path = temp_sqlite_path("window-analyst-notes");
+        let source_file_id = SourceFileId::new_random();
+        let mut counter = SequenceCounter::new();
+        let tagged_event = EventId {
+            source_file_id,
+            sequence_number: counter.next_sequence_number(),
+        };
+        let noted_event = EventId {
+            source_file_id,
+            sequence_number: counter.next_sequence_number(),
+        };
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            setup_timeline_schema(&conn).unwrap();
+            for (event_id, message) in [(tagged_event, "hello"), (noted_event, "world")] {
+                conn.execute(
+                    "INSERT INTO log_entries
+                        (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                     VALUES (?, ?, ?, NULL, ?, ?, '{}')",
+                    duckdb::params![
+                        event_id.source_file_id.to_string(),
+                        event_id.sequence_number.value() as i64,
+                        Utc::now().naive_utc(),
+                        message,
+                        message,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        {
+            let session_conn = rusqlite::Connection::open(&sqlite_path).unwrap();
+            crate::db::session_schema::setup_session_schema(&session_conn).unwrap();
+            persist::insert_analyst_tag(&session_conn, tagged_event, "reviewed").unwrap();
+            persist::insert_event_note(&session_conn, noted_event, "check this").unwrap();
+        }
+
+        let ctx = egui::Context::default();
+        let mut view = TimelineView::new(db_path.clone(), sqlite_path);
+        view.set_query(Query::default());
+        wait_for_count(&mut view, &ctx);
+        view.ensure_window(0);
+        wait_for_window(&mut view, &ctx);
+
+        let cache = view
+            .cache
+            .as_ref()
+            .expect("window fetch should have landed");
+        let tagged_row = cache
+            .rows
+            .iter()
+            .find(|row| row.event_id == tagged_event)
+            .unwrap();
+        let noted_row = cache
+            .rows
+            .iter()
+            .find(|row| row.event_id == noted_event)
+            .unwrap();
+        assert_eq!(tagged_row.tags, vec!["reviewed".to_string()]);
+        assert!(tagged_row.notes.is_empty());
+        assert!(noted_row.tags.is_empty(), "a note must not require a tag");
+        assert_eq!(noted_row.notes, vec!["check this".to_string()]);
         std::fs::remove_file(db_path).unwrap();
     }
 

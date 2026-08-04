@@ -8,7 +8,7 @@ use macos_unifiedlogs::traits::FileProvider;
 use macos_unifiedlogs::unified_log::LogData;
 
 use crate::model::log_entry::ParsedRecord;
-use crate::parsers::{LogParser, ParserConfig};
+use crate::parsers::{LogParser, ParserConfig, StreamingProgress};
 
 mod raw_extraction_provider;
 use raw_extraction_provider::RawExtractionProvider;
@@ -65,18 +65,51 @@ impl LogParser for AulParser {
 
     fn parse(&self, path: &Path, config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>> {
         let mut records = Vec::new();
-        self.parse_streaming(path, config, &mut |record| {
-            records.push(record);
-            Ok(())
-        })?;
+        self.parse_streaming(
+            path,
+            config,
+            &mut |record| {
+                records.push(record);
+                Ok(())
+            },
+            &mut StreamingProgress {
+                on_bytes: &mut |_| {},
+                on_total_known: &mut |_| {},
+            },
+        )?;
         Ok(records)
     }
 
+    /// Calls `progress.on_bytes` once per `.tracev3` file finished, not
+    /// once per entry: entries only start reaching `sink` in the second
+    /// loop below, after every file has already been parsed and resolved
+    /// (see the module doc comment on why the cross-file sort needs that) —
+    /// an entry-count-based signal would stay at zero for the entire first
+    /// pass, which on a real multi-hundred-MB `.logarchive` is most of the
+    /// wall-clock time. Byte progress checkpointed per source file, the way
+    /// iLEAPP's own `unifiedlog_iterator`-driven import does it, is the
+    /// finest granularity available without re-architecting around a
+    /// streaming k-way merge (see that same doc comment).
+    ///
+    /// `progress.on_total_known` fires exactly once, right before the
+    /// second loop starts: `collected.len()` is the final entry count at
+    /// that point (every file has been parsed, nothing more will be
+    /// added), and it's the only moment AUL can offer this — before it,
+    /// the count isn't finished growing; during the second loop, `sink`
+    /// already needs a total to be useful, not a value arriving alongside
+    /// it. Reported here instead of always being unknown (the default
+    /// [`LogParser::parse_streaming`] behavior) is what lets a caller show
+    /// a real percentage for the DB insert/tagging work that follows
+    /// parsing, instead of just a raw climbing count with no sense of how
+    /// much is left — the exact gap a flat byte-progress bar leaves once
+    /// parsing itself finishes but insert/tagging (usually the larger
+    /// share of total load time) is still running.
     fn parse_streaming(
         &self,
         path: &Path,
         _config: &ParserConfig,
         sink: &mut dyn FnMut(ParsedRecord) -> anyhow::Result<()>,
+        progress: &mut StreamingProgress,
     ) -> anyhow::Result<()> {
         if !path.is_dir() {
             bail!(
@@ -109,8 +142,13 @@ impl LogParser for AulParser {
             for (index, entry) in log_data.into_iter().enumerate() {
                 collected.push((entry.time, source_path.clone(), index, entry));
             }
+            let file_bytes = std::fs::metadata(&source_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            (progress.on_bytes)(file_bytes);
         }
 
+        (progress.on_total_known)(collected.len());
         for entry in order_entries(collected) {
             sink(to_parsed_record(entry)?)?;
         }

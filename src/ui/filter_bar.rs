@@ -39,12 +39,15 @@ impl FilterBar {
         self.text = text;
     }
 
-    /// `available_levels` should be the distinct `level` values and
-    /// `available_tags` the distinct `import_tags.tag_value`s currently in
-    /// the loaded data (both queried fresh after each load/re-tag — AUL's
-    /// `LogType` names and a text log's ERROR/WARN/INFO have nothing in
-    /// common, and which tags exist depends entirely on which rules were
-    /// selected, so a fixed button set wouldn't fit either).
+    /// `available_levels` should be `(value, display-label)` pairs for the
+    /// distinct `level` values currently in the loaded data — see
+    /// `TimelineView::distinct_levels` for why the label can differ from the
+    /// value (a human-readable name for sourcetypes with numeric levels,
+    /// e.g. EVTX's `"2"` labeled `"2 (Error)"`, while the query term stays
+    /// the bare `"2"`). `available_tags` are the distinct
+    /// `import_tags.tag_value`s (both queried fresh after each load/re-tag —
+    /// which tags exist depends entirely on which rules were selected, so a
+    /// fixed button set wouldn't fit either).
     ///
     /// Returns the freshly parsed [`Query`] only on the frame something
     /// changed, so the caller re-runs the count/window queries only when
@@ -52,7 +55,7 @@ impl FilterBar {
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
-        available_levels: &[String],
+        available_levels: &[(String, String)],
         available_tags: &[String],
     ) -> Option<Query> {
         let mut changed = false;
@@ -79,13 +82,16 @@ impl FilterBar {
 
     /// One row of toggleable `field=value` buttons, all selected values of
     /// the same field combined via a single `field~^(?:...)$` term (see the
-    /// struct docs for why not several `field=value OR ...` terms).
+    /// struct docs for why not several `field=value OR ...` terms). Each
+    /// entry is a `(value, display-label)` pair — the label is what's shown
+    /// on the button, the value is what's written into the query term (see
+    /// [`Self::ui`]'s doc comment on `available_levels`).
     fn quick_filter_row(
         &mut self,
         ui: &mut egui::Ui,
         label: &str,
         field: &str,
-        values: &[String],
+        values: &[(String, String)],
     ) -> bool {
         if values.is_empty() {
             return false;
@@ -93,9 +99,9 @@ impl FilterBar {
         let mut changed = false;
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("{label}:"));
-            for value in values {
+            for (value, display) in values {
                 let active = self.has_term(field, value);
-                if ui.selectable_label(active, value).clicked() {
+                if ui.selectable_label(active, display).clicked() {
                     self.toggle_term(field, value);
                     changed = true;
                 }

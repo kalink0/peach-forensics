@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, anyhow};
 use chrono::{DateTime, Utc};
-use evtx::{EvtxParser as EvtxCrateParser, SerializedEvtxRecord};
+use evtx::{EvtxParser as EvtxCrateParser, ParserSettings, SerializedEvtxRecord};
 
 use crate::model::log_entry::ParsedRecord;
 use crate::parsers::{LogParser, ParserConfig};
@@ -30,6 +30,23 @@ use crate::parsers::{LogParser, ParserConfig};
 /// No config-driven field-mapping, like AUL — `ParserConfig.extra` is
 /// unused.
 ///
+/// Parsed with `separate_json_attributes(true)`: many XML elements in the
+/// Windows Event Schema carry an attribute alongside their text content
+/// (most commonly `<EventID Qualifiers="16384">4111</EventID>` on
+/// older/manifest-free providers like MsiInstaller or the Service Control
+/// Manager, common in `Application.evtx`). With the crate's default
+/// settings, such an element serializes as a nested object
+/// (`{"#text": 4111, "#attributes": {"Qualifiers": 16384}}`) rather than a
+/// plain value — `timeline_queries::extracted_field_sql`'s
+/// `json_extract_string($.Event.System.EventID)` would then return that
+/// whole object stringified instead of just `4111`. `separate_json_attributes`
+/// moves the attribute out to a sibling `EventID_attributes` key and leaves
+/// `EventID` a plain value in both cases (with or without an attribute),
+/// which is what every `extracted_field_sql` JSON path here assumes. Nothing
+/// is lost either way — the attribute is still in `fields` under its
+/// `_attributes` sibling key, just addressed differently; see
+/// `extracted_field_sql`'s doc comment for the exact paths this affects.
+///
 /// A single unparseable record aborts the whole parse with context (which
 /// record index), consistent with the text and AUL parsers — the crate's
 /// per-record `Result` carries no partial data on error (not even a
@@ -52,7 +69,8 @@ impl LogParser for EvtxFileParser {
 
     fn parse(&self, path: &Path, _config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>> {
         let mut parser = EvtxCrateParser::from_path(path)
-            .with_context(|| format!("failed to open EVTX file {}", path.display()))?;
+            .with_context(|| format!("failed to open EVTX file {}", path.display()))?
+            .with_configuration(ParserSettings::new().separate_json_attributes(true));
 
         parser
             .records_json_value()

@@ -409,21 +409,45 @@ pub struct DisplayRow {
     /// classification) and deliberately isn't mapped here, same reasoning
     /// as why EVTX has no `process`. Empty for every other sourcetype.
     pub category: String,
+    /// Free-text notes on this event (`event_notes`, SQLite session DB —
+    /// independent of tags entirely, not this DuckDB query) — always empty
+    /// straight out of [`fetch_window`], filled in afterward by
+    /// `timeline_view`'s notes-merge step, the same way `tags` itself picks
+    /// up manually-set tags from a separate merge step. Shown as hover text
+    /// on the Tags column rather than its own column: a note is the
+    /// exception, not something worth a column that's blank for almost
+    /// every row.
+    pub notes: Vec<String>,
 }
 
-/// Distinct, non-null `level` values currently in `log_entries` — used to
-/// populate the quick level-filter buttons with whatever this particular
-/// loaded source actually uses (AUL's `LogType` names vs. a text log's
-/// ERROR/WARN/INFO have nothing in common).
-pub fn distinct_levels(conn: &Connection) -> anyhow::Result<Vec<String>> {
-    let mut stmt = conn
-        .prepare("SELECT DISTINCT level FROM log_entries WHERE level IS NOT NULL ORDER BY level")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+/// Distinct, non-null `(level, sourcetype)` pairs currently in
+/// `log_entries` — used to populate the quick level-filter buttons with
+/// whatever this particular loaded source actually uses (AUL's `LogType`
+/// names vs. a text log's ERROR/WARN/INFO have nothing in common).
+/// `sourcetype` rides along (rather than just distinct `level`s) so the
+/// caller can attach a human-readable name to sourcetypes with numeric
+/// levels (journald, EVTX) without guessing which sourcetype a bare digit
+/// like `"2"` came from when several are loaded at once — see
+/// `ui::timeline_view::level_display_name`.
+pub fn distinct_levels_by_sourcetype(conn: &Connection) -> anyhow::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT le.level, s.sourcetype
+         FROM log_entries AS le
+         LEFT JOIN sources AS s ON le.event_id_source = s.source_file_id
+         WHERE le.level IS NOT NULL
+         ORDER BY le.level",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        ))
+    })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 /// Distinct `tag_value`s currently in `import_tags` — same idea as
-/// [`distinct_levels`], populating the quick tag-filter buttons from
+/// [`distinct_levels_by_sourcetype`], populating the quick tag-filter buttons from
 /// whatever tagging rules actually produced on this data, rather than a
 /// fixed list.
 pub fn distinct_tags(conn: &Connection) -> anyhow::Result<Vec<String>> {
@@ -475,6 +499,15 @@ pub struct FullEntry {
     pub level: String,
     pub message: String,
     pub raw: String,
+    /// The source-specific `fields` JSON — same column `extracted_field_sql`
+    /// pulls Host/Process/Subsystem/etc. out of, but here in full rather
+    /// than just the handful of confirmed-mapped keys. For AUL/EVTX/
+    /// journald this largely overlaps `raw` (both are the complete decoded
+    /// record); kept as its own field anyway rather than folded into `raw`
+    /// since for a `text_config` source they're genuinely different things
+    /// (`raw` is the literal original line, `fields` is what the regex
+    /// captured out of it) — collapsing them would lose that distinction.
+    pub fields: serde_json::Value,
     pub tags: Vec<String>,
 }
 
@@ -483,12 +516,13 @@ impl FullEntry {
     /// format, just something readable to paste into a note or ticket.
     pub fn to_text(&self) -> String {
         format!(
-            "Timestamp: {}\nLevel: {}\nTags: {}\nMessage: {}\nRaw: {}",
+            "Timestamp: {}\nLevel: {}\nTags: {}\nMessage: {}\nRaw: {}\nFields: {}",
             self.timestamp_utc,
             self.level,
             self.tags.join(", "),
             self.message,
             self.raw,
+            self.fields,
         )
     }
 }
@@ -498,7 +532,7 @@ impl FullEntry {
 /// [`fetch_window`].
 pub fn fetch_full_entry(conn: &Connection, event_id: EventId) -> anyhow::Result<Option<FullEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT le.timestamp_utc, le.level, le.message, le.raw,
+        "SELECT le.timestamp_utc, le.level, le.message, le.raw, le.fields,
                 (SELECT string_agg(it.tag_value, ',') FROM import_tags AS it
                  WHERE it.event_id_source = le.event_id_source
                  AND it.event_id_seq = le.event_id_seq) AS tags
@@ -516,7 +550,8 @@ pub fn fetch_full_entry(conn: &Connection, event_id: EventId) -> anyhow::Result<
     let level: Option<String> = row.get(1)?;
     let message: Option<String> = row.get(2)?;
     let raw: String = row.get(3)?;
-    let tags: Option<String> = row.get(4)?;
+    let fields: serde_json::Value = row.get(4)?;
+    let tags: Option<String> = row.get(5)?;
     let mut tags: Vec<String> = tags
         .map(|joined| joined.split(',').map(str::to_string).collect())
         .unwrap_or_default();
@@ -527,6 +562,7 @@ pub fn fetch_full_entry(conn: &Connection, event_id: EventId) -> anyhow::Result<
         level: level.unwrap_or_default(),
         message: message.unwrap_or_default(),
         raw,
+        fields,
         tags,
     }))
 }
@@ -541,12 +577,16 @@ pub fn fetch_full_entry(conn: &Connection, event_id: EventId) -> anyhow::Result<
 /// this implements.
 ///
 /// EVTX's `Event.System.Computer`, `Event.System.EventID`, and
-/// `Event.System.Provider.#attributes.Name` are all confirmed against the
+/// `Event.System.Provider_attributes.Name` are all confirmed against the
 /// `evtx` crate's own test snapshots
-/// (`tests/snapshots/test_record_samples__event_json_sample.snap`, the
-/// default non-`separate_json_attributes` shape this parser actually uses —
-/// see `parsers::evtx`) — plain top-level or `#attributes`-nested values,
-/// safe to map. `Event.System.Execution.#attributes.ProcessID` is
+/// (`tests/snapshots/test_record_samples__event_json_sample_with_separate_json_attributes.snap`
+/// — `parsers::evtx` parses with `separate_json_attributes(true)`, see its
+/// doc comment for why: without it, an `EventID` with a `Qualifiers`
+/// attribute — common on older/manifest-free providers like MsiInstaller,
+/// frequent in `Application.evtx` — serializes as a nested
+/// `{"#text": ..., "#attributes": {...}}` object instead of a plain value,
+/// and `json_extract_string` on that returns the whole object stringified
+/// instead of the ID). `Event.System.Execution_attributes.ProcessID` is
 /// confirmed too, but it's a bare numeric PID, not a process name/path
 /// like journald's `SYSLOG_IDENTIFIER` or AUL's `process` — mixing "the
 /// process's name" and "some process's PID" under one "Process" column
@@ -588,7 +628,7 @@ fn extracted_field_sql(fields_ref: &str, sourcetype_ref: &str) -> String {
          END AS event_code,
          CASE {sourcetype_ref}
             WHEN 'aul' THEN json_extract_string({fields_ref}, '$.subsystem')
-            WHEN 'evtx' THEN json_extract_string({fields_ref}, '$.Event.System.Provider.#attributes.Name')
+            WHEN 'evtx' THEN json_extract_string({fields_ref}, '$.Event.System.Provider_attributes.Name')
             ELSE NULL
          END AS subsystem,
          CASE {sourcetype_ref}
@@ -763,6 +803,7 @@ pub fn fetch_window(
             event_code: event_code.unwrap_or_default(),
             subsystem: subsystem.unwrap_or_default(),
             category: category.unwrap_or_default(),
+            notes: Vec::new(),
         });
     }
     Ok(display_rows)
@@ -1308,9 +1349,10 @@ mod tests {
         #[test]
         fn fetch_window_extracts_evtx_host_event_code_and_subsystem_but_not_process_or_category() {
             // `fields` shape matches the real `evtx` crate's own
-            // non-`separate_json_attributes` output (the default this
-            // parser uses) — verified against
-            // `evtx-0.12.2/tests/snapshots/test_record_samples__event_json_sample.snap`,
+            // `separate_json_attributes(true)` output (what this parser
+            // actually configures, see `parsers::evtx`'s doc comment) —
+            // verified against
+            // `evtx-0.12.2/tests/snapshots/test_record_samples__event_json_sample_with_separate_json_attributes.snap`,
             // not guessed.
             let conn = open_test_db();
             let source_file_id = SourceFileId::new_random();
@@ -1321,9 +1363,9 @@ mod tests {
                  VALUES (?, ?, ?, '4', 'a', 'a',
                          '{\"Event\": {\"System\": {\"Computer\": \"WORKSTATION1\", \
                          \"EventID\": 4625, \
-                         \"Provider\": {\"#attributes\": {\"Name\": \"Microsoft-Windows-Security-Auditing\"}}, \
+                         \"Provider_attributes\": {\"Name\": \"Microsoft-Windows-Security-Auditing\"}, \
                          \"Channel\": \"Security\", \
-                         \"Execution\": {\"#attributes\": {\"ProcessID\": 456}}}}}')",
+                         \"Execution_attributes\": {\"ProcessID\": 456}}}}')",
                 duckdb::params![
                     source_file_id.to_string(),
                     SequenceCounter::new().next_sequence_number().value() as i64,
@@ -1346,6 +1388,42 @@ mod tests {
                 rows[0].process, "",
                 "EVTX only has a numeric PID generically, not a process name — must stay empty"
             );
+        }
+
+        #[test]
+        fn fetch_window_extracts_evtx_event_code_as_a_bare_number_despite_a_qualifiers_attribute() {
+            // Without `separate_json_attributes(true)`, an `EventID` that
+            // carries a `Qualifiers` attribute (common on older/
+            // manifest-free providers — MsiInstaller, the Service Control
+            // Manager — frequent in `Application.evtx`) would serialize as
+            // `{"#text": 4111, "#attributes": {"Qualifiers": 16384}}`, and
+            // `json_extract_string` on that would return the whole object
+            // stringified instead of `4111`. With it (what `parsers::evtx`
+            // actually configures), the attribute moves to a sibling
+            // `EventID_attributes` key and `EventID` stays a plain number —
+            // shape verified against
+            // `evtx-0.12.2/tests/snapshots/test_record_samples__event_json_sample_with_separate_json_attributes.snap`.
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "evtx");
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, '4', 'a', 'a',
+                         '{\"Event\": {\"System\": {\
+                         \"EventID_attributes\": {\"Qualifiers\": 16384}, \
+                         \"EventID\": 4111}}}')",
+                duckdb::params![
+                    source_file_id.to_string(),
+                    SequenceCounter::new().next_sequence_number().value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+
+            assert_eq!(rows[0].event_code, "4111");
         }
 
         #[test]
@@ -1736,8 +1814,40 @@ mod tests {
             assert_eq!(entry.level, "Info");
             assert_eq!(entry.message, "the message");
             assert_eq!(entry.raw, "the raw record");
+            assert_eq!(entry.fields, serde_json::json!({}));
             assert_eq!(entry.tags, vec!["app_launch", "wifi_status"]);
             assert!(entry.to_text().contains("the raw record"));
+        }
+
+        #[test]
+        fn fetch_full_entry_includes_the_fields_json_distinct_from_raw() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "text_config");
+            let event_id = EventId {
+                source_file_id,
+                sequence_number: SequenceCounter::new().next_sequence_number(),
+            };
+            conn.execute(
+                "INSERT INTO log_entries
+                    (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+                 VALUES (?, ?, ?, 'INFO', 'the message', 'the literal original line',
+                         '{\"ip\": \"10.0.0.1\"}')",
+                duckdb::params![
+                    event_id.source_file_id.to_string(),
+                    event_id.sequence_number.value() as i64,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+
+            let entry = fetch_full_entry(&conn, event_id).unwrap().unwrap();
+
+            assert_eq!(entry.raw, "the literal original line");
+            assert_eq!(entry.fields, serde_json::json!({"ip": "10.0.0.1"}));
+            let text = entry.to_text();
+            assert!(text.contains("Raw: the literal original line"));
+            assert!(text.contains("Fields: {\"ip\":\"10.0.0.1\"}"));
         }
 
         #[test]

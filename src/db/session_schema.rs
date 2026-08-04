@@ -1,7 +1,7 @@
 use rusqlite::{Connection, Result};
 
 /// Creates the session-DB tables if they don't already exist:
-/// `analyst_tags`, `session_state`.
+/// `analyst_tags`, `event_notes`, `session_state`.
 ///
 /// `event_id_source` is `TEXT` holding the string form of the UUID from
 /// [`crate::model::event_id::SourceFileId`] — same reasoning as the DuckDB
@@ -15,6 +15,19 @@ pub fn setup_session_schema(conn: &Connection) -> Result<()> {
             event_id_seq      INTEGER NOT NULL,
             tag_value         TEXT NOT NULL,
             note              TEXT,
+            created_at        INTEGER NOT NULL
+        );
+
+        -- Free-text notes on an event, independent of `analyst_tags` —
+        -- deliberately not the `note` column above: that one only ever
+        -- exists attached to a tag, and a note shouldn't require picking
+        -- or inventing a tag first. See
+        -- `session::persist::insert_event_note`'s doc comment.
+        CREATE TABLE IF NOT EXISTS event_notes (
+            id                INTEGER PRIMARY KEY,
+            event_id_source   TEXT NOT NULL,
+            event_id_seq      INTEGER NOT NULL,
+            note              TEXT NOT NULL,
             created_at        INTEGER NOT NULL
         );
 
@@ -77,6 +90,36 @@ mod tests {
 
         assert_eq!(tag_value, "reviewed");
         assert_eq!(note.as_deref(), Some("looks suspicious, follow up"));
+    }
+
+    #[test]
+    fn event_note_round_trips_through_event_notes_table() {
+        let conn = open_test_db();
+        let source_file_id = sample_source_file_id();
+
+        conn.execute(
+            "INSERT INTO event_notes
+                (event_id_source, event_id_seq, note, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                source_file_id.to_string(),
+                0i64,
+                "looks suspicious, follow up",
+                1_753_704_000i64,
+            ],
+        )
+        .unwrap();
+
+        let note: String = conn
+            .query_row(
+                "SELECT note FROM event_notes
+                 WHERE event_id_source = ?1 AND event_id_seq = ?2",
+                rusqlite::params![source_file_id.to_string(), 0i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(note, "looks suspicious, follow up");
     }
 
     #[test]

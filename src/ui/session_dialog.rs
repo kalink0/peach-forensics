@@ -1,6 +1,7 @@
 //! "Manage sessions" dialog — lists every session found in the sessions
 //! directory (`<id>.sqlite` + `<id>.duckdb` pair, see
-//! [`crate::session::persist::SessionPaths`]) with Open/Delete actions.
+//! [`crate::session::persist::SessionPaths`]) with Open/Rename/Delete
+//! actions.
 //!
 //! A session's `.sqlite` file is created as soon as the app starts (see
 //! `PeachApp::new`), before any data is ever loaded — so a fresh session
@@ -12,6 +13,12 @@
 //! It's also refused for the session currently open in this run: deleting
 //! the files still backing the running app out from under it would leave
 //! every subsequent read/write pointed at nothing.
+//!
+//! Rename only ever touches a `session_state` entry (`display_name`), never
+//! the underlying `<id>.sqlite`/`<id>.duckdb` files or the id itself — see
+//! `session::persist::save_display_name`'s doc comment for why. Allowed for
+//! the currently-open session too, unlike Delete: renaming doesn't leave
+//! the running app pointed at nothing.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -20,12 +27,19 @@ use anyhow::Context;
 use eframe::egui;
 
 use crate::db::timeline_queries::{self, Query};
+use crate::session::persist;
 
 pub enum SessionManagerOutcome {
     /// The analyst picked a session to switch to — `app.rs` still owns
     /// actually loading it (`PeachApp::load_session`), same division of
     /// labor as `TagDialogOutcome`.
     Open(PathBuf),
+    /// A session's display name was just saved — `app.rs` only needs to
+    /// react if `id` is its own currently-open session (refresh the label
+    /// it shows), since the rename itself already happened (this dialog
+    /// writes it directly, same as `Delete` already does for the
+    /// filesystem — see the module doc).
+    Renamed { id: String },
 }
 
 pub struct SessionEntry {
@@ -33,6 +47,12 @@ pub struct SessionEntry {
     sqlite_path: PathBuf,
     duckdb_path: PathBuf,
     has_data: bool,
+    /// The analyst's own label for this session (`session_state`'s
+    /// `display_name`, via `session::persist`), if one was ever set — shown
+    /// instead of `id` in the list. Loaded synchronously in `scan_sessions`,
+    /// same reasoning as `size_bytes`: a quick SQLite key lookup, not
+    /// worth backgrounding like `event_count`'s real DuckDB query.
+    display_name: Option<String>,
     /// `None` until the background count (see `spawn_event_counts`) lands
     /// for this session, or forever for a `has_data: false` (empty)
     /// session — never counted, there's nothing to count.
@@ -44,6 +64,21 @@ pub struct SessionEntry {
     size_bytes: u64,
 }
 
+impl SessionEntry {
+    /// What the list shows for this row — the analyst's own label if one
+    /// was set, the raw id otherwise.
+    fn label(&self) -> &str {
+        match self.display_name.as_deref() {
+            // An empty string means the analyst cleared a name they'd
+            // previously set (see the "Rename..." Save handler) — treat it
+            // the same as never having set one, rather than showing a
+            // blank label.
+            Some(name) if !name.is_empty() => name,
+            _ => &self.id,
+        }
+    }
+}
+
 pub enum SessionManagerDialog {
     Closed,
     Open {
@@ -51,6 +86,10 @@ pub enum SessionManagerDialog {
         /// Id of the session awaiting a "really delete?" confirmation, if
         /// any — at most one row is ever mid-confirm at a time.
         pending_delete: Option<String>,
+        /// `(id, draft name)` of the session currently being renamed, if
+        /// any — same "at most one row at a time" reasoning as
+        /// `pending_delete`.
+        renaming: Option<(String, String)>,
         error: Option<String>,
         /// Streams one `(id, count)` per data-backed session as its count
         /// finishes — see `spawn_event_counts` for why this is
@@ -84,6 +123,7 @@ impl SessionManagerDialog {
         Self::Open {
             entries,
             pending_delete: None,
+            renaming: None,
             error: None,
             count_rx,
         }
@@ -137,6 +177,7 @@ impl SessionManagerDialog {
         if let Self::Open {
             entries,
             pending_delete,
+            renaming,
             error,
             ..
         } = self
@@ -153,21 +194,42 @@ impl SessionManagerDialog {
                     }
 
                     let mut just_deleted = None;
-                    for entry in entries.iter() {
+                    for entry in entries.iter_mut() {
                         let is_current = entry.id == current_session_id;
                         ui.horizontal(|ui| {
-                            let label = if entry.has_data {
+                            if renaming.as_ref().is_some_and(|(id, _)| *id == entry.id) {
+                                let (_, draft) = renaming.as_mut().expect("just checked above");
+                                ui.text_edit_singleline(draft);
+                                if ui.button("Save").clicked() {
+                                    match persist::open_session_db(&entry.sqlite_path).and_then(
+                                        |conn| persist::save_display_name(&conn, draft.trim()),
+                                    ) {
+                                        Ok(()) => {
+                                            entry.display_name = Some(draft.trim().to_string());
+                                            outcome = Some(SessionManagerOutcome::Renamed {
+                                                id: entry.id.clone(),
+                                            });
+                                        }
+                                        Err(err) => *error = Some(format!("{err:#}")),
+                                    }
+                                    *renaming = None;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    *renaming = None;
+                                }
+                                return;
+                            }
+
+                            let suffix = if entry.has_data {
                                 let size = format_bytes(entry.size_bytes);
                                 match entry.event_count {
-                                    Some(count) => {
-                                        format!("{} — {count} events, {size}", entry.id)
-                                    }
-                                    None => format!("{} (counting…), {size}", entry.id),
+                                    Some(count) => format!(" — {count} events, {size}"),
+                                    None => format!(" (counting…), {size}"),
                                 }
                             } else {
-                                format!("{} (empty)", entry.id)
+                                " (empty)".to_string()
                             };
-                            ui.label(label);
+                            ui.label(format!("{}{suffix}", entry.label()));
                             if is_current {
                                 ui.weak("(current)");
                             }
@@ -179,6 +241,13 @@ impl SessionManagerDialog {
                                 outcome =
                                     Some(SessionManagerOutcome::Open(entry.sqlite_path.clone()));
                                 close = true;
+                            }
+
+                            if ui.button("Rename...").clicked() {
+                                *renaming = Some((
+                                    entry.id.clone(),
+                                    entry.display_name.clone().unwrap_or_default(),
+                                ));
                             }
 
                             if ui
@@ -266,11 +335,13 @@ fn scan_sessions(dir: &Path) -> Vec<SessionEntry> {
                 .filter_map(|path| std::fs::metadata(path).ok())
                 .map(|metadata| metadata.len())
                 .sum();
+            let display_name = read_display_name(&sqlite_path);
             Some(SessionEntry {
                 id,
                 sqlite_path,
                 duckdb_path,
                 has_data,
+                display_name,
                 event_count: None,
                 size_bytes,
             })
@@ -278,6 +349,21 @@ fn scan_sessions(dir: &Path) -> Vec<SessionEntry> {
         .collect();
     entries.sort_by(|a, b| b.id.cmp(&a.id));
     entries
+}
+
+/// Best-effort: `None` on any failure (missing file, unreadable, schema
+/// somehow missing `session_state`) rather than an error — a session's
+/// display name is a display nicety, not worth failing the whole listing
+/// over. A plain, short-lived `rusqlite::Connection::open` even for the
+/// currently-running session's own file is safe: unlike DuckDB (see
+/// `open`'s doc comment on why that one shares a connection instead),
+/// SQLite tolerates multiple independent connections to the same file
+/// fine, and this codebase already opens fresh ones for every other
+/// session-state read/write (tags, notes, search query) rather than
+/// holding one open long-term.
+fn read_display_name(sqlite_path: &Path) -> Option<String> {
+    let conn = rusqlite::Connection::open(sqlite_path).ok()?;
+    persist::load_display_name(&conn).ok()?
 }
 
 /// Human-readable file size — B/KB/MB/GB, one decimal place from KB up
@@ -502,6 +588,52 @@ mod tests {
     }
 
     #[test]
+    fn scan_sessions_reads_a_display_name_when_one_was_set() {
+        let dir = temp_sessions_dir("scan-display-name");
+        let (sqlite_path, _) = make_session(&dir, "session-20260101-000000", false);
+        {
+            let conn = rusqlite::Connection::open(&sqlite_path).unwrap();
+            crate::db::session_schema::setup_session_schema(&conn).unwrap();
+            persist::save_display_name(&conn, "Suspect laptop").unwrap();
+        }
+
+        let entries = scan_sessions(&dir);
+
+        assert_eq!(entries[0].display_name, Some("Suspect laptop".to_string()));
+        assert_eq!(entries[0].label(), "Suspect laptop");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scan_sessions_display_name_is_none_when_never_set() {
+        let dir = temp_sessions_dir("scan-no-display-name");
+        make_session(&dir, "session-20260101-000000", false);
+
+        let entries = scan_sessions(&dir);
+
+        assert_eq!(entries[0].display_name, None);
+        assert_eq!(entries[0].label(), "session-20260101-000000");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn label_falls_back_to_id_when_display_name_is_an_empty_string() {
+        // An empty string is what a cleared rename writes back — must be
+        // treated the same as never having set one, not shown as blank.
+        let entry = SessionEntry {
+            id: "session-20260101-000000".to_string(),
+            sqlite_path: PathBuf::new(),
+            duckdb_path: PathBuf::new(),
+            has_data: false,
+            display_name: Some(String::new()),
+            event_count: None,
+            size_bytes: 0,
+        };
+
+        assert_eq!(entry.label(), "session-20260101-000000");
+    }
+
+    #[test]
     fn scan_sessions_sums_sqlite_duckdb_and_wal_sizes() {
         let dir = temp_sessions_dir("scan-size");
         let (sqlite_path, duckdb_path) = make_session(&dir, "session-20260101-000000", true);
@@ -535,6 +667,7 @@ mod tests {
             sqlite_path,
             duckdb_path,
             has_data: true,
+            display_name: None,
             event_count: None,
             size_bytes: 0,
         };
@@ -555,6 +688,7 @@ mod tests {
             sqlite_path,
             duckdb_path,
             has_data: false,
+            display_name: None,
             event_count: None,
             size_bytes: 0,
         };
@@ -576,6 +710,7 @@ mod tests {
             sqlite_path,
             duckdb_path,
             has_data: true,
+            display_name: None,
             event_count: None,
             size_bytes: 0,
         };

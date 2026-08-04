@@ -41,6 +41,26 @@ impl ParserConfig {
     }
 }
 
+/// Progress-reporting hooks a parser can call during [`LogParser::parse_streaming`],
+/// independent of `sink`'s per-record delivery. Bundled into one struct
+/// rather than two more `parse_streaming` parameters — same reasoning as
+/// `app::RuleSelection` bundling its own fields.
+pub struct StreamingProgress<'a> {
+    /// Called with the number of additional bytes consumed at whatever
+    /// internal checkpoints a parser naturally has, so a caller tracking
+    /// overall load progress isn't limited to "0% until this whole call
+    /// returns."
+    pub on_bytes: &'a mut dyn FnMut(u64),
+    /// Called at most once, as soon as the total record count for this
+    /// source becomes known — which for most parsers is never, since they
+    /// discover records one at a time with no upfront count available. A
+    /// caller can use this to turn "N inserted so far, out of nothing in
+    /// particular" into a real percentage for whatever happens after
+    /// parsing (DB insert, tagging) instead of just a raw climbing count
+    /// with no sense of how much is left.
+    pub on_total_known: &'a mut dyn FnMut(usize),
+}
+
 /// Implemented by every concrete parser (text-config, EVTX, AUL, journald).
 ///
 /// `parse` returns [`ParsedRecord`]s rather than [`LogEntry`]s on purpose:
@@ -66,11 +86,25 @@ pub trait LogParser: Sync {
     /// row reaches DuckDB is what drove a 219 MB source past 45 GB of RSS
     /// during testing — DuckDB, not the Rust heap, is supposed to hold the
     /// bulk timeline.
+    ///
+    /// `progress` (see [`StreamingProgress`]) is never touched by the
+    /// default implementation here — every non-AUL sourcetype is already a
+    /// single file with no natural sub-file checkpoint, and its total
+    /// record count is no more knowable upfront than AUL's. AUL overrides
+    /// both hooks: `on_bytes` once per `.tracev3` file finished within one
+    /// `.logarchive` directory (otherwise a multi-hundred-MB AUL source
+    /// reports as one opaque unit with no progress signal until the entire
+    /// load completes), and `on_total_known` once every file has been
+    /// parsed and the entries are sorted but not yet handed to `sink` —
+    /// the one point where AUL's total *is* already known, a side effect
+    /// of resolving everything before the first row reaches `sink` (see
+    /// above).
     fn parse_streaming(
         &self,
         path: &Path,
         config: &ParserConfig,
         sink: &mut dyn FnMut(ParsedRecord) -> anyhow::Result<()>,
+        _progress: &mut StreamingProgress,
     ) -> anyhow::Result<()> {
         for record in self.parse(path, config)? {
             sink(record)?;
@@ -120,23 +154,29 @@ pub fn parse_source_streaming(
     path: &Path,
     config: &ParserConfig,
     mut sink: impl FnMut(LogEntry) -> anyhow::Result<()>,
+    progress: &mut StreamingProgress,
 ) -> anyhow::Result<SourceFileId> {
     let source_file_id = SourceFileId::new_random();
     let mut sequence_counter = SequenceCounter::new();
 
-    parser.parse_streaming(path, config, &mut |record| {
-        sink(LogEntry {
-            event_id: EventId {
-                source_file_id,
-                sequence_number: sequence_counter.next_sequence_number(),
-            },
-            timestamp_utc: record.timestamp_utc,
-            level: record.level,
-            message: record.message,
-            raw: record.raw,
-            fields: record.fields,
-        })
-    })?;
+    parser.parse_streaming(
+        path,
+        config,
+        &mut |record| {
+            sink(LogEntry {
+                event_id: EventId {
+                    source_file_id,
+                    sequence_number: sequence_counter.next_sequence_number(),
+                },
+                timestamp_utc: record.timestamp_utc,
+                level: record.level,
+                message: record.message,
+                raw: record.raw,
+                fields: record.fields,
+            })
+        },
+        progress,
+    )?;
 
     Ok(source_file_id)
 }
@@ -168,6 +208,62 @@ mod tests {
                 })
                 .collect())
         }
+    }
+
+    struct ProgressReportingParser;
+
+    impl LogParser for ProgressReportingParser {
+        fn sourcetype(&self) -> &str {
+            "progress-dummy"
+        }
+
+        fn parse(&self, _path: &Path, _config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn parse_streaming(
+            &self,
+            _path: &Path,
+            _config: &ParserConfig,
+            sink: &mut dyn FnMut(ParsedRecord) -> anyhow::Result<()>,
+            progress: &mut StreamingProgress,
+        ) -> anyhow::Result<()> {
+            (progress.on_bytes)(10);
+            (progress.on_total_known)(1);
+            sink(ParsedRecord {
+                timestamp_utc: Utc::now(),
+                level: None,
+                message: Some("entry".to_string()),
+                raw: "raw entry".to_string(),
+                fields: serde_json::Value::Null,
+            })?;
+            (progress.on_bytes)(20);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn parse_source_streaming_forwards_progress_hooks_to_the_parser() {
+        let path = write_temp_file("c", b"dummy source content");
+        let config = dummy_config();
+        let mut bytes_calls = Vec::new();
+        let mut total_calls = Vec::new();
+
+        parse_source_streaming(
+            &ProgressReportingParser,
+            &path,
+            &config,
+            |_entry| Ok(()),
+            &mut StreamingProgress {
+                on_bytes: &mut |delta| bytes_calls.push(delta),
+                on_total_known: &mut |total| total_calls.push(total),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(bytes_calls, vec![10, 20]);
+        assert_eq!(total_calls, vec![1]);
+        std::fs::remove_file(path).unwrap();
     }
 
     fn write_temp_file(name: &str, content: &[u8]) -> PathBuf {
@@ -216,10 +312,19 @@ mod tests {
         let config = dummy_config();
 
         let mut streamed = Vec::new();
-        let source_file_id = parse_source_streaming(&parser, &path, &config, |entry| {
-            streamed.push(entry);
-            Ok(())
-        })
+        let source_file_id = parse_source_streaming(
+            &parser,
+            &path,
+            &config,
+            |entry| {
+                streamed.push(entry);
+                Ok(())
+            },
+            &mut StreamingProgress {
+                on_bytes: &mut |_| {},
+                on_total_known: &mut |_| {},
+            },
+        )
         .unwrap();
 
         assert_eq!(streamed.len(), 3);
@@ -241,10 +346,18 @@ mod tests {
 
         let mut seen = Vec::new();
         parser
-            .parse_streaming(&path, &config, &mut |record| {
-                seen.push(record.message.clone());
-                Ok(())
-            })
+            .parse_streaming(
+                &path,
+                &config,
+                &mut |record| {
+                    seen.push(record.message.clone());
+                    Ok(())
+                },
+                &mut StreamingProgress {
+                    on_bytes: &mut |_| {},
+                    on_total_known: &mut |_| {},
+                },
+            )
             .unwrap();
 
         assert_eq!(
