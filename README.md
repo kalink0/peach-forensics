@@ -34,13 +34,18 @@ just fmt               # auto-format
 ## CLI
 
 ```sh
-peach --add-source <path> [--add-source <path> ...] [--cleanup-dir <path> ...]
+peach --add-source <path> [--add-source <path> ...] [--cleanup-dir <path> ...] [--ephemeral-session]
 ```
 
 `--add-source` pre-fills a source to load in the GUI (sourcetype is still confirmed
 manually — peach never auto-detects a format). `--cleanup-dir` marks a directory
 (e.g. a temp extraction dir `crush` created) to be deleted when peach closes; it's
 only ever deleted if it resolves to somewhere under the OS temp directory.
+`--ephemeral-session` disables session persistence for the run: the session's
+`.duckdb`/`.sqlite` are written to a one-off temp directory instead of the
+persistent sessions directory and removed on exit regardless of whether they hold
+data — for evidence handed off from a temp extraction or a decrypted source, where
+no durable unencrypted session copy should be left behind.
 
 ## Documentation
 

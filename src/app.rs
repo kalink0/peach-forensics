@@ -248,6 +248,12 @@ pub struct PeachApp {
     available_tags: Vec<String>,
     pending_cli_sources: VecDeque<PathBuf>,
     cleanup_dirs: Vec<PathBuf>,
+    /// Set by `--ephemeral-session` (`PeachApp::new`) — this run's session
+    /// lives in a one-off temp directory instead of the persistent sessions
+    /// directory, and `on_exit` removes that whole directory unconditionally
+    /// (not just when empty, unlike the normal `delete_if_empty` sweep) so
+    /// no unencrypted session copy survives the run.
+    ephemeral_session_dir: Option<PathBuf>,
     tag_dialog: TagDialog,
     note_dialog: NoteDialog,
     raw_fields_dialog: RawFieldsDialog,
@@ -325,19 +331,38 @@ fn aul_builtin_rules_checkbox_is_relevant(
 }
 
 impl PeachApp {
-    fn new(add_sources: Vec<PathBuf>, cleanup_dirs: Vec<PathBuf>) -> Self {
+    fn new(add_sources: Vec<PathBuf>, cleanup_dirs: Vec<PathBuf>, ephemeral_session: bool) -> Self {
         let settings = config::load();
+        // `--ephemeral-session` (crush handing off a temp-extracted or
+        // decrypted source): use a one-off temp directory instead of the
+        // persistent sessions directory, so the unencrypted `.duckdb`/
+        // `.sqlite` never lands there in the first place. Falls back to the
+        // plain OS temp dir if even that can't be created — same
+        // better-a-working-non-persisted-session-than-a-crash reasoning as
+        // the non-ephemeral fallback below.
+        let ephemeral_session_dir = if ephemeral_session {
+            Some(persist::new_ephemeral_sessions_dir().unwrap_or_else(|_| std::env::temp_dir()))
+        } else {
+            None
+        };
         // Falls back to a plain temp file if the sessions directory (OS
         // default or configured override) can't be created — better a
         // working, non-persisted session than a crash on startup.
-        let sessions_dir = settings
-            .sessions_dir()
-            .unwrap_or_else(|_| std::env::temp_dir());
+        let sessions_dir = match &ephemeral_session_dir {
+            Some(dir) => dir.clone(),
+            None => settings
+                .sessions_dir()
+                .unwrap_or_else(|_| std::env::temp_dir()),
+        };
         // A reliable backstop for the on_exit cleanup below: that one only
         // fires on a graceful shutdown, so this sweeps up whatever a
         // killed/crashed previous run left behind, before this run's own
-        // (currently still-empty) session gets created.
-        session_dialog::sweep_empty_sessions(&sessions_dir);
+        // (currently still-empty) session gets created. Skipped for an
+        // ephemeral run — `sessions_dir` is a just-created, empty temp
+        // directory, nothing to sweep.
+        if ephemeral_session_dir.is_none() {
+            session_dialog::sweep_empty_sessions(&sessions_dir);
+        }
         let session_paths = SessionPaths::new_in(&sessions_dir, persist::new_session_id());
         // Best-effort, same reasoning as the `open_session_db` call right
         // after it: a failure here just means this run's session doesn't
@@ -374,6 +399,7 @@ impl PeachApp {
             available_tags: Vec::new(),
             pending_cli_sources,
             cleanup_dirs,
+            ephemeral_session_dir,
             tag_dialog: TagDialog::Closed,
             note_dialog: NoteDialog::Closed,
             raw_fields_dialog: RawFieldsDialog::Closed,
@@ -847,6 +873,13 @@ impl eframe::App for PeachApp {
                     sqlite_path.display()
                 );
             }
+        }
+        // `--ephemeral-session`: remove the whole temp directory
+        // unconditionally, unlike the `delete_if_empty` sweep above — a
+        // session that has data (the normal case for one actually used
+        // this run) is exactly what must not survive here.
+        if let Some(dir) = &self.ephemeral_session_dir {
+            cleanup_temp_dir(dir);
         }
         for dir in &self.cleanup_dirs {
             cleanup_temp_dir(dir);
@@ -2198,7 +2231,11 @@ fn cleanup_temp_dir(dir: &Path) {
     }
 }
 
-pub fn run(add_sources: Vec<PathBuf>, cleanup_dirs: Vec<PathBuf>) -> anyhow::Result<()> {
+pub fn run(
+    add_sources: Vec<PathBuf>,
+    cleanup_dirs: Vec<PathBuf>,
+    ephemeral_session: bool,
+) -> anyhow::Result<()> {
     let window_title = format!("Peach {}", about_dialog::display_version());
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title(&window_title),
@@ -2208,7 +2245,7 @@ pub fn run(add_sources: Vec<PathBuf>, cleanup_dirs: Vec<PathBuf>) -> anyhow::Res
         &window_title,
         native_options,
         Box::new(move |cc| {
-            let app = PeachApp::new(add_sources, cleanup_dirs);
+            let app = PeachApp::new(add_sources, cleanup_dirs, ephemeral_session);
             theme::apply(&cc.egui_ctx, app.settings.theme);
             Ok(Box::new(app))
         }),
@@ -2342,6 +2379,54 @@ mod tests {
         let (first, _, rest) = queue_from_cli_sources(vec![]);
         assert_eq!(first, None);
         assert!(rest.is_empty());
+    }
+
+    /// Exercises the whole `crush` handoff mechanics end to end at the
+    /// `PeachApp` level, without needing a real window: `--add-source` /
+    /// `--cleanup-dir` / `--ephemeral-session` as `crush` would pass them
+    /// for a temp-extracted or decrypted source, from pre-fill at startup
+    /// (`PeachApp::new`) through cleanup on shutdown (`on_exit`). Was never
+    /// verified this way before the first release that `crush` is meant to
+    /// depend on instead of the nightly build.
+    #[test]
+    fn ephemeral_crush_handoff_prefills_source_and_cleans_up_everything_on_exit() {
+        let unique = uuid::Uuid::new_v4();
+        let source_path =
+            std::env::temp_dir().join(format!("peach-test-crush-source-{unique}.log"));
+        std::fs::write(&source_path, b"2026-08-14 hello\n").unwrap();
+        let cleanup_dir = std::env::temp_dir().join(format!("peach-test-crush-cleanup-{unique}"));
+        std::fs::create_dir_all(&cleanup_dir).unwrap();
+        std::fs::write(cleanup_dir.join("source.log"), b"evidence").unwrap();
+
+        let mut app = PeachApp::new(vec![source_path.clone()], vec![cleanup_dir.clone()], true);
+
+        // Pre-fill, same as a manual "Load" would need it.
+        assert_eq!(app.source_path, Some(source_path));
+        assert_eq!(app.source_kind, SourceKind::Text);
+        // The session lives under a one-off temp dir, not the persistent
+        // sessions directory, and its `.sqlite` already exists (`new` opens
+        // it eagerly to set up the schema).
+        let ephemeral_dir = app
+            .ephemeral_session_dir
+            .clone()
+            .expect("--ephemeral-session must set ephemeral_session_dir");
+        assert!(ephemeral_dir.starts_with(std::env::temp_dir()));
+        assert!(app.session_paths.sqlite_path.starts_with(&ephemeral_dir));
+        assert!(app.session_paths.sqlite_path.exists());
+        // Nothing gets touched before shutdown.
+        assert!(cleanup_dir.exists());
+        assert!(ephemeral_dir.exists());
+
+        eframe::App::on_exit(&mut app);
+
+        assert!(
+            !cleanup_dir.exists(),
+            "crush's --cleanup-dir must be removed on exit"
+        );
+        assert!(
+            !ephemeral_dir.exists(),
+            "--ephemeral-session must leave no session copy behind on exit"
+        );
     }
 
     #[test]

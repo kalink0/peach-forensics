@@ -20,6 +20,32 @@ pub fn default_sessions_dir() -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
+/// A fresh, one-off directory under the OS temp directory for
+/// `--ephemeral-session` runs — deliberately *not* under
+/// [`default_sessions_dir`]/the configured sessions dir: the whole point of
+/// `--ephemeral-session` is that this run's `.duckdb`/`.sqlite` (an
+/// unencrypted copy of whatever was loaded — potentially a temp-extracted
+/// or decrypted evidence source handed off by crush via `--add-source`/
+/// `--cleanup-dir`) never lands in the persistent sessions directory in the
+/// first place, rather than landing there and being deleted afterwards.
+/// PID + nanosecond timestamp in the name, same collision-avoidance
+/// approach as `Settings::sessions_dir`'s own test helper — concurrent
+/// Peach instances must never share this directory.
+pub fn new_ephemeral_sessions_dir() -> anyhow::Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!(
+        "peach-ephemeral-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "failed to create ephemeral session directory {}",
+            dir.display()
+        )
+    })?;
+    Ok(dir)
+}
+
 pub fn new_session_id() -> String {
     chrono::Utc::now()
         .format("session-%Y%m%d-%H%M%S")
@@ -356,6 +382,25 @@ pub fn delete_event_note(conn: &Connection, note_id: i64) -> anyhow::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_ephemeral_sessions_dir_creates_a_fresh_directory_under_os_temp() {
+        let dir = new_ephemeral_sessions_dir().unwrap();
+
+        assert!(dir.is_dir());
+        assert!(dir.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn new_ephemeral_sessions_dir_is_unique_per_call() {
+        let a = new_ephemeral_sessions_dir().unwrap();
+        let b = new_ephemeral_sessions_dir().unwrap();
+
+        assert_ne!(a, b);
+        std::fs::remove_dir_all(&a).unwrap();
+        std::fs::remove_dir_all(&b).unwrap();
+    }
 
     #[test]
     fn session_paths_derive_matching_duckdb_and_sqlite_files_in_their_own_subdir() {

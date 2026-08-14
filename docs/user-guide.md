@@ -275,7 +275,7 @@ see.
 ## Command line
 
 ```sh
-peach --add-source <path> [--add-source <path> ...] [--cleanup-dir <path> ...]
+peach --add-source <path> [--add-source <path> ...] [--cleanup-dir <path> ...] [--ephemeral-session]
 ```
 
 `--add-source` pre-fills the source picker (sourcetype guessed only as
@@ -284,3 +284,11 @@ directory-implies-AUL, never a text-format guess) — you still confirm and clic
 completes, the next one pre-fills automatically. `--cleanup-dir` deletes a
 directory when Peach closes, but only if it's actually under the OS temp
 directory — a safety net, not something to rely on for arbitrary paths.
+
+`--ephemeral-session` skips session persistence for the run entirely: instead of
+the usual persistent sessions directory, the session's `.duckdb`/`.sqlite` live in
+a one-off temp directory that's removed on close no matter what it holds — use
+this when the source itself came from a temp extraction or a decrypted copy, so
+Peach doesn't leave a second, unencrypted copy of that data sitting around after
+you're done. The session won't show up in "Manage sessions..." either, since it
+never lived in the persistent sessions directory to begin with.
