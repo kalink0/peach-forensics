@@ -12,6 +12,7 @@
 use eframe::egui;
 
 use crate::db::timeline_queries::FullEntry;
+use crate::ui::dialog_window::show_dialog_window;
 
 pub enum RawFieldsDialog {
     Closed,
@@ -48,12 +49,11 @@ impl RawFieldsDialog {
     /// `raw`/`fields` can run long enough (AUL entries especially) that
     /// being able to resize freely and drag it out from under the main
     /// window (a second monitor, side-by-side with the timeline) is worth
-    /// more here than for the app's smaller, quicker dialogs. See
-    /// `egui::Context::show_viewport_immediate`'s doc comment: the
-    /// callback gets `&mut Ui` directly (not a `Window` to `.show()`), and
-    /// the OS-level close button (as opposed to the in-UI "Close" button
-    /// below) surfaces as `close_requested()` on that viewport's input —
-    /// both are treated the same way here.
+    /// more here than for the app's smaller, quicker dialogs. This was
+    /// this dialog's own bespoke reason for it before every dialog in this
+    /// module got the same treatment — see
+    /// [`crate::ui::dialog_window::show_dialog_window`]'s doc comment for
+    /// why it's now the shared, not the exceptional, case.
     pub fn ui(&mut self, ctx: &egui::Context) {
         let Self::Open(state) = self else {
             return;
@@ -62,52 +62,44 @@ impl RawFieldsDialog {
             entry,
             fields_pretty,
         } = state.as_ref();
-        let mut close = false;
 
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("peach_raw_fields_dialog"),
-            egui::ViewportBuilder::default()
-                .with_title("Raw / Fields")
-                .with_inner_size([500.0, 500.0])
-                .with_resizable(true),
-            |ui, _class| {
-                egui::CentralPanel::default().show(ui, |ui| {
-                    ui.label(format!(
-                        "{} — {}",
-                        entry.timestamp_utc,
-                        if entry.message.is_empty() {
-                            "(no message)"
-                        } else {
-                            &entry.message
-                        }
-                    ));
-                    ui.separator();
+        let close = show_dialog_window(
+            ctx,
+            "peach_raw_fields_dialog",
+            "Raw / Fields",
+            [500.0, 500.0],
+            true,
+            |ui, close| {
+                ui.label(format!(
+                    "{} — {}",
+                    entry.timestamp_utc,
+                    if entry.message.is_empty() {
+                        "(no message)"
+                    } else {
+                        &entry.message
+                    }
+                ));
+                ui.separator();
 
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.strong("raw");
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(&entry.raw).monospace())
-                                .selectable(true)
-                                .wrap(),
-                        );
-                        ui.add_space(8.0);
-                        ui.strong("fields");
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(fields_pretty.as_str()).monospace(),
-                            )
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.strong("raw");
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&entry.raw).monospace())
                             .selectable(true)
                             .wrap(),
-                        );
-                    });
-
-                    ui.separator();
-                    if ui.button("Close").clicked() {
-                        close = true;
-                    }
+                    );
+                    ui.add_space(8.0);
+                    ui.strong("fields");
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(fields_pretty.as_str()).monospace())
+                            .selectable(true)
+                            .wrap(),
+                    );
                 });
-                if ui.ctx().input(|i| i.viewport().close_requested()) {
-                    close = true;
+
+                ui.separator();
+                if ui.button("Close").clicked() {
+                    *close = true;
                 }
             },
         );

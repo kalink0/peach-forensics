@@ -10,6 +10,7 @@ pub mod evtx;
 mod evtx_templates;
 pub mod journald;
 pub mod text_config;
+pub mod text_config_file;
 
 /// Configuration for one parser instance, deserialized from a parser TOML
 /// file. `name`/`sourcetype` are typed since every

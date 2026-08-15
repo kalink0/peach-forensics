@@ -3,6 +3,8 @@
 
 use eframe::egui;
 
+use crate::ui::dialog_window::show_dialog_window;
+
 const REPO_URL: &str = "https://github.com/kalink0/peach-forensics";
 const ISSUES_URL: &str = "https://github.com/kalink0/peach-forensics/issues";
 
@@ -32,10 +34,13 @@ impl AboutDialog {
         let mut close = false;
 
         if let Self::Open { tab } = self {
-            egui::Window::new("About Peach")
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
+            close = show_dialog_window(
+                ctx,
+                "peach_about_dialog",
+                "About Peach",
+                [480.0, 420.0],
+                true,
+                |ui, close| {
                     ui.horizontal(|ui| {
                         ui.selectable_value(tab, AboutTab::About, "About");
                         ui.selectable_value(tab, AboutTab::Acknowledgements, "Acknowledgements");
@@ -49,9 +54,10 @@ impl AboutDialog {
 
                     ui.separator();
                     if ui.button("Close").clicked() {
-                        close = true;
+                        *close = true;
                     }
-                });
+                },
+            );
         }
 
         if close {

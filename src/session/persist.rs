@@ -125,6 +125,16 @@ pub struct LoadedSource {
     pub path: String,
     pub sourcetype: String,
     pub parser_config_path: Option<String>,
+    /// This load's `source_file_id` (see
+    /// [`crate::model::event_id::SourceFileId`]), as a string — what
+    /// `ui::filter_bar`'s per-source visibility chips target with a
+    /// `source_id=` term. `#[serde(default)]` so a session saved before
+    /// this field existed still deserializes: it just decodes to an empty
+    /// string, which never matches a real `source_file_id` and so simply
+    /// can't be individually hidden until that source is reloaded — a
+    /// graceful degradation, not a broken session.
+    #[serde(default)]
+    pub source_file_id: String,
 }
 
 const LOADED_SOURCES_KEY: &str = "loaded_sources";
@@ -465,11 +475,13 @@ mod tests {
                 path: "/evidence/a.log".to_string(),
                 sourcetype: "syslog".to_string(),
                 parser_config_path: Some("/configs/syslog.toml".to_string()),
+                source_file_id: "11111111-1111-1111-1111-111111111111".to_string(),
             },
             LoadedSource {
                 path: "/evidence/b.logarchive".to_string(),
                 sourcetype: "aul".to_string(),
                 parser_config_path: None,
+                source_file_id: "22222222-2222-2222-2222-222222222222".to_string(),
             },
         ];
         save_loaded_sources(&conn, &sources).unwrap();
@@ -486,23 +498,54 @@ mod tests {
             path: "/a".to_string(),
             sourcetype: "aul".to_string(),
             parser_config_path: None,
+            source_file_id: "id-a".to_string(),
         }];
         let second = vec![
             LoadedSource {
                 path: "/a".to_string(),
                 sourcetype: "aul".to_string(),
                 parser_config_path: None,
+                source_file_id: "id-a".to_string(),
             },
             LoadedSource {
                 path: "/b".to_string(),
                 sourcetype: "evtx".to_string(),
                 parser_config_path: None,
+                source_file_id: "id-b".to_string(),
             },
         ];
         save_loaded_sources(&conn, &first).unwrap();
         save_loaded_sources(&conn, &second).unwrap();
 
         assert_eq!(load_loaded_sources(&conn).unwrap(), second);
+    }
+
+    /// Regression test: a session saved before `source_file_id` existed on
+    /// `LoadedSource` has that field simply absent from its stored JSON.
+    /// `#[serde(default)]` must let that still deserialize (as an empty
+    /// string, not an error) — without it, every session saved before this
+    /// field was added would fail to load at all the moment this shipped.
+    #[test]
+    fn loaded_sources_without_a_source_file_id_deserialize_as_a_pre_upgrade_session_would() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+        let legacy_json = serde_json::to_string(&serde_json::json!([{
+            "path": "/evidence/old.log",
+            "sourcetype": "syslog",
+            "parser_config_path": null,
+        }]))
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_state (key, value) VALUES (?1, ?2)",
+            params![LOADED_SOURCES_KEY, legacy_json],
+        )
+        .unwrap();
+
+        let loaded = load_loaded_sources(&conn).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].path, "/evidence/old.log");
+        assert_eq!(loaded[0].source_file_id, "");
     }
 
     #[test]

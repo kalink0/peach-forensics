@@ -28,6 +28,7 @@ use eframe::egui;
 
 use crate::db::timeline_queries::{self, Query};
 use crate::session::persist;
+use crate::ui::dialog_window::show_dialog_window;
 
 pub enum SessionManagerOutcome {
     /// The analyst picked a session to switch to — `app.rs` still owns
@@ -182,10 +183,13 @@ impl SessionManagerDialog {
             ..
         } = self
         {
-            egui::Window::new("Manage sessions")
-                .collapsible(false)
-                .resizable(true)
-                .show(ctx, |ui| {
+            close = show_dialog_window(
+                ctx,
+                "peach_session_dialog",
+                "Manage sessions",
+                [560.0, 420.0],
+                true,
+                |ui, close| {
                     if let Some(err) = error {
                         ui.colored_label(egui::Color32::RED, err.as_str());
                     }
@@ -240,7 +244,7 @@ impl SessionManagerDialog {
                             {
                                 outcome =
                                     Some(SessionManagerOutcome::Open(entry.sqlite_path.clone()));
-                                close = true;
+                                *close = true;
                             }
 
                             if ui.button("Rename...").clicked() {
@@ -296,9 +300,10 @@ impl SessionManagerDialog {
 
                     ui.separator();
                     if ui.button("Close").clicked() {
-                        close = true;
+                        *close = true;
                     }
-                });
+                },
+            );
         }
 
         if close {

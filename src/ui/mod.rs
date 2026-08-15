@@ -1,6 +1,8 @@
 pub mod about_dialog;
 pub mod colors;
+pub mod dialog_window;
 pub mod filter_bar;
+pub mod format_dialog;
 pub mod note_dialog;
 pub mod raw_fields_dialog;
 pub mod session_dialog;

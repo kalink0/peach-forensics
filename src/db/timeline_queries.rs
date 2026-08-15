@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use duckdb::{Connection, types::Value};
 
 use crate::model::event_id::EventId;
@@ -23,6 +25,19 @@ pub enum Field {
     /// is rarely worth typing out — `source~` for a regex still works the
     /// same as any other field.
     SourceFile,
+    /// `source_id=` — the internal `source_file_id` (a random UUID assigned
+    /// per load, see [`crate::model::event_id::SourceFileId`]), matched
+    /// exactly against `sources.source_file_id`. Not something an analyst
+    /// would type by hand — this exists for `ui::filter_bar`'s per-source
+    /// visibility chips ("hide this loaded source without unloading it"),
+    /// which need to target one *specific load* rather than a path
+    /// substring: two independent loads of the same file (the same path
+    /// string, loaded twice — not deduplicated by design, see
+    /// `SourceFileId`'s own doc comment) must stay independently
+    /// hideable, and a path can contain spaces a plain
+    /// `source="<path>"` term would need quoting for. A UUID has neither
+    /// problem.
+    SourceId,
     Tag,
     Message,
     Raw,
@@ -67,6 +82,7 @@ impl Field {
             "level" => Some(Self::Level),
             "sourcetype" => Some(Self::Sourcetype),
             "source" => Some(Self::SourceFile),
+            "source_id" => Some(Self::SourceId),
             "tag" => Some(Self::Tag),
             "message" => Some(Self::Message),
             "raw" => Some(Self::Raw),
@@ -81,6 +97,24 @@ impl Field {
         }
     }
 }
+
+/// `(grammar keyword, display label)` pairs for every exact-match field
+/// that doesn't already have its own dedicated quick-filter UI
+/// (`ui::filter_bar`'s Level/Tag/Sources dropdowns) — Sourcetype, Host,
+/// Process, `event_id`, Subsystem, Category. Shared by two call sites that
+/// would otherwise drift apart: `ui::timeline_view`'s row context menu
+/// ("Filter by..." submenu, built from a clicked row's own field values)
+/// and `ui::filter_bar`'s "Active filters" chip row (scans the current
+/// query text for which of these are currently set). One list, so adding
+/// a seventh column-filterable field later only means editing this array.
+pub(crate) const COLUMN_FILTER_FIELDS: [(&str, &str); 6] = [
+    ("sourcetype", "Sourcetype"),
+    ("host", "Host"),
+    ("process", "Process"),
+    ("event_id", "Event ID"),
+    ("subsystem", "Subsystem"),
+    ("category", "Category"),
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TermKind {
@@ -174,7 +208,14 @@ impl Query {
 /// Splits `input` on whitespace, treating `"..."` as one token (quotes
 /// dropped, spaces inside preserved) — so `field="a b"` and `"a b"` each
 /// become a single raw token.
-fn tokenize(input: &str) -> Vec<String> {
+///
+/// `pub(crate)` — also used by `ui::filter_bar`'s per-column right-click
+/// filters (Host/Process/Subsystem/Category/`event_id`/Sourcetype), whose
+/// values routinely contain whitespace (a process name, a hostname) where
+/// every *other* term `filter_bar` writes (Level/Tag values, `source_id`
+/// UUIDs, ISO dates) never does — those keep using plain
+/// `str::split_whitespace` since they never need quote-awareness.
+pub(crate) fn tokenize(input: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
@@ -371,6 +412,7 @@ fn compile_term_kind(kind: &TermKind) -> (String, Vec<Value>) {
                 Field::Level => "le.level".to_string(),
                 Field::Sourcetype => "s.sourcetype".to_string(),
                 Field::SourceFile => "s.path".to_string(),
+                Field::SourceId => "s.source_file_id".to_string(),
                 Field::Message => "le.message".to_string(),
                 Field::Raw => "le.raw".to_string(),
                 Field::EventId => event_code_case_sql("le.fields", "s.sourcetype"),
@@ -389,6 +431,7 @@ fn compile_term_kind(kind: &TermKind) -> (String, Vec<Value>) {
                 match field {
                     Field::Level
                     | Field::Sourcetype
+                    | Field::SourceId
                     | Field::EventId
                     | Field::Host
                     | Field::Process
@@ -536,6 +579,63 @@ pub fn distinct_tags(conn: &Connection) -> anyhow::Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT DISTINCT tag_value FROM import_tags ORDER BY tag_value")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Per-value event counts for `ui::filter_bar`'s Level/Tag/Sources
+/// dropdowns — how many rows *in the whole loaded timeline* carry each
+/// value, not how many currently match the active search query. A
+/// deliberate snapshot, not a live number: recomputing this on every query
+/// change would need the same background-thread treatment as
+/// `count_matching` (whose cost scales with the filtered result, not the
+/// whole table), for a number whose actual purpose here is "how big is
+/// this tag/level/source overall", which only changes on a load or re-tag
+/// — same refresh cadence [`distinct_tags`]/[`distinct_levels_by_sourcetype`]
+/// already use, and called the same synchronous way (no `mpsc` channel):
+/// each of these three is one `GROUP BY` over a single narrow column
+/// (`tag_value`/`level`/`event_id_source`), never `fields`/`raw` — the
+/// wide-column combination that actually caused the real OOM these other
+/// two avoid.
+///
+/// Three near-identical query shapes below rather than one generic
+/// function: the source table differs (`import_tags` vs `log_entries`),
+/// and unlike `distinct_levels_by_sourcetype`, [`Field::Level`]'s own
+/// filter semantics are sourcetype-*agnostic* (`level=X` matches `X`
+/// regardless of which sourcetype logged it), so grouping level counts by
+/// sourcetype too would produce numbers that don't match what the
+/// checkbox next to them actually filters by.
+pub fn tag_counts(conn: &Connection) -> anyhow::Result<HashMap<String, usize>> {
+    let mut stmt =
+        conn.prepare("SELECT tag_value, COUNT(*) FROM import_tags GROUP BY tag_value")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+    })?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(Into::into)
+}
+
+/// See [`tag_counts`]'s doc comment. Keyed by the bare `level` value, same
+/// as [`Field::Level`]'s own filter — not scoped by sourcetype.
+pub fn level_counts(conn: &Connection) -> anyhow::Result<HashMap<String, usize>> {
+    let mut stmt = conn.prepare(
+        "SELECT level, COUNT(*) FROM log_entries WHERE level IS NOT NULL GROUP BY level",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+    })?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(Into::into)
+}
+
+/// See [`tag_counts`]'s doc comment. Keyed by `source_file_id`, matching
+/// [`Field::SourceId`]'s own filter.
+pub fn source_counts(conn: &Connection) -> anyhow::Result<HashMap<String, usize>> {
+    let mut stmt =
+        conn.prepare("SELECT event_id_source, COUNT(*) FROM log_entries GROUP BY event_id_source")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+    })?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(Into::into)
 }
 
 pub fn count_matching(conn: &Connection, query: &Query) -> anyhow::Result<usize> {
@@ -1356,6 +1456,91 @@ mod tests {
         }
 
         #[test]
+        fn source_id_field_targets_exactly_one_loaded_source() {
+            // Regression coverage for `ui::filter_bar`'s per-source
+            // visibility chips: `NOT source_id=<id>` must hide only that
+            // one loaded source's rows, leaving every other loaded
+            // source's rows untouched — even though both entries here
+            // otherwise look identical (same level/message shape from two
+            // different sources).
+            let conn = open_test_db();
+            let source_a = SourceFileId::new_random();
+            let source_b = SourceFileId::new_random();
+            insert_source(&conn, source_a, "evtx");
+            insert_source(&conn, source_b, "evtx");
+            let mut counter = SequenceCounter::new();
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id: source_a,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                "INFO",
+                "from source a",
+                "raw a",
+            );
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id: source_b,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                "INFO",
+                "from source b",
+                "raw b",
+            );
+
+            let hide_a = Query::parse(&format!("NOT source_id={source_a}"));
+            let rows = fetch_window(&conn, &hide_a, 0, 10).unwrap();
+            assert_eq!(count_matching(&conn, &hide_a).unwrap(), 1);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].message, "from source b");
+
+            let only_a = Query::parse(&format!("source_id={source_a}"));
+            let rows = fetch_window(&conn, &only_a, 0, 10).unwrap();
+            assert_eq!(count_matching(&conn, &only_a).unwrap(), 1);
+            assert_eq!(rows[0].message, "from source a");
+        }
+
+        #[test]
+        fn hiding_two_sources_at_once_leaves_only_the_third() {
+            let conn = open_test_db();
+            let source_a = SourceFileId::new_random();
+            let source_b = SourceFileId::new_random();
+            let source_c = SourceFileId::new_random();
+            insert_source(&conn, source_a, "evtx");
+            insert_source(&conn, source_b, "evtx");
+            insert_source(&conn, source_c, "evtx");
+            let mut counter = SequenceCounter::new();
+            for (source, message) in [
+                (source_a, "from a"),
+                (source_b, "from b"),
+                (source_c, "from c"),
+            ] {
+                insert_entry(
+                    &conn,
+                    EventId {
+                        source_file_id: source,
+                        sequence_number: counter.next_sequence_number(),
+                    },
+                    "INFO",
+                    message,
+                    message,
+                );
+            }
+
+            // Same shape `FilterBar::toggle_source_hidden_term` produces
+            // for two independently-hidden sources: two plain `NOT` terms,
+            // ANDed by the grammar's default connector.
+            let query = Query::parse(&format!(
+                "NOT source_id={source_a} NOT source_id={source_b}"
+            ));
+            let rows = fetch_window(&conn, &query, 0, 10).unwrap();
+            assert_eq!(count_matching(&conn, &query).unwrap(), 1);
+            assert_eq!(rows[0].message, "from c");
+        }
+
+        #[test]
         fn fetch_window_includes_sorted_tags_per_entry() {
             let conn = open_test_db();
             let source_file_id = SourceFileId::new_random();
@@ -2159,6 +2344,123 @@ mod tests {
         fn distinct_tags_is_empty_when_no_tags_applied() {
             let conn = open_test_db();
             assert_eq!(distinct_tags(&conn).unwrap(), Vec::<String>::new());
+        }
+
+        #[test]
+        fn tag_counts_counts_events_per_tag_value_not_per_tag_row() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "aul");
+            let mut counter = SequenceCounter::new();
+            let a = EventId {
+                source_file_id,
+                sequence_number: counter.next_sequence_number(),
+            };
+            let b = EventId {
+                source_file_id,
+                sequence_number: counter.next_sequence_number(),
+            };
+            insert_entry(&conn, a, "Info", "m", "r");
+            insert_entry(&conn, b, "Info", "m", "r");
+            insert_tag(&conn, a, "wifi_status");
+            insert_tag(&conn, b, "screen_lock_state");
+            insert_tag(&conn, b, "wifi_status");
+
+            let counts = tag_counts(&conn).unwrap();
+
+            assert_eq!(counts.get("wifi_status"), Some(&2));
+            assert_eq!(counts.get("screen_lock_state"), Some(&1));
+        }
+
+        #[test]
+        fn tag_counts_is_empty_when_no_tags_applied() {
+            let conn = open_test_db();
+            assert!(tag_counts(&conn).unwrap().is_empty());
+        }
+
+        #[test]
+        fn level_counts_counts_events_per_level_regardless_of_sourcetype() {
+            // `level=` itself isn't scoped by sourcetype (see `Field::Level`),
+            // so counts for the same level string from two different
+            // sourcetypes must be summed together, not kept separate.
+            let conn = open_test_db();
+            let evtx_source = SourceFileId::new_random();
+            let journald_source = SourceFileId::new_random();
+            insert_source(&conn, evtx_source, "evtx");
+            insert_source(&conn, journald_source, "journald");
+            let mut counter = SequenceCounter::new();
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id: evtx_source,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                "2",
+                "evtx error",
+                "raw",
+            );
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id: journald_source,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                "2",
+                "journald crit",
+                "raw",
+            );
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id: evtx_source,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                "4",
+                "evtx info",
+                "raw",
+            );
+
+            let counts = level_counts(&conn).unwrap();
+
+            assert_eq!(counts.get("2"), Some(&2));
+            assert_eq!(counts.get("4"), Some(&1));
+        }
+
+        #[test]
+        fn source_counts_counts_events_per_loaded_source() {
+            let conn = open_test_db();
+            let source_a = SourceFileId::new_random();
+            let source_b = SourceFileId::new_random();
+            insert_source(&conn, source_a, "evtx");
+            insert_source(&conn, source_b, "evtx");
+            let mut counter = SequenceCounter::new();
+            for _ in 0..3 {
+                insert_entry(
+                    &conn,
+                    EventId {
+                        source_file_id: source_a,
+                        sequence_number: counter.next_sequence_number(),
+                    },
+                    "INFO",
+                    "m",
+                    "r",
+                );
+            }
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id: source_b,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                "INFO",
+                "m",
+                "r",
+            );
+
+            let counts = source_counts(&conn).unwrap();
+
+            assert_eq!(counts.get(&source_a.to_string()), Some(&3));
+            assert_eq!(counts.get(&source_b.to_string()), Some(&1));
         }
 
         #[test]

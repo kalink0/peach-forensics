@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use eframe::egui;
 
 use crate::model::event_id::EventId;
+use crate::ui::dialog_window::show_dialog_window;
 
 /// What the analyst confirmed — `app.rs` executes it.
 pub enum TagDialogOutcome {
@@ -157,10 +158,13 @@ impl TagDialog {
         match self {
             Self::Closed => {}
             Self::Single { event_id, picker } => {
-                egui::Window::new("Tag this event")
-                    .collapsible(false)
-                    .resizable(false)
-                    .show(ctx, |ui| {
+                close = show_dialog_window(
+                    ctx,
+                    "peach_tag_single_dialog",
+                    "Tag this event",
+                    [360.0, 160.0],
+                    true,
+                    |ui, close| {
                         picker.ui(ui);
                         ui.horizontal(|ui| {
                             let tag_value = picker.tag_value();
@@ -172,13 +176,14 @@ impl TagDialog {
                                     event_id: *event_id,
                                     tag_value: tag_value.expect("Apply is disabled otherwise"),
                                 });
-                                close = true;
+                                *close = true;
                             }
                             if ui.button("Cancel").clicked() {
-                                close = true;
+                                *close = true;
                             }
                         });
-                    });
+                    },
+                );
             }
             Self::Advanced {
                 pattern,
@@ -187,10 +192,13 @@ impl TagDialog {
                 extend_path,
                 ..
             } => {
-                egui::Window::new("Advanced tagging")
-                    .collapsible(false)
-                    .resizable(false)
-                    .show(ctx, |ui| {
+                close = show_dialog_window(
+                    ctx,
+                    "peach_tag_advanced_dialog",
+                    "Advanced tagging",
+                    [460.0, 320.0],
+                    true,
+                    |ui, close| {
                         ui.label("Tag every entry whose message contains:");
                         ui.text_edit_singleline(pattern);
                         match preview {
@@ -214,7 +222,10 @@ impl TagDialog {
                         if !picker.is_new() {
                             match extend_path {
                                 Some(path) => {
-                                    ui.label(format!("Will extend existing rule: {}", path.display()));
+                                    ui.label(format!(
+                                        "Will extend existing rule: {}",
+                                        path.display()
+                                    ));
                                 }
                                 None => {
                                     ui.label(
@@ -249,13 +260,14 @@ impl TagDialog {
                                         tag_value: tag_value.expect("Apply is disabled otherwise"),
                                     },
                                 });
-                                close = true;
+                                *close = true;
                             }
                             if ui.button("Cancel").clicked() {
-                                close = true;
+                                *close = true;
                             }
                         });
-                    });
+                    },
+                );
             }
         }
 

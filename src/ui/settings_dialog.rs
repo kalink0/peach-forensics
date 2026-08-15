@@ -7,6 +7,7 @@
 use eframe::egui;
 
 use crate::config::{self, Settings};
+use crate::ui::dialog_window::show_dialog_window;
 
 pub enum SettingsOutcome {
     Save(Settings),
@@ -35,10 +36,13 @@ impl SettingsDialog {
         let mut close = false;
 
         if let Self::Open { draft } = self {
-            egui::Window::new("Settings")
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
+            close = show_dialog_window(
+                ctx,
+                "peach_settings_dialog",
+                "Settings",
+                [480.0, 360.0],
+                true,
+                |ui, close| {
                     ui.label("Sessions directory:");
                     ui.horizontal(|ui| {
                         let current = draft
@@ -92,13 +96,14 @@ impl SettingsDialog {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             outcome = Some(SettingsOutcome::Save(draft.clone()));
-                            close = true;
+                            *close = true;
                         }
                         if ui.button("Cancel").clicked() {
-                            close = true;
+                            *close = true;
                         }
                     });
-                });
+                },
+            );
         }
 
         if close {

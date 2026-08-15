@@ -36,6 +36,13 @@ pub enum RowAction {
     /// here) so `app.rs` only has to open the dialog with it, not fetch it
     /// again.
     ViewRawFields { entry: timeline_queries::FullEntry },
+    /// "Filter by..." submenu — add (or replace) an exact-match filter for
+    /// one of the clicked row's own field values
+    /// (`timeline_queries::COLUMN_FILTER_FIELDS`: Sourcetype/Host/Process/
+    /// Event ID/Subsystem/Category). Row-level, not cell-level, like every
+    /// other row action here — the submenu lists whichever of the row's
+    /// fields are actually populated, not just the one under the pointer.
+    FilterByColumn { field: &'static str, value: String },
 }
 
 /// How many rows to fetch per DuckDB query when the visible scroll window
@@ -208,7 +215,11 @@ fn format_level(level: &str, sourcetype: &str) -> String {
 /// doesn't distinguish one AUL source from another the way a real filename
 /// does. The full path is always available via hover regardless of which
 /// form is shown here.
-fn source_display_label<'a>(source_path: &'a str, sourcetype: &str) -> &'a str {
+///
+/// `pub(crate)` — also used by `app.rs` to label the per-source visibility
+/// chips (`ui::filter_bar`) with the same short name this column already
+/// shows, rather than a second, separately-maintained shortening rule.
+pub(crate) fn source_display_label<'a>(source_path: &'a str, sourcetype: &str) -> &'a str {
     if sourcetype == "aul" {
         return source_path;
     }
@@ -603,6 +614,31 @@ impl TimelineView {
             .unwrap_or_default()
     }
 
+    /// Whole-loaded-timeline per-value event counts for `ui::filter_bar`'s
+    /// Level/Tag/Sources dropdowns — see `timeline_queries::tag_counts`'s
+    /// doc comment for why these are a snapshot (refreshed the same
+    /// `distinct_tags`/`distinct_levels` call sites already refresh on) and
+    /// not a live, filter-relative number.
+    pub fn tag_counts(&self) -> std::collections::HashMap<String, usize> {
+        self.try_clone_conn()
+            .and_then(|conn| timeline_queries::tag_counts(&conn).ok())
+            .unwrap_or_default()
+    }
+
+    /// See [`Self::tag_counts`].
+    pub fn level_counts(&self) -> std::collections::HashMap<String, usize> {
+        self.try_clone_conn()
+            .and_then(|conn| timeline_queries::level_counts(&conn).ok())
+            .unwrap_or_default()
+    }
+
+    /// See [`Self::tag_counts`].
+    pub fn source_counts(&self) -> std::collections::HashMap<String, usize> {
+        self.try_clone_conn()
+            .and_then(|conn| timeline_queries::source_counts(&conn).ok())
+            .unwrap_or_default()
+    }
+
     /// Requests the window covering `row_index`, if it isn't already cached
     /// or already being fetched. Runs the query in the background (see
     /// [`Self::spawn_window_fetch`]) — with a filter that matches most of a
@@ -985,6 +1021,39 @@ impl TimelineView {
                                             requested = Some(RowAction::ViewRawFields { entry });
                                         }
                                         ui.close();
+                                    }
+                                    let filterable: Vec<(&'static str, &'static str, &str)> =
+                                        timeline_queries::COLUMN_FILTER_FIELDS
+                                            .iter()
+                                            .filter_map(|&(field, label)| {
+                                                let value: &str = match field {
+                                                    "sourcetype" => d.sourcetype.as_str(),
+                                                    "host" => d.host.as_str(),
+                                                    "process" => d.process.as_str(),
+                                                    "event_id" => d.event_code.as_str(),
+                                                    "subsystem" => d.subsystem.as_str(),
+                                                    "category" => d.category.as_str(),
+                                                    _ => unreachable!(
+                                                        "COLUMN_FILTER_FIELDS and this match must \
+                                                         list exactly the same fields"
+                                                    ),
+                                                };
+                                                (!value.is_empty()).then_some((field, label, value))
+                                            })
+                                            .collect();
+                                    if !filterable.is_empty() {
+                                        ui.menu_button("Filter by...", |ui| {
+                                            for (field, label, value) in &filterable {
+                                                if ui.button(format!("{label} = {value}")).clicked()
+                                                {
+                                                    requested = Some(RowAction::FilterByColumn {
+                                                        field,
+                                                        value: value.to_string(),
+                                                    });
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
                                     }
                                     ui.separator();
                                     if let Some(timestamp) = timestamp {

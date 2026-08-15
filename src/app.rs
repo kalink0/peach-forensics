@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -16,6 +16,7 @@ use crate::parsers::aul::AulParser;
 use crate::parsers::evtx::EvtxFileParser;
 use crate::parsers::journald::JournaldFileParser;
 use crate::parsers::text_config::TextConfigParser;
+use crate::parsers::text_config_file::{self, TextFormatDraft};
 use crate::parsers::{LogParser, ParserConfig, StreamingProgress, parse_source_streaming};
 use crate::session::persist::{self, LoadedSource, SessionPaths};
 use crate::tagging::engine::{apply_import_time, re_tag};
@@ -23,13 +24,14 @@ use crate::tagging::rule::Rule;
 use crate::tagging::rule_file;
 use crate::ui::about_dialog::{self, AboutDialog};
 use crate::ui::filter_bar::FilterBar;
+use crate::ui::format_dialog::{FormatDialog, FormatDialogOutcome};
 use crate::ui::note_dialog::{NoteDialog, NoteDialogOutcome};
 use crate::ui::raw_fields_dialog::RawFieldsDialog;
 use crate::ui::session_dialog::{self, SessionManagerDialog, SessionManagerOutcome};
 use crate::ui::settings_dialog::{SettingsDialog, SettingsOutcome};
 use crate::ui::tag_dialog::{TagDialog, TagDialogOutcome};
 use crate::ui::theme;
-use crate::ui::timeline_view::{RowAction, TimelineView};
+use crate::ui::timeline_view::{RowAction, TimelineView, source_display_label};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
@@ -246,6 +248,14 @@ pub struct PeachApp {
     filter_bar: FilterBar,
     available_levels: Vec<(String, String)>,
     available_tags: Vec<String>,
+    /// Whole-loaded-timeline event counts shown next to each value in the
+    /// Level/Tag/Sources dropdowns (`ui::filter_bar`) — a snapshot,
+    /// refreshed at the same points `available_levels`/`available_tags`
+    /// already are, not a live count of what the current filter matches.
+    /// See `TimelineView::tag_counts`'s doc comment.
+    level_counts: HashMap<String, usize>,
+    tag_counts: HashMap<String, usize>,
+    source_counts: HashMap<String, usize>,
     pending_cli_sources: VecDeque<PathBuf>,
     cleanup_dirs: Vec<PathBuf>,
     /// Set by `--ephemeral-session` (`PeachApp::new`) — this run's session
@@ -256,6 +266,7 @@ pub struct PeachApp {
     ephemeral_session_dir: Option<PathBuf>,
     tag_dialog: TagDialog,
     note_dialog: NoteDialog,
+    format_dialog: FormatDialog,
     raw_fields_dialog: RawFieldsDialog,
     session_dialog: SessionManagerDialog,
     settings: Settings,
@@ -397,11 +408,15 @@ impl PeachApp {
             filter_bar: FilterBar::new(),
             available_levels: Vec::new(),
             available_tags: Vec::new(),
+            level_counts: HashMap::new(),
+            tag_counts: HashMap::new(),
+            source_counts: HashMap::new(),
             pending_cli_sources,
             cleanup_dirs,
             ephemeral_session_dir,
             tag_dialog: TagDialog::Closed,
             note_dialog: NoteDialog::Closed,
+            format_dialog: FormatDialog::Closed,
             raw_fields_dialog: RawFieldsDialog::Closed,
             session_dialog: SessionManagerDialog::Closed,
             settings,
@@ -436,6 +451,9 @@ impl PeachApp {
         self.timeline.refresh();
         self.available_levels = self.timeline.distinct_levels();
         self.available_tags = self.timeline.distinct_tags();
+        self.level_counts = self.timeline.level_counts();
+        self.tag_counts = self.timeline.tag_counts();
+        self.source_counts = self.timeline.source_counts();
         self.filter_bar.set_text(search_query.clone());
         self.timeline.set_query(Query::parse(&search_query));
 
@@ -578,6 +596,14 @@ impl PeachApp {
                     let _ = persist::save_search_query(&conn, &query_text);
                 }
             }
+            RowAction::FilterByColumn { field, value } => {
+                self.filter_bar.set_column_filter(field, &value);
+                self.timeline
+                    .set_query(Query::parse(self.filter_bar.text()));
+                if let Ok(conn) = persist::open_session_db(&self.session_paths.sqlite_path) {
+                    let _ = persist::save_search_query(&conn, self.filter_bar.text());
+                }
+            }
             RowAction::ManageNotes { event_id } => {
                 let notes = persist::open_session_db(&self.session_paths.sqlite_path)
                     .and_then(|conn| persist::notes_for_event(&conn, event_id))
@@ -634,6 +660,73 @@ impl PeachApp {
         match &self.note_dialog {
             NoteDialog::Open { event_id, .. } => Some(*event_id),
             NoteDialog::Closed => None,
+        }
+    }
+
+    /// Opens the "Define format..." dialog against `self.source_path` (the
+    /// button that triggers this is disabled while that's `None`, so
+    /// bailing out silently here is unreachable in practice, not a
+    /// swallowed error). Seeds the draft from the currently-selected
+    /// parser config, if any, so refining an existing config is the same
+    /// flow as starting a new one rather than a separate "edit" entry
+    /// point — falls back to a blank draft if none is selected yet, or if
+    /// the selected one fails to parse (e.g. hand-edited into something
+    /// this dialog's fields can't represent).
+    fn open_format_dialog(&mut self) {
+        let Some(source_path) = self.source_path.clone() else {
+            return;
+        };
+        let preview_lines = read_preview_lines(&source_path, FORMAT_PREVIEW_LINES);
+        let draft = self
+            .parser_config_path
+            .as_deref()
+            .and_then(|path| TextFormatDraft::from_file(path).ok())
+            .unwrap_or_default();
+        let saved = text_config_file::default_user_parsers_dir()
+            .map(|dir| text_config_file::list_saved_configs(&dir))
+            .unwrap_or_default();
+        self.format_dialog = FormatDialog::open(preview_lines, draft, saved);
+    }
+
+    /// Same overall pattern as `handle_settings_dialog`: `app.rs` owns the
+    /// `parsers/` directory, the dialog only reports what the analyst
+    /// clicked. Unlike Settings, a failure here (disk error, or a chosen
+    /// saved file that no longer parses) is reported back into the still-
+    /// open dialog via `set_error` rather than just logged to stderr —
+    /// this dialog's whole point is to catch problems before a real load,
+    /// so a save/load failure needs to be as visible as the preview
+    /// itself, not buried in a terminal the analyst may not be watching.
+    fn handle_format_dialog(&mut self, ctx: &egui::Context) {
+        if !self.format_dialog.is_open() {
+            return;
+        }
+        let Some(outcome) = self.format_dialog.ui(ctx) else {
+            return;
+        };
+        let Ok(dir) = text_config_file::default_user_parsers_dir() else {
+            self.format_dialog
+                .set_error("could not determine the per-user parsers directory".to_string());
+            return;
+        };
+        match outcome {
+            FormatDialogOutcome::Save(draft) => match text_config_file::save(&dir, &draft) {
+                Ok(_) => {
+                    self.format_dialog
+                        .set_saved(text_config_file::list_saved_configs(&dir));
+                }
+                Err(err) => self.format_dialog.set_error(format!("{err:#}")),
+            },
+            FormatDialogOutcome::SaveAndUse(draft) => match text_config_file::save(&dir, &draft) {
+                Ok(path) => {
+                    self.parser_config_path = Some(path);
+                    self.format_dialog = FormatDialog::Closed;
+                }
+                Err(err) => self.format_dialog.set_error(format!("{err:#}")),
+            },
+            FormatDialogOutcome::Load(path) => match TextFormatDraft::from_file(&path) {
+                Ok(draft) => self.format_dialog.set_draft(draft),
+                Err(err) => self.format_dialog.set_error(format!("{err:#}")),
+            },
         }
     }
 
@@ -838,6 +931,29 @@ impl PeachApp {
     }
 }
 
+/// Lines shown in the "Define format..." dialog's live preview — a small,
+/// fixed sample, not a scan of the whole file: enough to judge whether a
+/// pattern is right, without reading a multi-hundred-MB text source just to
+/// open a dialog.
+const FORMAT_PREVIEW_LINES: usize = 20;
+
+/// Reads up to `max_lines` lines from `path` without reading past what's
+/// needed — a `BufRead` line iterator stops pulling from disk once `take`
+/// is satisfied, unlike `std::fs::read_to_string` followed by `.lines()`,
+/// which would materialize the entire file first regardless of how many
+/// lines are actually wanted. Returns whatever was read on any I/O error
+/// partway through (e.g. non-UTF-8 bytes past the first few lines) rather
+/// than discarding a preview that was otherwise working.
+fn read_preview_lines(path: &Path, max_lines: usize) -> Vec<String> {
+    let Ok(file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    std::io::BufRead::lines(std::io::BufReader::new(file))
+        .take(max_lines)
+        .map_while(Result::ok)
+        .collect()
+}
+
 /// Which currently-loaded rule file (if exactly one — `None` if zero or
 /// several, ambiguous) already produces `tag_value`, so the advanced
 /// tagging dialog can offer "extend that rule" instead of always creating
@@ -978,6 +1094,9 @@ impl eframe::App for PeachApp {
                                 self.timeline.refresh();
                                 self.available_levels = self.timeline.distinct_levels();
                                 self.available_tags = self.timeline.distinct_tags();
+                                self.level_counts = self.timeline.level_counts();
+                                self.tag_counts = self.timeline.tag_counts();
+                                self.source_counts = self.timeline.source_counts();
                                 self.loaded_sources.extend(summary.loaded_sources);
                                 if let Ok(conn) =
                                     persist::open_session_db(&self.session_paths.sqlite_path)
@@ -1031,6 +1150,7 @@ impl eframe::App for PeachApp {
                             // other way (e.g. scrolling).
                             self.timeline.refresh();
                             self.available_tags = self.timeline.distinct_tags();
+                            self.tag_counts = self.timeline.tag_counts();
                         }
                         Err(err) => self.retag_state = RetagState::Failed(err),
                     }
@@ -1306,6 +1426,21 @@ impl eframe::App for PeachApp {
                         ui.label(config_path.display().to_string());
                     }
                 });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            self.source_path.is_some(),
+                            egui::Button::new("Define format..."),
+                        )
+                        .on_hover_text(
+                            "Build a parser config with a live preview against this source's \
+                             own lines, instead of hand-editing TOML.",
+                        )
+                        .clicked()
+                    {
+                        self.open_format_dialog();
+                    }
+                });
             }
 
             ui.horizontal(|ui| {
@@ -1486,10 +1621,33 @@ impl eframe::App for PeachApp {
 
         let mut row_action = None;
         egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(query) =
-                self.filter_bar
-                    .ui(ui, &self.available_levels, &self.available_tags)
-            {
+            // Built fresh each frame, not cached like `available_levels`/
+            // `available_tags`: unlike those (a background DuckDB query),
+            // this is a plain map over the handful of already-in-memory
+            // `loaded_sources` — no query to avoid re-running. Sources
+            // loaded before this field existed (`source_file_id` empty,
+            // see `LoadedSource`'s doc comment) are left out rather than
+            // shown as an unclickable/always-empty chip.
+            let available_sources: Vec<(String, String)> = self
+                .loaded_sources
+                .iter()
+                .filter(|s| !s.source_file_id.is_empty())
+                .map(|s| {
+                    (
+                        s.source_file_id.clone(),
+                        source_display_label(&s.path, &s.sourcetype).to_string(),
+                    )
+                })
+                .collect();
+            if let Some(query) = self.filter_bar.ui(
+                ui,
+                &self.available_levels,
+                &self.available_tags,
+                &available_sources,
+                &self.level_counts,
+                &self.tag_counts,
+                &self.source_counts,
+            ) {
                 self.timeline.set_query(query);
                 if let Ok(conn) = persist::open_session_db(&self.session_paths.sqlite_path) {
                     let _ = persist::save_search_query(&conn, self.filter_bar.text());
@@ -1506,6 +1664,7 @@ impl eframe::App for PeachApp {
         self.update_tag_preview_request();
         self.handle_tag_dialog(ui.ctx());
         self.handle_note_dialog(ui.ctx());
+        self.handle_format_dialog(ui.ctx());
         self.raw_fields_dialog.ui(ui.ctx());
         self.handle_session_dialog(ui.ctx());
         self.handle_settings_dialog(ui.ctx());
@@ -1871,6 +2030,7 @@ fn load_one_file(
         path: file_path.display().to_string(),
         sourcetype: ctx.sourcetype.to_string(),
         parser_config_path: ctx.parser_config_path.map(|p| p.display().to_string()),
+        source_file_id: source_file_id.to_string(),
     };
     Ok(Some((tags_applied, loaded_source)))
 }
@@ -2003,6 +2163,7 @@ fn run_parallel(
                                 parser_config_path: ctx
                                     .parser_config_path
                                     .map(|p| p.display().to_string()),
+                                source_file_id: id.to_string(),
                             });
                         }
                         None => summary.skipped.push(SkippedFile {
@@ -2264,6 +2425,7 @@ mod tests {
             path: "/evidence/test".to_string(),
             sourcetype: sourcetype.to_string(),
             parser_config_path: None,
+            source_file_id: String::new(),
         }
     }
 
@@ -2305,6 +2467,35 @@ mod tests {
         let rules = load_rules(&[], true).unwrap();
         assert!(rules.len() >= 33);
         assert!(rules.iter().any(|r| r.rule.tag.value == "wifi_status"));
+    }
+
+    #[test]
+    fn read_preview_lines_caps_at_max_lines() {
+        let dir = temp_test_dir("preview-cap");
+        let path = dir.join("source.log");
+        std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+
+        let lines = read_preview_lines(&path, 3);
+
+        assert_eq!(lines, vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn read_preview_lines_returns_every_line_when_the_file_has_fewer_than_the_cap() {
+        let dir = temp_test_dir("preview-short");
+        let path = dir.join("source.log");
+        std::fs::write(&path, "only one line\n").unwrap();
+
+        let lines = read_preview_lines(&path, 20);
+
+        assert_eq!(lines, vec!["only one line"]);
+    }
+
+    #[test]
+    fn read_preview_lines_is_empty_for_a_missing_file() {
+        let missing = temp_test_dir("preview-missing").join("does-not-exist.log");
+
+        assert!(read_preview_lines(&missing, 20).is_empty());
     }
 
     #[test]

@@ -8,25 +8,29 @@ use regex::Regex;
 use crate::model::log_entry::ParsedRecord;
 use crate::parsers::{LogParser, ParserConfig};
 
+/// `pub(crate)` — also deserialized directly by
+/// [`crate::parsers::text_config_file`] to load an existing config file
+/// back into the "Define format..." dialog's editable fields, so that
+/// dialog can never drift from what this module actually reads.
 #[derive(Debug, Clone, serde::Deserialize)]
-struct PatternConfig {
-    regex: String,
-    timestamp_format: String,
-    multiline_start_pattern: Option<String>,
+pub(crate) struct PatternConfig {
+    pub(crate) regex: String,
+    pub(crate) timestamp_format: String,
+    pub(crate) multiline_start_pattern: Option<String>,
     /// Fixed UTC offset (e.g. `"+02:00"`, `"UTC"`) applied when
     /// `timestamp_format` doesn't carry its own timezone. Set explicitly per
     /// source — takes precedence over any future session-level default,
     /// since a per-source override reflects the analyst's specific
     /// knowledge about that source and shouldn't be silently overruled by a
     /// broader setting.
-    assume_offset: Option<String>,
+    pub(crate) assume_offset: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-struct TextParserFields {
-    pattern: PatternConfig,
+pub(crate) struct TextParserFields {
+    pub(crate) pattern: PatternConfig,
     #[serde(default)]
-    field_mapping: HashMap<String, String>,
+    pub(crate) field_mapping: HashMap<String, String>,
 }
 
 /// Fully TOML-configurable parser for text-based sources (Apache/Nginx,
@@ -129,8 +133,13 @@ fn group_lines<'a>(
     blocks
 }
 
+/// `pub(crate)` — also called directly by
+/// [`crate::parsers::text_config_file`]'s "Define format..." preview, so
+/// the preview shows exactly what a real load would produce (or fail
+/// with) for a given line, rather than a separately-maintained
+/// approximation that could drift from this.
 #[allow(clippy::too_many_arguments)]
-fn parse_block(
+pub(crate) fn parse_block(
     start_line: usize,
     block_lines: &[&str],
     main_regex: &Regex,
@@ -206,7 +215,9 @@ fn parse_timestamp(
         .ok_or_else(|| anyhow!("timestamp '{text}' is ambiguous under offset {offset}"))
 }
 
-fn parse_fixed_offset(s: &str) -> anyhow::Result<FixedOffset> {
+/// `pub(crate)` — reused by [`crate::parsers::text_config_file`] to
+/// validate a draft's `assume_offset` field the same way a real load would.
+pub(crate) fn parse_fixed_offset(s: &str) -> anyhow::Result<FixedOffset> {
     let trimmed = s.trim();
     if trimmed.eq_ignore_ascii_case("utc") || trimmed == "Z" || trimmed == "z" {
         return Ok(FixedOffset::east_opt(0).unwrap());

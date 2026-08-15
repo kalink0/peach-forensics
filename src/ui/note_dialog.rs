@@ -13,6 +13,7 @@
 use eframe::egui;
 
 use crate::model::event_id::EventId;
+use crate::ui::dialog_window::show_dialog_window;
 
 /// What the analyst did — `app.rs` executes it against the session DB, then
 /// calls [`NoteDialog::set_notes`] with a fresh `notes_for_event` read so
@@ -77,10 +78,13 @@ impl NoteDialog {
             new_text,
         } = self
         {
-            egui::Window::new("Notes")
-                .collapsible(false)
-                .resizable(true)
-                .show(ctx, |ui| {
+            close = show_dialog_window(
+                ctx,
+                "peach_note_dialog",
+                "Notes",
+                [420.0, 400.0],
+                true,
+                |ui, close| {
                     if notes.is_empty() {
                         ui.weak("No notes on this event yet.");
                     }
@@ -149,10 +153,11 @@ impl NoteDialog {
                             new_text.clear();
                         }
                         if ui.button("Close").clicked() {
-                            close = true;
+                            *close = true;
                         }
                     });
-                });
+                },
+            );
         }
 
         if close {

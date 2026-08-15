@@ -4,6 +4,15 @@ This covers how to operate Peach today. For what source types are actually
 supported, see [supported-sources.md](supported-sources.md) — this guide assumes
 you already know which sourcetype you're loading.
 
+Every dialog (About, Settings, Notes, Tag this event/Advanced tagging,
+View raw/fields, Define format, Manage sessions, Time range) opens as its
+own real, independent window — draggable anywhere on the desktop,
+including off the main window entirely or onto a second monitor, not
+confined to staying inside the main window the way a typical in-app popup
+would be. Closing one works the normal way for a window on your OS (the
+title bar's close button) as well as via any in-dialog Cancel/Close
+button.
+
 ## Loading a source
 
 1. Pick a **Sourcetype**: `AUL (.logarchive)`, `EVTX`, `journald`, or
@@ -71,6 +80,19 @@ message = "msg"
   used in `field_mapping` — useful for tagging rules and search (`fieldname=...`).
 - A line that doesn't match `pattern.regex` aborts the whole parse with a clear
   error (including the line number) rather than being silently skipped.
+
+Hand-editing that TOML isn't the only way to get there: with `Text (config-based)`
+selected and a source file picked, **"Define format..."** opens a builder for it
+instead — the same fields as above, plus a live preview against the first 20
+lines of the actual picked file. Each preview line shows its named capture
+groups colour-highlighted, and underneath, the exact level/message/timestamp
+a real load would produce for that line (or its exact error, if it wouldn't
+parse) — the preview calls the same parsing code a real **Load** does, so it
+can't show something a real load would then contradict. **Save** writes the
+config to a per-user library (without touching whatever's currently selected
+for the pending load); **Save & Use** does the same and also makes it the
+active parser config, closing the dialog. **Load** next to the saved-configs
+dropdown pulls an existing config's fields back in for editing/reuse.
 
 ## Tagging
 
@@ -145,6 +167,14 @@ Three modes:
   source-specific JSON — for AUL/EVTX/journald this largely overlaps `raw`,
   but for a `text_config` source it's genuinely different: `raw` is the
   literal original line, `fields` is what the regex captured out of it).
+- **Filter by...** — a submenu listing whichever of the clicked row's
+  Sourcetype/Host/Process/Event ID/Subsystem/Category are actually
+  populated for that row (empty ones don't show up); picking one adds (or
+  replaces) an exact-match filter for that value, shown as a removable
+  chip in the **Active filters** row under the search box. This is
+  row-level, not cell-level — the submenu offers every populated field on
+  the row you right-clicked, not only whichever column happened to be
+  under the pointer.
 - **Show context around this event** (± 1 / 5 / 15 / 60 min) — replaces the
   search box with an `after=.../before=...` window centered on the clicked
   row, so you see everything around it rather than only whatever the
@@ -193,19 +223,28 @@ The search box (top of the timeline) uses a small, Splunk-inspired query
 language. Filters apply live as you type — there's no separate "search" button.
 
 - Bare words / `"quoted phrases"` — substring match against `message` OR `raw`.
-- `field=value` / `field:value` — exact match. Recognized fields: `level`,
-  `source` (sourcetype), `tag` (from tagging rules), `message`, `raw`,
-  and every column the **Columns** picker can show — `event_id`, `host`,
-  `process`, `subsystem`, `category`. Each of those is empty/no-match for
-  whichever sourcetypes don't populate that column in the first place (e.g.
-  `event_id=` only ever matches EVTX) — see
-  [field-extraction.md](field-extraction.md) for exactly which sourcetype
-  populates which.
+- `field=value` / `field:value` — exact match, except `source`/`message`/`raw`
+  (substring, like bare-word search — a full path is rarely worth typing out
+  in full). Recognized fields: `level`, `sourcetype` (the format —
+  `aul`/`evtx`/`journald`/...), `source` (the evidence file's path), `tag`
+  (from tagging rules), `message`, `raw`, and every column the **Columns**
+  picker can show — `event_id`, `host`, `process`, `subsystem`, `category`.
+  Each of those is empty/no-match for whichever sourcetypes don't populate
+  that column in the first place (e.g. `event_id=` only ever matches EVTX) —
+  see [field-extraction.md](field-extraction.md) for exactly which
+  sourcetype populates which. A value with spaces (a process name, a
+  hostname) needs quoting right after the `=`, e.g. `process="Windows
+  Explorer"` — otherwise the space splits it into two tokens. The row
+  context menu's **Filter by...** entry always quotes correctly for you.
 - `field!=value` — negated exact match; shorthand for `NOT field=value`
   (identical result, just without the extra word).
 - `field~value` — regex match on that field instead of exact/substring.
 - `tag=*` — has at least one tag, whichever. Combined with negation,
   `NOT tag=*` means "untagged" — there's no separate keyword for it.
+- `source_id=<id>` — exact match against one specific loaded source (not its
+  path — the internal id assigned to that one load). Not meant for hand-typing
+  (see the **Sources** row below); documented here because it's a real,
+  functioning grammar field like any other, not UI-only magic.
 - `after=<timestamp>` / `before=<timestamp>` — bounds on `timestamp_utc`
   (UTC, always). Accepts `2026-07-29T10:00:00`, `2026-07-29 10:00:00` (quote
   it — the space would otherwise split into two tokens), with or without
@@ -219,27 +258,90 @@ language. Filters apply live as you type — there's no separate "search" button
   correctly if nothing else in the query is `AND`-ing against them — see the
   next paragraph for how the buttons avoid this trap.
 
-Example: `source=evtx tag=auth_failure NOT level=INFO "login"`
+Example: `sourcetype=evtx tag=auth_failure NOT level=INFO "login"`
 
-The **Level** and **Tag** button rows under the search box are a shortcut:
-clicking one toggles that value in and out of the search box, populated from
-whatever level/tag values are actually present in the loaded data (AUL's
-level names and a text log's ERROR/WARN/INFO have nothing in common, and
-which tags exist depends entirely on which rules were run, so neither list
-is ever hardcoded). The Tag row only appears once at least one tagging rule
-has produced a tag — either from import-time tagging during Load, or after
-clicking **Re-tag now**.
+The **Level**, **Tag**, and **Sources** dropdowns under the search box are a
+shortcut: each is a button (e.g. `Level`, or `Level (2)` once something's
+selected) that opens a scrollable checklist instead of always showing every
+value as its own button — with a rule pack's worth of tags (AUL's built-in
+pack alone is 33) or many loaded sources, a permanently-visible row would
+otherwise push the timeline further down the screen with every new value.
+Each value's checkbox is followed by a count in parentheses, e.g.
+`wifi_status (1234)` — a note at the top of every dropdown makes clear
+these are for the *whole loaded timeline*, not how many currently match
+your search: they're computed once (after a load or **Re-tag now**), not
+recomputed on every keystroke, so they'd otherwise be easy to misread as a
+live, filter-relative number. "Untagged" doesn't get a count next to it —
+nothing computes that one yet.
 
-Selecting several buttons in the same row means "match any of these", not
-"match all of these" — but since the grammar above has no parentheses, that
-can't be expressed as several `field=value` terms joined by `OR` once
-anything else in the query is `AND`-ing against them. Instead, the buttons
-write a single regex-alternation term, e.g. selecting two tags produces
+Every dropdown offers the same two actions, consistently: a small **only**
+button next to each value — narrows to just that one value, deselecting
+everything else in that field (for Tag, Untagged too) — and a **Show all**
+button, pinned below the scrollable list rather than as its last entry, so
+it stays reachable without scrolling all the way down first. For Level/Tag,
+"Show all" clears the whole selection back to no filter on that field at
+all; for Sources, see below.
+
+Checking a box toggles that value in and out of the search box; the list
+itself is populated from whatever level/tag values are actually present in
+the loaded data (AUL's level names and a text log's ERROR/WARN/INFO have
+nothing in common, and which tags exist depends entirely on which rules were
+run, so neither list is ever hardcoded). The Tag dropdown only appears once
+at least one tagging rule has produced a tag — either from import-time
+tagging during Load, or after clicking **Re-tag now**.
+
+Checking several boxes in Level/Tag means "match any of these", not "match
+all of these" — but since the grammar above has no parentheses, that can't be
+expressed as several `field=value` terms joined by `OR` once anything else in
+the query is `AND`-ing against them. Instead, checking boxes writes a single
+regex-alternation term, e.g. selecting two tags produces
 `tag~^(?:wifi_status|screen_lock_state)$` — one term, so it always combines
-correctly with the rest of the query regardless of order. The **Untagged**
-button next to the Tag row toggles `NOT tag=*` for the same reason it isn't
-just another value button: "no tag" isn't a value that could appear in the
-alternation.
+correctly with the rest of the query regardless of order. An **Untagged**
+checkbox at the bottom of the Tag dropdown toggles `NOT tag=*` for the same
+reason it isn't just another value: "no tag" isn't a value that could appear
+in the alternation.
+
+**Sources** appears once at least one source is loaded, and works the
+opposite way on purpose: it's an *exclusion* list, not an inclusion one.
+Every source starts checked (visible, no filter applied at all), and
+unchecking one hides that source's rows — the source stays loaded, nothing
+is unloaded or re-parsed, it just adds a `NOT source_id=<id>` term. Each
+source's label is colour-coded the same way as the Level/Tags columns.
+Hiding several sources at once needs no special-casing the way Tag/Untagged
+did: each hidden source is its own independent `NOT` term, and plain
+`AND`-ing those together already means exactly "not any of these",
+regardless of where in the query they end up. Each row also has an **only**
+button — hides every *other* loaded source in one click, for isolating a
+single source's timeline instead of unchecking everything else by hand —
+and **Show all** clears every hidden-source term at once.
+
+A **Time range** button opens a small window offering `after=`/`before=`
+via a calendar and a clock instead of typing an ISO timestamp by hand —
+check **After** and/or **Before** (either alone is fine), pick a date,
+adjust the hour/minute/second spinners next to it if needed (click-drag or
+click-to-type, like any other numeric field), then **Apply** (which also
+closes the window; so does **Clear**). Defaults to midnight for After and
+the last second of the day for Before — "the whole day" is the common
+case — freely adjustable from there. A separate window, not a dropdown
+like Level/Tag/Sources: the calendar itself opens its own floating popup,
+and nesting that inside a dropdown's popup made the outer one close the
+instant you tried to click a date — clicking the calendar read as "clicked
+outside the dropdown" to the dropdown itself. Both bounds always write the
+explicit `<date>T<hour>:<minute>:<second>` form, never a bare date — a
+bare date means literal midnight, which as a *before* bound with the time
+left untouched would otherwise silently exclude the rest of that day.
+**Clear** resets both bounds — there's no **only**/**Show all** pair here
+the way the checkbox-list dropdowns have one, since a date range isn't a
+list of discrete values to narrow to one of or reset to "every value".
+
+An **Active filters** row appears under the search box once at least one
+Sourcetype/Host/Process/Event ID/Subsystem/Category filter is set — see the
+row context menu's **Filter by...** entry below for how they get set.
+Each shows as a removable chip (`Host = DESKTOP-1 ✕`); click one to remove
+just that filter, or **Clear all** to remove every one at once (shown once
+there's more than one). Unlike Level/Tag/Sources, there's no dedicated
+dropdown for these six fields — they're set from the row you're looking
+at, not picked from a list of every possible value up front.
 
 ## Sessions
 
