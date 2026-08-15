@@ -411,6 +411,21 @@ impl TimelineView {
         self.recount_total();
     }
 
+    /// Drops the window cache and any in-flight window fetch, without
+    /// touching the row counts — unlike `refresh`, doesn't run a DuckDB
+    /// recount or show "Filtering…". Call after a change that's confined to
+    /// the SQLite session DB (an analyst note or tag edited/added/removed):
+    /// `analyst_tags`/`event_notes` are merged into a window's rows in
+    /// `spawn_window_fetch`, not counted by `count_matching` at all (that
+    /// only ever queries DuckDB's `import_tags`/`log_entries`), so a note or
+    /// manual tag edit can never change `total_rows`/`total_unfiltered_rows`
+    /// — only the next window fetch needs to pick up the new merge.
+    pub fn refresh_window(&mut self) {
+        self.cache = None;
+        self.window_rx = None;
+        self.pending_window_offset = None;
+    }
+
     /// Sets the active search query. Filters apply immediately (no separate
     /// "search" action) — see `filter_bar.rs`.
     pub fn set_query(&mut self, query: Query) {
@@ -851,40 +866,33 @@ impl TimelineView {
                                     ui.label(d.category.as_str());
                                 }
                                 ColumnKind::Tags => {
-                                    let response = ui
-                                        .horizontal_wrapped(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 6.0;
-                                            for tag in &d.tags {
-                                                let color =
-                                                    categorical_color(tag, ui.visuals().dark_mode);
-                                                ui.colored_label(color, tag);
-                                            }
-                                            // A visible marker even when
-                                            // `d.tags` is empty: notes don't
-                                            // require a tag to exist (see
-                                            // `session::persist::insert_event_note`),
-                                            // so an untagged row can still
-                                            // have one, and hover text on an
-                                            // otherwise-empty cell would
-                                            // have nothing to hover over.
-                                            if !d.notes.is_empty() {
-                                                ui.label("📝");
-                                            }
-                                        })
-                                        .response;
-                                    if !d.notes.is_empty() {
-                                        response.on_hover_text(d.notes.join("\n"));
-                                    }
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        for tag in &d.tags {
+                                            let color =
+                                                categorical_color(tag, ui.visuals().dark_mode);
+                                            ui.colored_label(color, tag);
+                                        }
+                                        // A visible marker even when
+                                        // `d.tags` is empty: notes don't
+                                        // require a tag to exist (see
+                                        // `session::persist::insert_event_note`),
+                                        // so an untagged row can still have
+                                        // one. The note text itself isn't
+                                        // attached as hover text here — see
+                                        // the row-spanning interact widget
+                                        // below, where it actually has a
+                                        // chance of registering as hovered.
+                                        if !d.notes.is_empty() {
+                                            ui.label("📝");
+                                        }
+                                    });
                                 }
                                 ColumnKind::Notes => {
                                     if !d.notes.is_empty() {
                                         // Multiple notes on one event joined
-                                        // with " | " for a single-line cell
-                                        // — the full, one-per-line text is
-                                        // still a hover away, same as the
-                                        // Tags column's 📝 marker.
-                                        ui.label(d.notes.join(" | "))
-                                            .on_hover_text(d.notes.join("\n"));
+                                        // with " | " for a single-line cell.
+                                        ui.label(d.notes.join(" | "));
                                     }
                                 }
                                 ColumnKind::Message => {
@@ -920,11 +928,25 @@ impl TimelineView {
 
                                 let full_row_rect = full_row_rect
                                     .map_or(ui.max_rect(), |acc| acc.union(ui.max_rect()));
-                                let row_response = ui.interact(
+                                let mut row_response = ui.interact(
                                     full_row_rect,
                                     ui.id().with(("row_context_menu", row_index)),
                                     egui::Sense::click(),
                                 );
+
+                                if !d.notes.is_empty() {
+                                    // Attached here, not on the Tags/Notes
+                                    // cells' own widgets: this row-spanning
+                                    // interact widget is created after every
+                                    // per-cell one, and egui only reports the
+                                    // topmost click-sensing widget under the
+                                    // pointer as hovered — an underlying
+                                    // widget's own `.on_hover_text()` never
+                                    // fires once this one exists over it, so
+                                    // this is the only widget in the row a
+                                    // tooltip can actually attach to.
+                                    row_response = row_response.on_hover_text(d.notes.join("\n"));
+                                }
 
                                 row_response.context_menu(|ui| {
                                     if ui.button("Copy message").clicked() {
@@ -1404,6 +1426,40 @@ mod tests {
         wait_for_count(&mut view, &ctx);
 
         assert_eq!(view.total_rows(), 3);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    /// Regression test for the note/manual-tag "Filtering…" flash: adding a
+    /// note or an analyst tag only changes the SQLite session DB, which
+    /// `count_matching` never queries, so `refresh_window` must drop the
+    /// window cache (so the next fetch picks up the new note/tag merge)
+    /// without kicking off a recount or flipping `counting` — unlike
+    /// `refresh`, which does both.
+    #[test]
+    fn refresh_window_drops_the_cache_without_recounting() {
+        let db_path = temp_db_path("refresh-window");
+        seed_db(&db_path, &["one", "two", "three"]);
+        let ctx = egui::Context::default();
+
+        let mut view = TimelineView::new(db_path.clone(), temp_sqlite_path("session"));
+        view.refresh();
+        wait_for_count(&mut view, &ctx);
+        wait_for_total(&mut view, &ctx);
+        view.ensure_window(0);
+        wait_for_window(&mut view, &ctx);
+        assert!(view.cache.is_some());
+
+        view.refresh_window();
+
+        assert!(view.cache.is_none());
+        assert!(view.window_rx.is_none());
+        assert!(view.pending_window_offset.is_none());
+        // Row counts survive untouched, and no new background count was
+        // spawned — the whole point of `refresh_window` over `refresh`.
+        assert!(!view.counting);
+        assert!(view.count_rx.is_none());
+        assert_eq!(view.total_rows(), 3);
+        assert_eq!(view.total_unfiltered_rows(), 3);
         std::fs::remove_file(db_path).unwrap();
     }
 

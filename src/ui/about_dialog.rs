@@ -71,9 +71,8 @@ fn about_tab(ui: &mut egui::Ui) {
          search syntax and semantic tagging.",
     );
     ui.label(
-        "Part of the Finding-Nemo ecosystem: can be started standalone or \
-         handed evidence paths by crush, then runs completely \
-         independently (no IPC).",
+        "Runs standalone, or can be started and handed evidence paths by \
+         crush, then continues completely independently (no IPC).",
     );
     ui.add_space(6.0);
     ui.label("Licensed under the Apache License 2.0");
@@ -137,6 +136,23 @@ fn acknowledgements_tab(ui: &mut egui::Ui) {
                 ui.end_row();
             }
         });
+
+    ui.add_space(10.0);
+    ui.strong("Research");
+    ui.label(
+        "The built-in AUL pattern-of-life rule pack (rules/examples/aul_*.toml) \
+         is built on predicates from \"Apple Unified Log Predicates in \
+         iLEAPP: The Reference\" by Alexis Brignoni, rather than re-derived \
+         from scratch \u{2014} leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference.",
+    );
+
+    ui.add_space(10.0);
+    ui.strong("Special thanks");
+    ui.label(
+        "@dugeonlady — for suggesting the Rainbow theme in crush. Peach's \
+         Rainbow theme (View \u{2192} Theme \u{2192} Rainbow) carries over \
+         the same cycle and colors.",
+    );
 
     ui.add_space(10.0);
     ui.strong("Development tools");

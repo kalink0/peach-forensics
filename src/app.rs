@@ -624,7 +624,7 @@ impl PeachApp {
         {
             self.note_dialog.set_notes(notes);
         }
-        self.timeline.refresh();
+        self.timeline.refresh_window();
     }
 
     /// The event a still-open `NoteDialog` is showing, if any — needed by
@@ -711,7 +711,7 @@ impl PeachApp {
                 if let Ok(conn) = persist::open_session_db(&self.session_paths.sqlite_path) {
                     let _ = persist::insert_analyst_tag(&conn, event_id, &tag_value);
                 }
-                self.timeline.refresh();
+                self.timeline.refresh_window();
             }
             TagDialogOutcome::CreateRule {
                 rule_name,

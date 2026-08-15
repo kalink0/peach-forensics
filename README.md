@@ -4,8 +4,9 @@ A lean, local-first forensic log viewer for DFIR work. Parses log sources into a
 normalized, taggable timeline stored in DuckDB, with a Splunk-inspired search syntax
 and a SQLite session layer for analyst tags. Rust + egui, no server, no cloud.
 
-Part of the Finding-Nemo ecosystem: can be started standalone or handed evidence paths
-by `crush`, then runs completely independently (no IPC).
+Runs standalone, or can be started and handed evidence paths by
+[crush](https://github.com/kalink0/crush-forensics), then continues completely
+independently (no IPC).
 
 ## Status
 
@@ -14,7 +15,17 @@ text log parsing, import-time and re-tag tagging, session persistence, and CLI
 source handoff. See [docs/supported-sources.md](docs/supported-sources.md) for the
 authoritative, up-to-date list of what actually works today.
 
+## Download
+
+Prebuilt binaries for Linux, Windows, macOS (Apple Silicon and Intel) are attached to
+every [GitHub release](https://github.com/kalink0/peach-forensics/releases) — no Rust
+toolchain or build step needed. A [nightly build](https://github.com/kalink0/peach-forensics/releases/tag/nightly)
+tracks `main` and is rebuilt automatically whenever new commits land.
+
 ## Building and running
+
+Building from source is only needed to modify peach yourself — see
+[Download](#download) above for ready-to-run binaries.
 
 Requires a Rust toolchain (stable) and a C/C++ compiler + CMake (DuckDB is compiled
 from source on first build).
@@ -53,3 +64,36 @@ no durable unencrypted session copy should be left behind.
   tagging rules, search syntax, sessions
 - [docs/supported-sources.md](docs/supported-sources.md) — supported/planned source
   types
+- [CHANGELOG.md](CHANGELOG.md) — what changed in each release
+
+## Acknowledgements
+
+Peach builds on the open-source and DFIR community. AUL (`.logarchive`) parsing
+uses [macos-unifiedlogs](https://github.com/mandiant/macos-UnifiedLogs) by
+[Mandiant](https://github.com/mandiant) (Apache-2.0); EVTX parsing uses
+[evtx](https://github.com/omerbenamram/evtx) by
+[@omerbenamram](https://github.com/omerbenamram) (MIT/Apache-2.0). The GUI is
+built on [egui/eframe](https://egui.rs); the bulk timeline on
+[DuckDB](https://duckdb.org) via `duckdb-rs`; the session layer on SQLite via
+`rusqlite`. See the in-app **Help → About → Acknowledgements** tab for the
+full dependency list with licenses.
+
+The built-in AUL pattern-of-life rule pack (`rules/examples/aul_*.toml`) is
+built on published DFIR research, not re-derived from scratch: predicates are
+sourced from ["Apple Unified Log Predicates in iLEAPP: The
+Reference"](https://leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference)
+by Alexis Brignoni. See [user-guide.md](docs/user-guide.md#tagging) for the
+full rule pack breakdown.
+
+Special thanks to [@dugeonlady](https://github.com/dugeonlady) for suggesting
+the Rainbow theme in crush — Peach's Rainbow theme (*View → Theme → Rainbow*)
+carries over the same cycle and colors. Forensics tools don't have to be grey.
+
+Parts of this software were developed with assistance from
+[Claude AI / Claude Code](https://claude.ai) by Anthropic.
+
+## Bugs and feature requests
+
+Use [GitHub Issues](https://github.com/kalink0/peach-forensics/issues). Please
+include the Peach version (shown in **Help → About**), your OS, and steps to
+reproduce.
