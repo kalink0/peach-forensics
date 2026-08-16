@@ -1,0 +1,18 @@
+# EVTX: a shutdown or restart was requested — logged by the process/user
+# that requested it (provider "User32"), including a reason code and
+# whether it was planned. More informative than 6006 (event log service
+# stopped) for *who/what* initiated a shutdown, so used here as this
+# pack's "clean shutdown" marker instead. Reference: Microsoft's own
+# troubleshooting guide for exactly this event set:
+# https://learn.microsoft.com/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs
+
+[rule]
+name = "evtx_system_shutdown_requested"
+description = "A system shutdown or restart was requested, with requestor and reason (1074)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 1074
+
+[rule.tag]
+value = "system_shutdown"

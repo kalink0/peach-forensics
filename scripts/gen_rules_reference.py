@@ -53,12 +53,15 @@ def build_table(rows: list[dict]) -> str:
 def main():
     aul_files = sorted(RULES_DIR.glob("aul_*.toml"))
     evtx_files = sorted(RULES_DIR.glob("evtx_*.toml"))
+    journald_files = sorted(RULES_DIR.glob("journald_*.toml"))
 
     aul_rules = [load_rule(p) for p in aul_files]
     evtx_rules = [load_rule(p) for p in evtx_files]
+    journald_rules = [load_rule(p) for p in journald_files]
 
     aul_rules.sort(key=lambda r: r["name"])
     evtx_rules.sort(key=lambda r: r["match"].get("event_id", 0))
+    journald_rules.sort(key=lambda r: r["name"])
 
     out = []
     out.append("# Tagging Rule Reference")
@@ -72,7 +75,7 @@ def main():
     )
     out.append("")
     out.append(
-        "Both packs below ship **embedded in the binary itself** "
+        "All three packs below ship **embedded in the binary itself** "
         "(`build.rs` + `src/tagging/builtin.rs`) and every rule in them is "
         "enabled by default — see [user-guide.md](user-guide.md#tagging) "
         "for the \"Built-in rules...\" picker that lets you enable/disable "
@@ -82,10 +85,12 @@ def main():
     out.append(f"## AUL pattern-of-life rules ({len(aul_rules)})")
     out.append("")
     out.append(
-        "Predicates sourced from [\"Apple Unified Log Predicates in "
+        "Most predicates sourced from [\"Apple Unified Log Predicates in "
         "iLEAPP: The Reference\"](https://leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference) "
-        "(Alexis Brignoni) — see each rule file's header comment for the "
-        "specific predicate section cited. Every rule matches "
+        "(Alexis Brignoni), with a handful of newer, higher-precision ones "
+        "from Tim Korver's [Thesis Friday](https://thesisfriday.com/) "
+        "series instead — see each rule file's header comment for the "
+        "specific citation either way. Every rule matches "
         "`sourcetype = \"aul\"`."
     )
     out.append("")
@@ -104,9 +109,26 @@ def main():
     out.append("")
     out.append(build_table(evtx_rules))
     out.append("")
+    out.append(f"## journald rules ({len(journald_rules)})")
+    out.append("")
+    out.append(
+        "Message text sourced directly from the logging daemons' own "
+        "source (OpenSSH, sudo, shadow-utils) rather than re-derived from "
+        "memory — see each rule file's header comment for the specific "
+        "citation. Every rule matches `sourcetype = \"journald\"` and scopes "
+        "itself to a specific `process` (journald's `SYSLOG_IDENTIFIER`), "
+        "since message text alone is the only signal journald offers — "
+        "unlike EVTX's structured `event_id`."
+    )
+    out.append("")
+    out.append(build_table(journald_rules))
+    out.append("")
 
     OUT_PATH.write_text("\n".join(out))
-    print(f"wrote {OUT_PATH} ({len(aul_rules)} AUL + {len(evtx_rules)} EVTX rules)")
+    print(
+        f"wrote {OUT_PATH} ({len(aul_rules)} AUL + {len(evtx_rules)} EVTX + "
+        f"{len(journald_rules)} journald rules)"
+    )
 
 
 if __name__ == "__main__":

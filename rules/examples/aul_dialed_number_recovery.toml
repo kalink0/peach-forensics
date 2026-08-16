@@ -1,0 +1,29 @@
+# AUL pattern-of-life: recovering a dialed phone number in plain text.
+# Distinct from — and more direct than — aul_call_events.toml's keypad-tone
+# actionID tracking (which only lets a number be reconstructed digit by
+# digit from sound requests): CommCenter's own call-provider subsystem logs
+# the actual number via a "kPhoneNumber" field. A separate tag from
+# call_events on purpose, so an analyst can filter specifically for entries
+# that may carry a recoverable number rather than generic call start/end
+# noise.
+#
+# The article also documents a ContactSearchManager "Searching for <number>"
+# entry that distinguishes on-device keypad entry from CarPlay input — not
+# included here as its own condition: "Searching for" alone is far too
+# generic a phrase (Spotlight, in-app search, etc.) to trust without also
+# scoping to its subsystem, and this rule pack's convention is plain
+# message-substring matching, not per-field scoping.
+#
+# Source: Thesis Friday #24 (Tim Korver), tested on iOS 26.6 (build 23G71):
+# https://thesisfriday.com/thesis-friday-24-recovering-a-dialed-number-from-the-unified-log/
+
+[rule]
+name = "aul_dialed_number_recovery"
+description = "CommCenter entries that may carry a dialed number in plain text (kPhoneNumber)"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = "kPhoneNumber"
+
+[rule.tag]
+value = "dialed_number_recovery"

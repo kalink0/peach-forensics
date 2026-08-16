@@ -1,0 +1,21 @@
+# EVTX: Kernel-Power's own unexpected-reboot marker (provider
+# "Microsoft-Windows-Kernel-Power") — the system started back up without a
+# clean shutdown having been logged first (power loss, crash/bugcheck, a
+# forced/hard reset). Shares the `unexpected_shutdown` tag with
+# evtx_6008_unexpected_shutdown.toml (the Event Log service's own signal
+# for the same underlying class of event) rather than a separate tag —
+# same real-world event, two different providers logging it.
+# Reference: Microsoft's own troubleshooting guide for exactly this event
+# set:
+# https://learn.microsoft.com/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs
+
+[rule]
+name = "evtx_kernel_power_unexpected_reboot"
+description = "Kernel-Power's own unexpected-reboot marker (41)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 41
+
+[rule.tag]
+value = "unexpected_shutdown"

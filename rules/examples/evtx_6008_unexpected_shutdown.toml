@@ -1,0 +1,20 @@
+# EVTX: unexpected/dirty shutdown detected — logged by the Event Log
+# service (provider "EventLog") on the *next* boot after a shutdown that
+# didn't go through the normal, logged path (power loss, crash, an
+# attacker forcing a reboot to disrupt investigation). Shares the
+# `unexpected_shutdown` tag with evtx_41_kernel_power_unexpected_reboot.toml
+# (Kernel-Power's own, more immediate signal for the same class of event).
+# Reference: Microsoft's own troubleshooting guide for exactly this event
+# set:
+# https://learn.microsoft.com/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs
+
+[rule]
+name = "evtx_unexpected_shutdown_detected"
+description = "An unexpected/dirty shutdown was detected on the previous boot (6008)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 6008
+
+[rule.tag]
+value = "unexpected_shutdown"

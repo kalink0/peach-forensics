@@ -1,0 +1,16 @@
+# journald: a local user account was deleted. userdel's own SYSLOG() call
+# is `"delete user '%s'\n"` — confirmed directly against shadow-utils
+# source:
+# https://github.com/shadow-maint/shadow/blob/master/src/userdel.c
+
+[rule]
+name = "journald_account_deleted"
+description = "A local user account was deleted via userdel"
+
+[rule.match]
+sourcetype = "journald"
+process = "userdel"
+message_contains = "delete user '"
+
+[rule.tag]
+value = "account_deleted"

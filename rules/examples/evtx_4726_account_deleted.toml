@@ -1,0 +1,15 @@
+# EVTX Security-Auditing: a user account was deleted. Reference:
+# Microsoft's official Security Auditing event reference,
+# "4726(S) A user account was deleted":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4726
+
+[rule]
+name = "evtx_account_deleted"
+description = "A user account was deleted (Security-Auditing 4726)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4726
+
+[rule.tag]
+value = "account_deleted"

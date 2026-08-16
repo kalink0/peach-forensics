@@ -1,0 +1,17 @@
+# EVTX Security-Auditing: a scheduled task was deleted — same "Audit Other
+# Object Access Events" subcategory caveat as 4698's own rule
+# (evtx_4698_scheduled_task_created.toml). Reference: Microsoft's official
+# Security Auditing event reference,
+# "4699(S) A scheduled task was deleted":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4699
+
+[rule]
+name = "evtx_scheduled_task_deleted"
+description = "A scheduled task was deleted (Security-Auditing 4699)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4699
+
+[rule.tag]
+value = "scheduled_task_deleted"

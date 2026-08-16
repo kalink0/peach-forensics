@@ -64,6 +64,13 @@ fn main() {
         "EVTX_RULE_TOMLS",
         "evtx_builtin_rules.rs",
     );
+    embed_toml_dir(
+        &manifest_dir,
+        "rules/examples",
+        "journald_",
+        "JOURNALD_RULE_TOMLS",
+        "journald_builtin_rules.rs",
+    );
 
     #[cfg(windows)]
     embed_windows_icon();

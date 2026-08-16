@@ -1,0 +1,21 @@
+# journald: a local user account was modified via usermod — rename, UID/
+# GID change, home directory, shell, inactivity period, or expiration date.
+# All of usermod's own SYSLOG() calls for these share the same
+# `"change user '%s' ..."` prefix — confirmed directly against shadow-utils
+# source:
+# https://github.com/shadow-maint/shadow/blob/master/src/usermod.c
+# Deliberately excludes group membership changes ("add '%s' to group '%s'"/
+# "delete '%s' from group '%s'"), which use a different message shape — see
+# journald_group_membership_change.toml.
+
+[rule]
+name = "journald_account_modified"
+description = "A local user account was modified via usermod"
+
+[rule.match]
+sourcetype = "journald"
+process = "usermod"
+message_contains = "change user '"
+
+[rule.tag]
+value = "account_modified"

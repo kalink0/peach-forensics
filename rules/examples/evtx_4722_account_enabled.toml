@@ -1,0 +1,15 @@
+# EVTX Security-Auditing: a user account was enabled. Reference: Microsoft's
+# official Security Auditing event reference,
+# "4722(S) A user account was enabled":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4722
+
+[rule]
+name = "evtx_account_enabled"
+description = "A user account was enabled (Security-Auditing 4722)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4722
+
+[rule.tag]
+value = "account_enabled"

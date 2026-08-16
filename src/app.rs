@@ -413,23 +413,26 @@ fn source_path_and_queue_from_pick(mut picked: Vec<PathBuf>) -> Option<(PathBuf,
 }
 
 /// Whether the "Built-in rules..." button is worth showing at all. Every
-/// built-in rule (either pack) only ever matches AUL or EVTX entries (a
-/// hard-coded `sourcetype` condition on every rule — see
-/// `tagging::builtin`), so offering the button while the analyst is about
-/// to load something else, with no AUL/EVTX data loaded either, would
-/// offer a control that provably cannot affect anything currently
-/// relevant: neither the upcoming load nor a re-tag of what's already in
-/// the timeline. True either when an AUL or EVTX load is about to happen
-/// (current `source_kind`) or when the session already holds at least one
-/// loaded AUL/EVTX source that "Re-tag now" could apply the rules to.
+/// built-in rule (any of the three packs) only ever matches AUL, EVTX, or
+/// journald entries (a hard-coded `sourcetype` condition on every rule —
+/// see `tagging::builtin`), so offering the button while the analyst is
+/// about to load something else, with none of those three already loaded
+/// either, would offer a control that provably cannot affect anything
+/// currently relevant: neither the upcoming load nor a re-tag of what's
+/// already in the timeline. True either when an AUL/EVTX/journald load is
+/// about to happen (current `source_kind`) or when the session already
+/// holds at least one loaded source of one of those three sourcetypes that
+/// "Re-tag now" could apply the rules to.
 fn builtin_rules_button_is_relevant(
     source_kind: SourceKind,
     loaded_sources: &[LoadedSource],
 ) -> bool {
-    matches!(source_kind, SourceKind::Aul | SourceKind::Evtx)
-        || loaded_sources
-            .iter()
-            .any(|source| source.sourcetype == "aul" || source.sourcetype == "evtx")
+    matches!(
+        source_kind,
+        SourceKind::Aul | SourceKind::Evtx | SourceKind::Journald
+    ) || loaded_sources
+        .iter()
+        .any(|source| matches!(source.sourcetype.as_str(), "aul" | "evtx" | "journald"))
 }
 
 impl PeachApp {
@@ -1190,6 +1193,18 @@ fn find_rule_producing_tag(rule_paths: &[PathBuf], tag_value: &str) -> Option<Pa
     }
 }
 
+/// GitHub-hosted, not a local file path: release builds ship only the
+/// binary (`build.rs` embeds the rule *files themselves*, but not
+/// `docs/rules-reference.md`, which is generated from them for browsing,
+/// not needed at runtime) — a repo-relative path would silently point at
+/// nothing once Peach isn't running from a git checkout. Points at `main`
+/// rather than pinning a release tag, so the link itself never needs
+/// updating — the tradeoff is that it can show rules newer than whatever
+/// release the analyst is actually running, same as any other
+/// "see the latest docs" link.
+const RULES_REFERENCE_URL: &str =
+    "https://github.com/kalink0/peach-forensics/blob/main/docs/rules-reference.md";
+
 impl eframe::App for PeachApp {
     fn on_exit(&mut self) {
         // Best-effort: a session that was never loaded into (just created
@@ -1527,6 +1542,11 @@ impl eframe::App for PeachApp {
                 ui.menu_button("Help", |ui| {
                     if ui.button("About Peach...").clicked() {
                         self.about_dialog = AboutDialog::open();
+                        ui.close();
+                    }
+                    if ui.button("Rules reference...").clicked() {
+                        ui.ctx()
+                            .open_url(egui::OpenUrl::same_tab(RULES_REFERENCE_URL));
                         ui.close();
                     }
                 });
@@ -3020,22 +3040,33 @@ mod tests {
     }
 
     #[test]
+    fn builtin_rules_button_is_relevant_when_source_kind_is_journald() {
+        assert!(builtin_rules_button_is_relevant(SourceKind::Journald, &[]));
+    }
+
+    #[test]
     fn builtin_rules_button_is_relevant_when_an_aul_source_is_already_loaded() {
-        let loaded = [loaded_source("journald"), loaded_source("aul")];
+        let loaded = [loaded_source("text_config"), loaded_source("aul")];
         assert!(builtin_rules_button_is_relevant(SourceKind::Text, &loaded));
     }
 
     #[test]
     fn builtin_rules_button_is_relevant_when_an_evtx_source_is_already_loaded() {
-        let loaded = [loaded_source("journald"), loaded_source("evtx")];
+        let loaded = [loaded_source("text_config"), loaded_source("evtx")];
         assert!(builtin_rules_button_is_relevant(SourceKind::Text, &loaded));
     }
 
     #[test]
-    fn builtin_rules_button_is_not_relevant_with_neither_aul_nor_evtx_involved() {
-        let loaded = [loaded_source("journald"), loaded_source("text_config")];
+    fn builtin_rules_button_is_relevant_when_a_journald_source_is_already_loaded() {
+        let loaded = [loaded_source("text_config"), loaded_source("journald")];
+        assert!(builtin_rules_button_is_relevant(SourceKind::Text, &loaded));
+    }
+
+    #[test]
+    fn builtin_rules_button_is_not_relevant_with_none_of_the_three_sourcetypes_involved() {
+        let loaded = [loaded_source("text_config")];
         assert!(!builtin_rules_button_is_relevant(SourceKind::Text, &loaded));
-        assert!(!builtin_rules_button_is_relevant(SourceKind::Journald, &[]));
+        assert!(!builtin_rules_button_is_relevant(SourceKind::Text, &[]));
     }
 
     fn no_builtin_rules() -> std::collections::BTreeSet<String> {

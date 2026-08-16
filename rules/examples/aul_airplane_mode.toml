@@ -2,6 +2,12 @@
 # Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
 # (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive airplane mode".
+#
+# "isAirplaneMode = 0/1" added from Thesis Friday #13 (Tim Korver), which
+# documents this as the predicate actually seen on iOS 26 beta 1 —
+# https://thesisfriday.com/thesis-friday-13-aul-detecting-airplane-mode-activation-in-ios-26-beta/
+# — never leave the current mainstream OS version's variant unimplemented
+# just because an older predicate list didn't cover it.
 
 [rule]
 name = "aul_airplane_mode"
@@ -23,6 +29,8 @@ message_contains = [
     "Airplane mode Disabled",
     "Toggle AirPlane Mode state",
     "Setting airplane mode enabled",
+    "isAirplaneMode = 1",
+    "isAirplaneMode = 0",
 ]
 
 [rule.tag]

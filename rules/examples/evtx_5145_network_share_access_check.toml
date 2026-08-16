@@ -1,0 +1,21 @@
+# EVTX Security-Auditing: a network share object was checked for access —
+# fires on every SMB file-share access attempt, allowed or denied. High
+# value for lateral-movement/tool-transfer detection (PsExec, Impacket
+# tools, and similar all touch admin shares like ADMIN$/C$ this way).
+# Requires Object Access auditing for file shares to be enabled, same
+# caveat as this pack's other object-access-dependent rules
+# (evtx_4698/4699_scheduled_task_*.toml). Reference: Microsoft's official
+# Security Auditing event reference, "5145(S, F) A network share object
+# was checked to see whether client can be granted desired access":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-5145
+
+[rule]
+name = "evtx_network_share_access_check"
+description = "A network share (SMB) object access was checked (Security-Auditing 5145)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 5145
+
+[rule.tag]
+value = "network_share_access"

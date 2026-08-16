@@ -1,0 +1,17 @@
+# journald: a user was added to or removed from a group via usermod
+# (-G/-a -G). usermod's own SYSLOG() calls are `"add '%s' to group '%s'"`
+# and `"delete '%s' from group '%s'"` — confirmed directly against
+# shadow-utils source:
+# https://github.com/shadow-maint/shadow/blob/master/src/usermod.c
+
+[rule]
+name = "journald_group_membership_change"
+description = "A user was added to or removed from a group via usermod"
+
+[rule.match]
+sourcetype = "journald"
+process = "usermod"
+message_contains = ["' to group '", "' from group '"]
+
+[rule.tag]
+value = "group_membership_change"

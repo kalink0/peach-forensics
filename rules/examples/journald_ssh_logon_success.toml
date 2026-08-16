@@ -1,0 +1,24 @@
+# journald: successful SSH authentication. OpenSSH's auth_log() always
+# writes the message as "<authmsg> <method> for <user> from <addr> port
+# <port> ssh2...", where authmsg is "Accepted" on success — see auth.c:
+# https://github.com/openssh/openssh-portable/blob/master/auth.c
+# (the auth_log() format string, and its callers passing "Accepted").
+# Scoped to process = "sshd" (journald's SYSLOG_IDENTIFIER) rather than
+# matching the substring alone, since "Accepted" on its own is too generic
+# to trust from an arbitrary process.
+
+[rule]
+name = "journald_ssh_logon_success"
+description = "Successful SSH authentication (sshd \"Accepted ...\")"
+
+[rule.match]
+sourcetype = "journald"
+process = "sshd"
+message_contains = [
+    "Accepted password for",
+    "Accepted publickey for",
+    "Accepted keyboard-interactive",
+]
+
+[rule.tag]
+value = "logon_success"

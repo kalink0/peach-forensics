@@ -1,0 +1,18 @@
+# EVTX Security-Auditing: a session was disconnected from a Window
+# Station — an RDP disconnect (not a full logoff) or Fast User Switching
+# away from an existing desktop; counterpart to 4778's reconnect
+# (evtx_4778_session_reconnected.toml). Reference: Microsoft's official
+# Security Auditing event reference,
+# "4779(S) A session was disconnected from a Window Station":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4779
+
+[rule]
+name = "evtx_session_disconnected"
+description = "A session was disconnected from a Window Station (Security-Auditing 4779)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4779
+
+[rule.tag]
+value = "session_disconnected"

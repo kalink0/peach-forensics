@@ -1,0 +1,19 @@
+# AUL pattern-of-life: physical device orientation changes (portrait,
+# landscape, face up/down), logged by backboardd's CoreMotion-backed
+# orientation subsystem. Logs more densely while the screen is on and the
+# device is being actively handled, sparsely while screen-off — a rough
+# proxy for handling activity independent of touch/unlock events.
+#
+# Source: Thesis Friday #2 (Tim Korver):
+# https://thesisfriday.com/thesis-friday-2-aul-device-orientation/
+
+[rule]
+name = "aul_device_orientation"
+description = "Device orientation transitions (portrait/landscape/face up-down)"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = "Received orientation."
+
+[rule.tag]
+value = "device_orientation"

@@ -1,0 +1,23 @@
+# journald: system boot marker — the Linux kernel prints its own version
+# banner ("Linux version X.X.X ...") as literally the first line it ever
+# writes to its ring buffer on every single boot, forwarded into the
+# journal by systemd-journald. Scoped to the `_TRANSPORT` field (a
+# standard trusted journal field, always "kernel" for kernel-ring-buffer
+# messages — confirmed against systemd's own journalctl documentation,
+# the `-k`/`--dmesg` flag's exact match is `_TRANSPORT=kernel`) rather than
+# `process`/`SYSLOG_IDENTIFIER`, which isn't a reliable discriminator for
+# kernel messages the way `_TRANSPORT` is. Shares the `system_boot` tag
+# with EVTX's own boot marker (evtx_6005_system_boot.toml) — same concept,
+# different sourcetype.
+
+[rule]
+name = "journald_kernel_boot"
+description = "System boot — kernel version banner, the first ring-buffer message of every boot"
+
+[rule.match]
+sourcetype = "journald"
+_TRANSPORT = "kernel"
+message_contains = "Linux version"
+
+[rule.tag]
+value = "system_boot"

@@ -6,6 +6,11 @@
 # Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
 # (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive biometric sensor events".
+#
+# "setFingerOnState: FingerON" added from Thesis Friday #16 (Tim Korver),
+# documenting the macOS Touch ID sensor stack specifically — a genuinely
+# different subsystem/predicate from the iOS home-button predicates above:
+# https://thesisfriday.com/thesis-friday-16-unlocking-a-macbook-with-the-touch-id-sensor/
 
 [rule]
 name = "aul_biometric_sensor_events"
@@ -19,6 +24,7 @@ message_contains = [
     "[User Presence Monitor]",
     "kAppleBiometricFinger",
     "Home Button Was Pressed",
+    "setFingerOnState: FingerON",
 ]
 
 [rule.tag]

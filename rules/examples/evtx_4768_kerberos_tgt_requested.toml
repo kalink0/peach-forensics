@@ -1,0 +1,19 @@
+# EVTX Security-Auditing: a Kerberos Ticket Granting Ticket (TGT) was
+# requested — domain controllers only. Base signal for Kerberos-based
+# attacks (Golden Ticket forgery shows up as anomalous 4768s; AS-REP
+# Roasting targets accounts with Kerberos pre-authentication disabled,
+# visible via this event's Pre-Authentication Type field). Reference:
+# Microsoft's official Security Auditing event reference,
+# "4768(S, F) A Kerberos authentication ticket (TGT) was requested":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4768
+
+[rule]
+name = "evtx_kerberos_tgt_requested"
+description = "A Kerberos TGT was requested — domain controllers only (Security-Auditing 4768)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4768
+
+[rule.tag]
+value = "kerberos_tgt_requested"

@@ -1,0 +1,15 @@
+# EVTX Security-Auditing: a user account was disabled. Reference:
+# Microsoft's official Security Auditing event reference,
+# "4725(S) A user account was disabled":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4725
+
+[rule]
+name = "evtx_account_disabled"
+description = "A user account was disabled (Security-Auditing 4725)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4725
+
+[rule.tag]
+value = "account_disabled"

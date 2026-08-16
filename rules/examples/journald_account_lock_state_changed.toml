@@ -1,0 +1,27 @@
+# journald: an account's password was locked or unlocked via usermod (-L/
+# -U). usermod's own SYSLOG() calls are `"lock user '%s' password"` and
+# `"unlock user '%s' password"` — confirmed directly against shadow-utils
+# source:
+# https://github.com/shadow-maint/shadow/blob/master/src/usermod.c
+#
+# Deliberately one tag for both directions, not split into
+# account_locked/account_unlocked: "lock user '" is a literal substring of
+# "unlock user '" (u-n-LOCK USER '...), and this engine's message_contains
+# is a plain substring search with no start-of-string anchoring — a rule
+# keyed on "lock user '" alone would silently also match every unlock line.
+# Splitting them would need either a longer non-overlapping anchor (none
+# exists in the actual message text) or regex support this rule format
+# doesn't have, so a single lock-state-changed tag is the honest option
+# rather than shipping one that quietly mislabels half its matches.
+
+[rule]
+name = "journald_account_lock_state_changed"
+description = "An account was locked or unlocked via usermod -L/-U"
+
+[rule.match]
+sourcetype = "journald"
+process = "usermod"
+message_contains = "lock user '"
+
+[rule.tag]
+value = "account_lock_state_changed"

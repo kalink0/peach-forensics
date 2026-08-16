@@ -1,0 +1,24 @@
+# AUL pattern-of-life: Apple Watch Digital Crown and side button physical
+# interactions (watchOS only — a raw activity ID precedes each of these in
+# the actual log line, e.g. "Created Activity ID: 0x5d15a, Description:
+# Crown down", but that ID is randomly assigned per session and not usable
+# as a stable match pattern, so only the "Description: ..." text is
+# matched here).
+#
+# Source: Thesis Friday #18 (Tim Korver), tested on watchOS 26.2:
+# https://thesisfriday.com/thesis-friday-18-apple-watch-crown-and-side-button-interactions/
+
+[rule]
+name = "aul_watch_crown_button"
+description = "Apple Watch Digital Crown / side button physical interaction"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "Description: Crown down",
+    "Description: Button held",
+    "Description: Button long-held",
+]
+
+[rule.tag]
+value = "watch_crown_button"

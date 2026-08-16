@@ -1,0 +1,25 @@
+# journald: a sudo attempt that failed authentication or was refused.
+# Exact wording confirmed against sudo's own source
+# (plugins/sudoers/logging.c):
+# https://github.com/sudo-project/sudo/blob/main/plugins/sudoers/logging.c
+# — "%u incorrect password attempt(s)" on a wrong password, "is not allowed
+# to run sudo on"/"is not in the sudoers file" when the user has no sudo
+# access at all, "command not allowed" when a specific command is refused
+# by policy.
+
+[rule]
+name = "journald_sudo_denied"
+description = "A sudo attempt failed authentication or was refused by policy"
+
+[rule.match]
+sourcetype = "journald"
+process = "sudo"
+message_contains = [
+    "incorrect password attempt",
+    "is not allowed to run sudo",
+    "is not in the sudoers file",
+    "command not allowed",
+]
+
+[rule.tag]
+value = "privileged_command_denied"

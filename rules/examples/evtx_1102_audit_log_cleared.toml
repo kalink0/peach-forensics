@@ -1,0 +1,20 @@
+# EVTX: the Security event log was cleared — a classic anti-forensics
+# indicator (an attacker or malicious insider covering their tracks), not
+# something that normally happens in routine operation. Note this is a
+# different provider than the other rules in this pack: "Microsoft-Windows-
+# Eventlog", not "Microsoft-Windows-Security-Auditing" — the log-clearing
+# action is itself logged by the event log service, not by the security
+# auditing subsystem it's clearing. Reference: Microsoft's official
+# Security Auditing event reference, "1102(S) The audit log was cleared":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-1102
+
+[rule]
+name = "evtx_audit_log_cleared"
+description = "The Security audit log was cleared (1102) — investigate why"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 1102
+
+[rule.tag]
+value = "audit_log_cleared"

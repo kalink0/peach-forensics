@@ -159,6 +159,20 @@ fn acknowledgements_tab(ui: &mut egui::Ui) {
          official Security Auditing event reference for each event ID \
          \u{2014} learn.microsoft.com/windows/security/threat-protection/auditing/.",
     );
+    ui.add_space(4.0);
+    ui.label(
+        "A handful of newer AUL predicates (dialed-number recovery, device \
+         orientation, Apple Watch Crown/button, CarPlay handshake) are from \
+         Tim Korver's Thesis Friday series, rather than re-derived from \
+         scratch \u{2014} thesisfriday.com.",
+    );
+    ui.add_space(4.0);
+    ui.label(
+        "The built-in journald tagging rule pack (rules/examples/journald_*.toml) \
+         is sourced directly from OpenSSH, sudo, and shadow-utils' own \
+         logging code, not re-derived from memory \u{2014} see each rule \
+         file's header comment for its specific citation.",
+    );
 
     ui.add_space(10.0);
     ui.strong("Special thanks");

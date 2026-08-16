@@ -1,0 +1,16 @@
+# EVTX Security-Auditing: a session was reconnected to a Window Station —
+# an RDP reconnect or Fast User Switching back to an existing desktop.
+# Reference: Microsoft's official Security Auditing event reference,
+# "4778(S) A session was reconnected to a Window Station":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4778
+
+[rule]
+name = "evtx_session_reconnected"
+description = "A session was reconnected to a Window Station (Security-Auditing 4778)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4778
+
+[rule.tag]
+value = "session_reconnected"

@@ -1,0 +1,17 @@
+# EVTX Security-Auditing: a process exited — the natural companion to
+# 4688's process creation (evtx_4688_process_creation.toml), letting an
+# analyst bound a process's actual runtime rather than only seeing when it
+# started. Reference: Microsoft's official Security Auditing event
+# reference, "4689(S) A process has exited":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4689
+
+[rule]
+name = "evtx_process_exited"
+description = "A process has exited (Security-Auditing 4689)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4689
+
+[rule.tag]
+value = "process_exited"

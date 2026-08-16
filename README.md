@@ -88,6 +88,8 @@ no durable unencrypted session copy should be left behind.
   tagging rules, search syntax, sessions
 - [docs/supported-sources.md](docs/supported-sources.md) — supported/planned source
   types
+- [docs/rules-reference.md](docs/rules-reference.md) — every built-in tagging rule
+  (AUL/EVTX/journald), generated from the actual shipped rule files
 - [CHANGELOG.md](CHANGELOG.md) — what changed in each release
 
 ## Acknowledgements
@@ -102,12 +104,28 @@ built on [egui/eframe](https://egui.rs); the bulk timeline on
 `rusqlite`. See the in-app **Help → About → Acknowledgements** tab for the
 full dependency list with licenses.
 
-The built-in AUL pattern-of-life rule pack (`rules/examples/aul_*.toml`) is
-built on published DFIR research, not re-derived from scratch: predicates are
-sourced from ["Apple Unified Log Predicates in iLEAPP: The
-Reference"](https://leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference)
-by Alexis Brignoni. See [user-guide.md](docs/user-guide.md#tagging) for the
-full rule pack breakdown.
+The built-in tagging rule packs (`rules/examples/*.toml`) are built on
+published research and primary sources, not re-derived from scratch:
+
+- **AUL** — most predicates sourced from ["Apple Unified Log Predicates in
+  iLEAPP: The
+  Reference"](https://leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference)
+  by Alexis Brignoni, with a handful of newer ones (dialed-number recovery,
+  device orientation, Apple Watch Crown/button, CarPlay handshake) from Tim
+  Korver's [Thesis Friday](https://thesisfriday.com/) series.
+- **EVTX** — cross-checked against [Microsoft's official Security Auditing
+  event
+  reference](https://learn.microsoft.com/windows/security/threat-protection/auditing/)
+  for each event ID, with a handful from JPCERT/CC's ["Detecting Lateral
+  Movement through Tracking Event
+  Logs"](https://www.jpcert.or.jp/english/pub/sr/DetectingLateralMovementThroughTrackingEventLogs_version2.pdf)
+  report and PowerShell's own logging docs.
+- **journald** — message text sourced directly from OpenSSH, sudo,
+  shadow-utils, and systemd's own logging code.
+
+See each rule file's own header comment for its specific citation, and
+[docs/rules-reference.md](docs/rules-reference.md) for the full, generated
+rule-by-rule breakdown.
 
 Special thanks to [@dugeonlady](https://github.com/dugeonlady) for suggesting
 the Rainbow theme in crush — Peach's Rainbow theme (*View → Theme → Rainbow*)

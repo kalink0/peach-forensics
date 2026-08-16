@@ -1,0 +1,18 @@
+# EVTX Security-Auditing: a scheduled task was created — a common
+# persistence mechanism. Requires the "Audit Other Object Access Events"
+# subcategory to be enabled, which isn't part of the default audit policy on
+# every system — this rule simply never matches if it wasn't. Reference:
+# Microsoft's official Security Auditing event reference,
+# "4698(S) A scheduled task was created":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4698
+
+[rule]
+name = "evtx_scheduled_task_created"
+description = "A scheduled task was created (Security-Auditing 4698)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4698
+
+[rule.tag]
+value = "scheduled_task_created"

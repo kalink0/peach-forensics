@@ -1,0 +1,19 @@
+# journald: an SSH session ended. This is PAM's pam_unix session module
+# logging (widely documented as "session opened for user ..."/"session
+# closed for user ..."), logged under sshd's own syslog identity since PAM
+# writes through the calling program's already-open syslog connection —
+# scoped to process = "sshd" so this only fires for interactive SSH
+# sessions, not every other PAM-using program (su, sudo, cron, ...), each
+# covered by its own dedicated rule where relevant.
+
+[rule]
+name = "journald_ssh_logoff"
+description = "An SSH session ended (sshd \"session closed for user\")"
+
+[rule.match]
+sourcetype = "journald"
+process = "sshd"
+message_contains = "session closed for user"
+
+[rule.tag]
+value = "logoff"

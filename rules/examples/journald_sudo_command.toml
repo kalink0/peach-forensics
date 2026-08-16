@@ -1,0 +1,17 @@
+# journald: a command run via sudo. sudo's logging.c always writes an
+# accepted command as "<user> : TTY=... ; PWD=... ; USER=<target> ;
+# COMMAND=<cmd>" — confirmed against the sudoers manual and real-world
+# syslog output; "COMMAND=" is the fixed, reliable anchor in that line.
+# https://www.sudo.ws/docs/man/1.8.16/sudoers.man/
+
+[rule]
+name = "journald_sudo_command"
+description = "A command was run via sudo (\"COMMAND=\")"
+
+[rule.match]
+sourcetype = "journald"
+process = "sudo"
+message_contains = "COMMAND="
+
+[rule.tag]
+value = "privileged_command"

@@ -1,0 +1,24 @@
+# journald: failed SSH authentication. Same auth_log() format as the
+# success rule (journald_ssh_logon_success.toml) — authmsg is "Failed" on a
+# rejected password/publickey attempt. "Invalid user" and "maximum
+# authentication attempts exceeded" are separate, distinctly-worded log
+# lines from auth.c/auth2.c, not variants of the same format string —
+# confirmed against:
+# https://github.com/openssh/openssh-portable/blob/master/auth.c
+
+[rule]
+name = "journald_ssh_logon_failure"
+description = "Failed SSH authentication attempt (sshd \"Failed ...\"/\"Invalid user\")"
+
+[rule.match]
+sourcetype = "journald"
+process = "sshd"
+message_contains = [
+    "Failed password for",
+    "Failed publickey for",
+    "Invalid user",
+    "maximum authentication attempts exceeded",
+]
+
+[rule.tag]
+value = "auth_failure"

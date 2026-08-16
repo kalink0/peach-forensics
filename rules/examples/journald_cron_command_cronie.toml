@@ -1,0 +1,25 @@
+# journald: a cron job actually executed, on RHEL/CentOS/Fedora's cronie
+# (syslog identifier "CROND") — Debian/Ubuntu's vixie-cron fork uses "CRON"
+# instead, covered by the sibling rule journald_cron_command_debian.toml;
+# two files sharing one tag rather than one rule, since `process` is an
+# exact match and the two distro families genuinely use different syslog
+# identifiers for the same daemon. cron's own log line is
+# "<user> : TTY=... ; CMD (<command>)" — "CMD (" is the stable anchor,
+# confirmed against real-world cronie output (e.g.
+# "CROND[1960553]: (kent) CMD (/home/kent/cronTest/myJob.sh)"). Classic
+# Linux persistence-execution visibility: an attacker's cron-based
+# persistence mechanism actually running shows up here exactly like a
+# legitimate scheduled job would, distinguishable by the command itself
+# once flagged.
+
+[rule]
+name = "journald_cron_command_cronie"
+description = "A cron job command executed (cronie / RHEL family)"
+
+[rule.match]
+sourcetype = "journald"
+process = "CROND"
+message_contains = "CMD ("
+
+[rule.tag]
+value = "cron_command"

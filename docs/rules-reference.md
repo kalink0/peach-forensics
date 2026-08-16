@@ -2,26 +2,29 @@
 
 Generated from `rules/examples/*.toml` — the actual shipped rule files, not a hand-transcribed summary that can drift from them. Regenerate (`python3 scripts/gen_rules_reference.py`) after adding/editing a rule file rather than hand-editing this doc directly.
 
-Both packs below ship **embedded in the binary itself** (`build.rs` + `src/tagging/builtin.rs`) and every rule in them is enabled by default — see [user-guide.md](user-guide.md#tagging) for the "Built-in rules..." picker that lets you enable/disable individual rules rather than only a whole pack at once.
+All three packs below ship **embedded in the binary itself** (`build.rs` + `src/tagging/builtin.rs`) and every rule in them is enabled by default — see [user-guide.md](user-guide.md#tagging) for the "Built-in rules..." picker that lets you enable/disable individual rules rather than only a whole pack at once.
 
-## AUL pattern-of-life rules (33)
+## AUL pattern-of-life rules (37)
 
-Predicates sourced from ["Apple Unified Log Predicates in iLEAPP: The Reference"](https://leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference) (Alexis Brignoni) — see each rule file's header comment for the specific predicate section cited. Every rule matches `sourcetype = "aul"`.
+Most predicates sourced from ["Apple Unified Log Predicates in iLEAPP: The Reference"](https://leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference) (Alexis Brignoni), with a handful of newer, higher-precision ones from Tim Korver's [Thesis Friday](https://thesisfriday.com/) series instead — see each rule file's header comment for the specific citation either way. Every rule matches `sourcetype = "aul"`.
 
 | Rule name | Match | Tag | Description |
 |---|---|---|---|
 | `aul_airdrop` | message contains any of:<br>&bull; `AirDrop ID`<br>&bull; `SharingDaemon State`<br>&bull; `Scanning mode`<br>&bull; `startSending`<br>&bull; `New incoming transfer`<br>&bull; `alertLog: idx:`<br>&bull; `Activating com.apple.sharing.sharesheet` | `airdrop` | AirDrop discoverability, ID, and transfer activity |
-| `aul_airplane_mode` | message contains any of:<br>&bull; `Airplane Mode is now 1`<br>&bull; `Airplane Mode is now On`<br>&bull; `Setting airplane mode to true`<br>&bull; `Airplane mode now active`<br>&bull; `enabling airplanemode`<br>&bull; `Airplane mode changed`<br>&bull; `Airplane Mode is now 0`<br>&bull; `Airplane Mode is now Off`<br>&bull; `Setting airplane mode to false`<br>&bull; `Airplane mode now inactive`<br>&bull; `Airplane mode Disabled`<br>&bull; `Toggle AirPlane Mode state`<br>&bull; `Setting airplane mode enabled` | `airplane_mode` | Airplane mode enabled or disabled |
+| `aul_airplane_mode` | message contains any of:<br>&bull; `Airplane Mode is now 1`<br>&bull; `Airplane Mode is now On`<br>&bull; `Setting airplane mode to true`<br>&bull; `Airplane mode now active`<br>&bull; `enabling airplanemode`<br>&bull; `Airplane mode changed`<br>&bull; `Airplane Mode is now 0`<br>&bull; `Airplane Mode is now Off`<br>&bull; `Setting airplane mode to false`<br>&bull; `Airplane mode now inactive`<br>&bull; `Airplane mode Disabled`<br>&bull; `Toggle AirPlane Mode state`<br>&bull; `Setting airplane mode enabled`<br>&bull; `isAirplaneMode = 1`<br>&bull; `isAirplaneMode = 0` | `airplane_mode` | Airplane mode enabled or disabled |
 | `aul_app_focus_lifecycle` | message contains any of:<br>&bull; `/device/app/inFocus`<br>&bull; `Bootstrapping app<`<br>&bull; `Bootstrapping application<`<br>&bull; `killed from app switcher`<br>&bull; `elementWithFocusBundleID changed`<br>&bull; `Icon tapped`<br>&bull; `Initiating launch from icon view`<br>&bull; `Scene lifecycle state did change` | `app_focus_lifecycle` | Foreground app focus changes, cold starts vs. resumes, force-kills |
 | `aul_app_launch` | message contains any of:<br>&bull; `Allowing tap for icon view`<br>&bull; `Launching application`<br>&bull; `transition source:` | `app_launch` | App icon taps and application launches |
 | `aul_audio_routes` | message contains any of:<br>&bull; `vaemConfigurePVMSettings`<br>&bull; `vaemVADRouteChangeListener`<br>&bull; `cmsmActivateEndpointFromRouteDescription`<br>&bull; `currently activating endpoint` | `audio_routes` | Audio output routing — receiver, speaker, or Bluetooth device |
 | `aul_audio_volume` | message contains any of:<br>&bull; `AudioQueueIsPlaying`<br>&bull; `VolumeIncrement`<br>&bull; `rawVolumeIncreasePress`<br>&bull; `rawVolumeDecreasePress`<br>&bull; `Volume active`<br>&bull; `PlaybackQueueInvalidation`<br>&bull; `volumeValueDidChange` | `audio_volume` | Volume button presses and audio playback state changes |
 | `aul_battery_state` | message contains any of:<br>&bull; `Battery capacity change posted`<br>&bull; `battery info changed to` | `battery_state` | Battery charge level and charging state changes |
-| `aul_biometric_sensor_events` | message contains any of:<br>&bull; `PearlCamFrameReceived`<br>&bull; `getFaceDetectInfo`<br>&bull; `[User Presence Monitor]`<br>&bull; `kAppleBiometricFinger`<br>&bull; `Home Button Was Pressed` | `biometric_sensor_events` | Face ID / Touch ID sensor-level events (not the unlock decision itself) |
+| `aul_biometric_sensor_events` | message contains any of:<br>&bull; `PearlCamFrameReceived`<br>&bull; `getFaceDetectInfo`<br>&bull; `[User Presence Monitor]`<br>&bull; `kAppleBiometricFinger`<br>&bull; `Home Button Was Pressed`<br>&bull; `setFingerOnState: FingerON` | `biometric_sensor_events` | Face ID / Touch ID sensor-level events (not the unlock decision itself) |
 | `aul_bluetooth_pairing` | message contains any of:<br>&bull; `Device found: CBDevice`<br>&bull; `pairing complete`<br>&bull; `pairing started`<br>&bull; `numeric comparison`<br>&bull; `Running SDP` | `bluetooth_pairing` | Bluetooth device discovery and pairing (not routine reconnection) |
 | `aul_bluetooth_status` | message contains any of:<br>&bull; `Bluetooth state changed`<br>&bull; `Sending new bluetooth state`<br>&bull; `Bluetooth state changed PoweredOn`<br>&bull; `ServiceManager disconnection result for`<br>&bull; `Device type is`<br>&bull; `is asking to connect device`<br>&bull; `Received connection result for`<br>&bull; `Received disconnection result for`<br>&bull; `Received handsfree disconnection`<br>&bull; `Sending ring notification for call`<br>&bull; `Accepting incoming audio connection`<br>&bull; `Received voice audio connected`<br>&bull; `Stopping A2DP audio streaming`<br>&bull; `Bluetooth A2DP device`<br>&bull; `Bluetooth Daemon: A2DP streaming`<br>&bull; `Starting Media connection to device`<br>&bull; `Received voice disconnection`<br>&bull; `Disconnecting audio from device`<br>&bull; `Audio was already disconnected`<br>&bull; `Toggled Bluetooth state from`<br>&bull; `CUBluetoothDevice`<br>&bull; `handsfree device disconnected`<br>&bull; `handsfree device connected`<br>&bull; `Bluetooth state updated`<br>&bull; `Bluetooth power is now off`<br>&bull; `Bluetooth state`<br>&bull; `Sending call state update`<br>&bull; `A2DP LinkQualityReport` | `bluetooth_status` | Bluetooth connect/disconnect and call/handsfree audio routing |
 | `aul_call_events` | message contains any of:<br>&bull; `Started tracking call`<br>&bull; `Dialed call`<br>&bull; `Call started outgoing`<br>&bull; `All calls ended`<br>&bull; `Received trusted open application request`<br>&bull; `Resuming to tab type`<br>&bull; `tab bar tab changed`<br>&bull; `Incoming Request : actionID 120` | `call_events` | Phone call tracking, call-app navigation, and keypad tone requests |
 | `aul_camera_capture` | message contains any of:<br>&bull; `will change to: Photo`<br>&bull; `MomentCapture`<br>&bull; `Still image capture type`<br>&bull; `IrisWillBeginCapture`<br>&bull; `added photo to library`<br>&bull; `added video to library`<br>&bull; `Created asset IMG` | `camera_capture` | Camera shutter to photo/video library capture chain |
+| `aul_carplay_connection` | message contains any of:<br>&bull; `carPlayCapable = 1`<br>&bull; `session isAuthenticated:1, isActivated:1`<br>&bull; `Persisting widget state for vehicle ID`<br>&bull; `WiFiDeviceManagerSetCarPlaySessionState` | `carplay_connection` | CarPlay accessory handshake, CarKit session auth, and per-vehicle state |
+| `aul_device_orientation` | message contains `Received orientation.` | `device_orientation` | Device orientation transitions (portrait/landscape/face up-down) |
+| `aul_dialed_number_recovery` | message contains `kPhoneNumber` | `dialed_number_recovery` | CommCenter entries that may carry a dialed number in plain text (kPhoneNumber) |
 | `aul_dictation` | message contains any of:<br>&bull; `DictationConnection startDictation`<br>&bull; `Dictation did begin`<br>&bull; `Dictation did end`<br>&bull; `CSAudioRecordTypeDictation` | `dictation` | Voice dictation (keyboard mic input) start/end |
 | `aul_driving_state` | message contains any of:<br>&bull; `MotionState: Driving`<br>&bull; `vehicularStartTime`<br>&bull; `PedestrianAfterDriving`<br>&bull; `Engaging Driving`<br>&bull; `com.apple.donotdisturb.mode.driving`<br>&bull; `ATXModeDrivingFeaturizer` | `driving_state` | Vehicular motion classification (does not distinguish driver from passenger) |
 | `aul_emergency_sos` | message contains any of:<br>&bull; `broadcasting SOSStatus`<br>&bull; `flowStartedOnEitherDevice`<br>&bull; `sosTriggeredOnPairedDevice` | `emergency_sos` | Emergency SOS engine status/flow (presence alone is not proof of a call) |
@@ -42,26 +45,69 @@ Predicates sourced from ["Apple Unified Log Predicates in iLEAPP: The Reference"
 | `aul_touchscreen_events` | message contains any of:<br>&bull; ` presence:`<br>&bull; `touchstats`<br>&bull; `received tapToWake`<br>&bull; `AttentionAwareness.Touch` | `touchscreen_events` | Direct touchscreen contact — fingers physically on the glass |
 | `aul_unlock_sessions` | message contains any of:<br>&bull; `Screen did unlock (Was locked for`<br>&bull; `Screen did lock (Was unlocked for`<br>&bull; `Processed authentication request`<br>&bull; `Transition: locked ->`<br>&bull; `apfs is being UN-locked`<br>&bull; `lock button source` | `unlock_sessions` | Unlock session duration, authentication method, and outcome |
 | `aul_usb_power_connections` | message contains any of:<br>&bull; `plugin state changed to`<br>&bull; `IOAccessoryUSBConnectShim` | `usb_power_connections` | USB/power cable attach and detach |
+| `aul_watch_crown_button` | message contains any of:<br>&bull; `Description: Crown down`<br>&bull; `Description: Button held`<br>&bull; `Description: Button long-held` | `watch_crown_button` | Apple Watch Digital Crown / side button physical interaction |
 | `aul_wifi_status` | message contains any of:<br>&bull; `WiFi state changed:`<br>&bull; `Toggled WiFi state`<br>&bull; `is WiFi associated?`<br>&bull; `link status changed`<br>&bull; `reachability changed`<br>&bull; `ISNetworkObserver`<br>&bull; `ForgetSSID`<br>&bull; `en0: SSID`<br>&bull; `Removing Lease SSID`<br>&bull; `SysMon: WiFi state changed:`<br>&bull; `WiFiManagerClientRemoveNetworkWithReason:`<br>&bull; `WiFiSecurityRemovePassword`<br>&bull; `AlwaysOnWifi:`<br>&bull; `WiFiDeviceManagerSetNetworks:`<br>&bull; `Scanning For Broadcast found:`<br>&bull; `Scanning Remaining Channels`<br>&bull; `WiFiSettlementObserver _handleScanResults`<br>&bull; `Attempting to join`<br>&bull; `WiFiLQAMgrSetCurrentNetwork: Joined SSID:`<br>&bull; `Preparing background scan request for`<br>&bull; `WiFiNetworkPrepareKnownBssList`<br>&bull; `to list of known networks`<br>&bull; `{AUTOJOIN, SCAN*} Scanning 2Ghz Channels found:`<br>&bull; `{AUTOJOIN, SCAN*} Scanning 5Ghz Channels found:`<br>&bull; `WFMacRandomisation`<br>&bull; `manual association`<br>&bull; `Copy password for Network`<br>&bull; `Attempting auto join association`<br>&bull; `Link went down`<br>&bull; `Total connection time` | `wifi_status` | WiFi state changes, network joins, and scan activity |
 
-## EVTX Security-Auditing rules (15)
+## EVTX Security-Auditing rules (35)
 
 Cross-checked against [Microsoft's official Security Auditing event reference](https://learn.microsoft.com/windows/security/threat-protection/auditing/) for each event ID — see each rule file's header comment for the specific citation. Every rule matches `sourcetype = "evtx"`; companion to the built-in EVTX message templates (see [field-extraction.md](field-extraction.md#message-templates-evtx)).
 
 | Rule name | Match | Tag | Description |
 |---|---|---|---|
+| `evtx_kernel_power_unexpected_reboot` | `event_id` = `41` | `unexpected_shutdown` | Kernel-Power's own unexpected-reboot marker (41) |
+| `evtx_system_shutdown_requested` | `event_id` = `1074` | `system_shutdown` | A system shutdown or restart was requested, with requestor and reason (1074) |
+| `evtx_audit_log_cleared` | `event_id` = `1102` | `audit_log_cleared` | The Security audit log was cleared (1102) — investigate why |
+| `evtx_powershell_script_block` | `event_id` = `4104` | `powershell_script_block` | PowerShell Script Block Logging — records the actual (de-obfuscated) code executed (4104) |
 | `evtx_logon_success` | `event_id` = `4624` | `logon_success` | Successful account logon (Security-Auditing 4624) |
 | `evtx_auth_failure` | `event_id` = `4625` | `auth_failure` | Failed account logon (Security-Auditing 4625) |
 | `evtx_logoff` | `event_id` = `4634` | `logoff` | Account logoff (Security-Auditing 4634) |
 | `evtx_explicit_credentials` | `event_id` = `4648` | `explicit_credentials` | Logon attempted using explicit credentials, e.g. RunAs (Security-Auditing 4648) |
 | `evtx_privileged_logon` | `event_id` = `4672` | `privileged_logon` | Special privileges assigned to a new logon (Security-Auditing 4672) |
 | `evtx_process_creation` | `event_id` = `4688` | `process_creation` | New process created (Security-Auditing 4688) |
+| `evtx_process_exited` | `event_id` = `4689` | `process_exited` | A process has exited (Security-Auditing 4689) |
 | `evtx_service_install` | `event_id` = `4697` | `service_install` | A service was installed (Security-Auditing 4697) |
+| `evtx_scheduled_task_created` | `event_id` = `4698` | `scheduled_task_created` | A scheduled task was created (Security-Auditing 4698) |
+| `evtx_scheduled_task_deleted` | `event_id` = `4699` | `scheduled_task_deleted` | A scheduled task was deleted (Security-Auditing 4699) |
 | `evtx_account_created` | `event_id` = `4720` | `account_created` | A user account was created (Security-Auditing 4720) |
+| `evtx_account_enabled` | `event_id` = `4722` | `account_enabled` | A user account was enabled (Security-Auditing 4722) |
+| `evtx_password_change_self` | `event_id` = `4723` | `password_change_self` | An attempt was made to change an account's own password (Security-Auditing 4723) |
 | `evtx_password_reset_attempt` | `event_id` = `4724` | `password_reset_attempt` | An attempt was made to reset an account's password (Security-Auditing 4724) |
+| `evtx_account_disabled` | `event_id` = `4725` | `account_disabled` | A user account was disabled (Security-Auditing 4725) |
+| `evtx_account_deleted` | `event_id` = `4726` | `account_deleted` | A user account was deleted (Security-Auditing 4726) |
 | `evtx_group_membership_change_global` | `event_id` = `4728` | `group_membership_change` | Member added to a security-enabled global group (Security-Auditing 4728) |
 | `evtx_group_membership_change_local` | `event_id` = `4732` | `group_membership_change` | Member added to a security-enabled local group (Security-Auditing 4732) |
 | `evtx_account_modified` | `event_id` = `4738` | `account_modified` | A user account was changed (Security-Auditing 4738) |
 | `evtx_account_lockout` | `event_id` = `4740` | `account_lockout` | A user account was locked out (Security-Auditing 4740) |
 | `evtx_group_membership_change_universal` | `event_id` = `4756` | `group_membership_change` | Member added to a security-enabled universal group (Security-Auditing 4756) |
+| `evtx_account_unlocked` | `event_id` = `4767` | `account_unlocked` | A user account was unlocked (Security-Auditing 4767) |
+| `evtx_kerberos_tgt_requested` | `event_id` = `4768` | `kerberos_tgt_requested` | A Kerberos TGT was requested — domain controllers only (Security-Auditing 4768) |
+| `evtx_kerberos_service_ticket_requested` | `event_id` = `4769` | `kerberos_service_ticket_requested` | A Kerberos service ticket was requested — domain controllers only (Security-Auditing 4769) |
 | `evtx_credential_validation` | `event_id` = `4776` | `credential_validation` | NTLM credential validation attempt, success or failure (Security-Auditing 4776) |
+| `evtx_session_reconnected` | `event_id` = `4778` | `session_reconnected` | A session was reconnected to a Window Station (Security-Auditing 4778) |
+| `evtx_session_disconnected` | `event_id` = `4779` | `session_disconnected` | A session was disconnected from a Window Station (Security-Auditing 4779) |
+| `evtx_network_share_access_check` | `event_id` = `5145` | `network_share_access` | A network share (SMB) object access was checked (Security-Auditing 5145) |
+| `evtx_system_boot` | `event_id` = `6005` | `system_boot` | System startup — Event Log service started (6005) |
+| `evtx_unexpected_shutdown_detected` | `event_id` = `6008` | `unexpected_shutdown` | An unexpected/dirty shutdown was detected on the previous boot (6008) |
+| `evtx_service_install_system_log` | `event_id` = `7045` | `service_install` | A service was installed, from the System log (Service Control Manager, event 7045) |
+
+## journald rules (15)
+
+Message text sourced directly from the logging daemons' own source (OpenSSH, sudo, shadow-utils) rather than re-derived from memory — see each rule file's header comment for the specific citation. Every rule matches `sourcetype = "journald"` and scopes itself to a specific `process` (journald's `SYSLOG_IDENTIFIER`), since message text alone is the only signal journald offers — unlike EVTX's structured `event_id`.
+
+| Rule name | Match | Tag | Description |
+|---|---|---|---|
+| `journald_account_created` | `process` = `useradd`<br>message contains `new user:` | `account_created` | A local user account was created via useradd |
+| `journald_account_deleted` | `process` = `userdel`<br>message contains `delete user '` | `account_deleted` | A local user account was deleted via userdel |
+| `journald_account_lock_state_changed` | `process` = `usermod`<br>message contains `lock user '` | `account_lock_state_changed` | An account was locked or unlocked via usermod -L/-U |
+| `journald_account_modified` | `process` = `usermod`<br>message contains `change user '` | `account_modified` | A local user account was modified via usermod |
+| `journald_cron_command_cronie` | `process` = `CROND`<br>message contains `CMD (` | `cron_command` | A cron job command executed (cronie / RHEL family) |
+| `journald_cron_command_debian` | `process` = `CRON`<br>message contains `CMD (` | `cron_command` | A cron job command executed (vixie-cron / Debian family) |
+| `journald_group_membership_change` | `process` = `usermod`<br>message contains any of:<br>&bull; `' to group '`<br>&bull; `' from group '` | `group_membership_change` | A user was added to or removed from a group via usermod |
+| `journald_kernel_boot` | `_TRANSPORT` = `kernel`<br>message contains `Linux version` | `system_boot` | System boot — kernel version banner, the first ring-buffer message of every boot |
+| `journald_password_changed` | `process` = `passwd`<br>message contains `changed by '` | `password_changed` | A user's password was changed via passwd |
+| `journald_ssh_logoff` | `process` = `sshd`<br>message contains `session closed for user` | `logoff` | An SSH session ended (sshd "session closed for user") |
+| `journald_ssh_logon_failure` | `process` = `sshd`<br>message contains any of:<br>&bull; `Failed password for`<br>&bull; `Failed publickey for`<br>&bull; `Invalid user`<br>&bull; `maximum authentication attempts exceeded` | `auth_failure` | Failed SSH authentication attempt (sshd "Failed ..."/"Invalid user") |
+| `journald_ssh_logon_success` | `process` = `sshd`<br>message contains any of:<br>&bull; `Accepted password for`<br>&bull; `Accepted publickey for`<br>&bull; `Accepted keyboard-interactive` | `logon_success` | Successful SSH authentication (sshd "Accepted ...") |
+| `journald_su_session` | `process` = `su`<br>message contains `session opened for user` | `privilege_escalation` | A user switched accounts via su ("session opened for user") |
+| `journald_sudo_command` | `process` = `sudo`<br>message contains `COMMAND=` | `privileged_command` | A command was run via sudo ("COMMAND=") |
+| `journald_sudo_denied` | `process` = `sudo`<br>message contains any of:<br>&bull; `incorrect password attempt`<br>&bull; `is not allowed to run sudo`<br>&bull; `is not in the sudoers file`<br>&bull; `command not allowed` | `privileged_command_denied` | A sudo attempt failed authentication or was refused by policy |

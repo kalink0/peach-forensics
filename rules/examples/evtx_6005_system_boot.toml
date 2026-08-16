@@ -1,0 +1,20 @@
+# EVTX: system startup marker — the Event Log service (provider
+# "EventLog") logs this once per boot, right after the log itself becomes
+# available. One of the most-cited Windows boot/shutdown event IDs in IR
+# literature; paired here with 6008/41 (unexpected shutdown,
+# evtx_6008_unexpected_shutdown.toml/evtx_41_kernel_power_unexpected_reboot.toml)
+# and 1074 (requested shutdown/restart, evtx_1074_system_shutdown.toml).
+# Reference: Microsoft's own troubleshooting guide for exactly this event
+# set:
+# https://learn.microsoft.com/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs
+
+[rule]
+name = "evtx_system_boot"
+description = "System startup — Event Log service started (6005)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 6005
+
+[rule.tag]
+value = "system_boot"

@@ -1,0 +1,24 @@
+# EVTX: a service was installed — logged to the System log by the Service
+# Control Manager (provider "Service Control Manager", not
+# "Microsoft-Windows-Security-Auditing"), unlike this pack's other rules.
+# Classic persistence/lateral-movement indicator (PsExec and similar tools
+# install a throwaway service to execute remotely), and unlike this pack's
+# existing evtx_4697_service_install.toml, this one is NOT gated behind a
+# specific audit subcategory — the System log always records it. Shares
+# `service_install`'s tag on purpose: same real-world event, just visible
+# via two different logs/providers depending on what's actually enabled.
+# Reference: cited directly in JPCERT/CC's own "Detecting Lateral Movement
+# through Tracking Event Logs" research report as the marker BadRabbit
+# ransomware leaves when installing its encryption component:
+# https://www.jpcert.or.jp/english/pub/sr/DetectingLateralMovementThroughTrackingEventLogs_version2.pdf
+
+[rule]
+name = "evtx_service_install_system_log"
+description = "A service was installed, from the System log (Service Control Manager, event 7045)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 7045
+
+[rule.tag]
+value = "service_install"

@@ -1,0 +1,17 @@
+# EVTX Security-Auditing: a user account was unlocked — the resolution
+# counterpart to 4740's account lockout
+# (evtx_4740_account_lockout.toml). Reference: Microsoft's official
+# Security Auditing event reference,
+# "4767(S) A user account was unlocked":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4767
+
+[rule]
+name = "evtx_account_unlocked"
+description = "A user account was unlocked (Security-Auditing 4767)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4767
+
+[rule.tag]
+value = "account_unlocked"

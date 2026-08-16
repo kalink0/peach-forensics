@@ -130,48 +130,76 @@ sourcetype = "aul"
 message_contains = ["Screen did lock", "screen is unlocked"]
 ```
 
-`rules/examples/aul_*.toml` is a pattern-of-life rule pack for AUL (33 rule
+`rules/examples/aul_*.toml` is a pattern-of-life rule pack for AUL (37 rule
 files covering human presence/handling, communication and input, application
 activity, connectivity, device state and power, media/audio/camera, motion
-and vehicle, and emergency SOS) — the predicates are sourced from "Apple
+and vehicle, and emergency SOS) — most predicates are sourced from "Apple
 Unified Log Predicates in iLEAPP: The Reference" (Alexis Brignoni),
-leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference, rather
-than re-derived from scratch. SMS/message *content* is still out of scope —
-that lives in a separate SQLite database Peach doesn't parse — but call
-tracking itself (`aul_call_events.toml`) is covered directly from Unified Log
-predicates.
+leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference, with a
+handful of newer, higher-precision ones (dialed-number recovery via
+CommCenter, device orientation, Apple Watch Crown/button, CarPlay
+handshake) from Tim Korver's [Thesis Friday](https://thesisfriday.com/)
+series instead — see each rule file's own header comment for its specific
+citation either way, rather than re-deriving predicates from scratch.
+SMS/message *content* is still out of scope — that lives in a separate
+SQLite database Peach doesn't parse — but call tracking itself
+(`aul_call_events.toml`, and the more direct `aul_dialed_number_recovery.toml`)
+is covered directly from Unified Log predicates.
 
 `rules/examples/evtx_*.toml` is the tagging companion to the built-in EVTX
 message templates (see [field-extraction.md](field-extraction.md#message-templates-evtx)):
-15 rule files covering the same Security-Auditing event IDs those templates
-render — logon/logoff (4624/4625/4634/4648/4672), process creation (4688),
-service install (4697), account/group management (4720/4724/4728/4732/4738/4740/4756),
-and credential validation (4776) — cross-checked against Microsoft's official
-Security Auditing event reference for each event ID (see each rule file's
-header comment for its specific citation). `event_id`/`provider` are
-normalized match keys resolved against EVTX's actual nested
-`Event.System.*` JSON shape, not a flat top-level lookup — see
-`tagging::rule::normalized_field`'s doc comment if writing a custom rule
-against these fields yourself.
+35 rule files covering Security-Auditing event IDs those templates render or
+otherwise high forensic value — logon/logoff (4624/4625/4634/4648/4672),
+process creation and exit (4688/4689), service install (4697, and 7045 from
+the System log, not gated behind a special audit subcategory the way 4697
+is), account lifecycle
+(created/enabled/disabled/deleted/locked/unlocked: 4720/4722/4725/4726/4740/4767),
+self vs. admin password changes (4723/4724), group management
+(4728/4732/4756), credential validation (4776), Kerberos TGT/service ticket
+requests (4768/4769 — domain-controller-only, base signal for Kerberoasting/
+Golden Ticket detection), SMB share access checks (5145), scheduled task
+creation/deletion (4698/4699), RDP session reconnect/disconnect
+(4778/4779), PowerShell Script Block Logging (4104, a different
+channel/provider than the rest of this pack — see that rule file's header
+comment), boot/shutdown (6005/6008/41/1074), and the audit log being
+cleared (1102) — cross-checked against Microsoft's official Security
+Auditing event reference (or, for 4104/7045/boot-shutdown, other primary
+sources — see each rule file's header comment for its specific citation).
+`event_id`/`provider` are normalized match keys resolved against EVTX's
+actual nested `Event.System.*` JSON shape, not a flat top-level lookup —
+see `tagging::rule::normalized_field`'s doc comment if writing a custom
+rule against these fields yourself.
+
+`rules/examples/journald_*.toml` is journald's rule pack: 15 rules covering
+SSH logon success/failure/logoff, sudo command usage/denial, privilege
+escalation via `su`, password changes, account lifecycle/group membership
+changes via `useradd`/`userdel`/`usermod`, cron job execution, and a kernel
+boot marker. Message text sourced directly from OpenSSH, sudo,
+shadow-utils', and systemd's own logging code (see each rule file's header
+comment for its specific citation) — journald has no structured `event_id`
+the way EVTX does, so every rule scopes itself to a specific `process`
+(journald's `SYSLOG_IDENTIFIER`) or trusted field (`_TRANSPORT`, for the
+kernel boot marker) as well as matching on message text, to avoid two
+unrelated daemons coincidentally sharing a substring.
 
 Unlike other rule files (which load either automatically from the
 configured [rules directory](#settings) or by explicit selection via
-"Choose tagging rules..."), both of these packs ship **embedded in the
-binary itself** (`build.rs` bundles every `rules/examples/aul_*.toml` and
-`rules/examples/evtx_*.toml` file at compile time — see
-`src/tagging/builtin.rs`) and every rule in them is applied automatically on
-every load and re-tag by default — no file to locate or select, works the
-same in a release build with no repo nearby. Every rule matches its own
-`sourcetype` on its own, so an enabled AUL rule never tags an EVTX row or
-vice versa.
+"Choose tagging rules..."), all three packs ship **embedded in the binary
+itself** (`build.rs` bundles every `rules/examples/aul_*.toml`,
+`rules/examples/evtx_*.toml`, and `rules/examples/journald_*.toml` file at
+compile time — see `src/tagging/builtin.rs`) and every rule in them is
+applied automatically on every load and re-tag by default — no file to
+locate or select, works the same in a release build with no repo nearby.
+Every rule matches its own `sourcetype` on its own, so an enabled AUL rule
+never tags an EVTX or journald row, or vice versa.
 
 **Built-in rules...** (next to "Choose tagging rules...", only shown when
 relevant to the current source) opens a picker listing every built-in rule
-from both packs — AUL and EVTX in their own sections, each rule a checkbox
-(hover one for its full match condition, tag, and description), plus
-**Select all**/**Select none** per section. This is exact, per-rule control,
-not just a whole-pack on/off switch: enable only the three or four AUL rules
-you actually care about for this case, say. See
+from all three packs — AUL, EVTX, and journald in their own sections, each
+rule a checkbox (hover one for its full match condition, tag, and
+description), plus **Select all**/**Select none** per section. This is
+exact, per-rule control, not just a whole-pack on/off switch: enable only
+the three or four AUL rules you actually care about for this case, say. See
 [rules-reference.md](rules-reference.md) for the same information as a
 static, browsable table (generated from the same `rules/examples/*.toml`
 files this picker reads).
@@ -491,12 +519,19 @@ not included** — export is a filtered, normalized view for sharing or
 reporting, not a substitute for the original evidence file, which stays
 wherever it was loaded from.
 
-## View menu
+## View and Help menus
 
 **View > Theme** switches the window chrome: System default (follows the
 OS light/dark setting), Light, Dark, Geek (a phosphor-green terminal look),
 or Rainbow (continuously hue-cycling, animated). Persisted across restarts.
 **View > Activity Log...** is covered above.
+
+**Help > Rules reference...** opens
+[docs/rules-reference.md](rules-reference.md) on GitHub in your browser —
+the same generated, per-rule table described under [Tagging](#tagging)
+above, one click away instead of needing a local checkout of the repo.
+**Help > About Peach...** covers version info, licenses, and the research
+sources behind the built-in rule packs.
 
 ## Command line
 

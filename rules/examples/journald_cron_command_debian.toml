@@ -1,0 +1,17 @@
+# journald: a cron job actually executed, on Debian/Ubuntu's vixie-cron
+# fork (syslog identifier "CRON", no trailing D) — RHEL/CentOS/Fedora's
+# cronie uses "CROND" instead, covered by the sibling rule
+# journald_cron_command_cronie.toml; see that file's header comment for why
+# this is two rules sharing one tag rather than one.
+
+[rule]
+name = "journald_cron_command_debian"
+description = "A cron job command executed (vixie-cron / Debian family)"
+
+[rule.match]
+sourcetype = "journald"
+process = "CRON"
+message_contains = "CMD ("
+
+[rule.tag]
+value = "cron_command"

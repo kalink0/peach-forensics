@@ -1,0 +1,26 @@
+# EVTX: PowerShell Script Block Logging — records every script block the
+# PowerShell engine compiles, including de-obfuscated content (Base64,
+# concatenated strings, -EncodedCommand). High IR value for fileless
+# malware/LOLBin detection. Different channel/provider than the rest of
+# this pack: "Microsoft-Windows-PowerShell/Operational" (provider
+# "Microsoft-Windows-PowerShell"), not the Security log's
+# "Microsoft-Windows-Security-Auditing" — matching here is still just
+# `event_id`, which resolves the same way regardless of channel, so this
+# rule applies whenever a PowerShell Operational log is loaded, not the
+# Security log. Only logged at all if Script Block Logging is enabled
+# (not on by default pre-Windows 10 1909/Server 2019, though its own
+# default flipped to on from that point).
+#
+# Reference: PowerShell's own official logging documentation:
+# https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_logging_windows
+
+[rule]
+name = "evtx_powershell_script_block"
+description = "PowerShell Script Block Logging — records the actual (de-obfuscated) code executed (4104)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4104
+
+[rule.tag]
+value = "powershell_script_block"

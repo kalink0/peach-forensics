@@ -1,0 +1,17 @@
+# journald: a privilege-escalation session via su. Same pam_unix session
+# message as journald_ssh_logoff.toml ("session opened for user ..."), just
+# scoped to process = "su" instead of "sshd" — this specifically captures
+# switching to another (often root) account on an already-open session,
+# which the SSH-scoped rule wouldn't see.
+
+[rule]
+name = "journald_su_session"
+description = "A user switched accounts via su (\"session opened for user\")"
+
+[rule.match]
+sourcetype = "journald"
+process = "su"
+message_contains = "session opened for user"
+
+[rule.tag]
+value = "privilege_escalation"

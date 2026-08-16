@@ -1,0 +1,19 @@
+# EVTX Security-Auditing: a Kerberos service ticket (TGS) was requested —
+# domain controllers only. The classic Kerberoasting indicator: an
+# abnormally high volume of 4769 events for many different Service Names
+# from one account in a short window (requesting service tickets for
+# offline cracking, rather than actually using each service). Reference:
+# Microsoft's official Security Auditing event reference,
+# "4769(S, F) A Kerberos service ticket was requested":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4769
+
+[rule]
+name = "evtx_kerberos_service_ticket_requested"
+description = "A Kerberos service ticket was requested — domain controllers only (Security-Auditing 4769)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4769
+
+[rule.tag]
+value = "kerberos_service_ticket_requested"

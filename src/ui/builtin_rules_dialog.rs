@@ -16,7 +16,9 @@ use std::collections::BTreeSet;
 
 use eframe::egui;
 
-use crate::tagging::builtin::{aul_pattern_of_life_rules, evtx_security_auditing_rules};
+use crate::tagging::builtin::{
+    aul_pattern_of_life_rules, evtx_security_auditing_rules, journald_login_rules,
+};
 use crate::tagging::rule::Rule;
 use crate::ui::dialog_window::show_dialog_window;
 
@@ -56,6 +58,8 @@ impl BuiltinRulesDialog {
                     render_rule_group(ui, "AUL", &aul_pattern_of_life_rules(), enabled);
                     ui.separator();
                     render_rule_group(ui, "EVTX", &evtx_security_auditing_rules(), enabled);
+                    ui.separator();
+                    render_rule_group(ui, "journald", &journald_login_rules(), enabled);
 
                     ui.separator();
                     if ui.button("Close").clicked() {

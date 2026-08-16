@@ -1,0 +1,27 @@
+# AUL pattern-of-life: CarPlay connection handshake — accessory capability
+# negotiation (iAP2), CarKit session authentication, and per-vehicle widget
+# state persistence. The initial USB power-present step of this handshake
+# ("IOAccessoryUSBConnectShim: USB Power (VBUS) Present: 1") is already
+# covered generically by aul_usb_power_connections.toml; this rule is the
+# CarPlay-specific continuation of that handshake, not a replacement for it.
+# Complements the existing driving_state/motion_state pattern-of-life rules
+# for vehicle-context analysis.
+#
+# Source: Thesis Friday #20, "Project Stark" (Tim Korver):
+# https://thesisfriday.com/thesis-friday-20-project-stark-forensic-reconstruction-of-the-carplay-handshake/
+
+[rule]
+name = "aul_carplay_connection"
+description = "CarPlay accessory handshake, CarKit session auth, and per-vehicle state"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "carPlayCapable = 1",
+    "session isAuthenticated:1, isActivated:1",
+    "Persisting widget state for vehicle ID",
+    "WiFiDeviceManagerSetCarPlaySessionState",
+]
+
+[rule.tag]
+value = "carplay_connection"

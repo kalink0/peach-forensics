@@ -1,0 +1,16 @@
+# journald: a new local user account was created. useradd's own SYSLOG()
+# call is `"new user: name=%s, UID=%u, GID=%u, home=%s, shell=%s, from=%s"`
+# — confirmed directly against shadow-utils source:
+# https://github.com/shadow-maint/shadow/blob/master/src/useradd.c
+
+[rule]
+name = "journald_account_created"
+description = "A local user account was created via useradd"
+
+[rule.match]
+sourcetype = "journald"
+process = "useradd"
+message_contains = "new user:"
+
+[rule.tag]
+value = "account_created"
