@@ -2940,14 +2940,32 @@ fn cleanup_temp_dir(dir: &Path) {
     }
 }
 
+/// Pre-rasterized window/taskbar icon — raw RGBA, straight (not
+/// premultiplied) alpha, exactly matching [`egui::IconData`]'s own
+/// requirement. Generated once from `resources/icons/peach_icon_128.svg`
+/// via `rsvg-convert -w 256 -h 256 ... | magick ... RGBA:...` rather than
+/// decoded from a compressed image format at startup — avoids adding an
+/// image-decoding dependency (`image`, `png`, ...) for a single asset that
+/// never changes at runtime. Regenerate with that same two-step conversion
+/// if the icon design ever changes.
+const APP_ICON_RGBA: &[u8] = include_bytes!("../resources/icons/peach_icon_256.rgba");
+const APP_ICON_SIZE: u32 = 256;
+
 pub fn run(
     add_sources: Vec<PathBuf>,
     cleanup_dirs: Vec<PathBuf>,
     ephemeral_session: bool,
 ) -> anyhow::Result<()> {
     let window_title = format!("Peach {}", about_dialog::display_version());
+    let icon = egui::IconData {
+        rgba: APP_ICON_RGBA.to_vec(),
+        width: APP_ICON_SIZE,
+        height: APP_ICON_SIZE,
+    };
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title(&window_title),
+        viewport: egui::ViewportBuilder::default()
+            .with_title(&window_title)
+            .with_icon(icon),
         ..Default::default()
     };
     eframe::run_native(
@@ -2967,6 +2985,20 @@ mod tests {
     use super::*;
     use crate::model::log_entry::ParsedRecord;
     use chrono::Utc;
+
+    /// Catches exactly the failure mode the embedded icon asset is prone
+    /// to: `APP_ICON_SIZE` and the actual pixel data in
+    /// `peach_icon_256.rgba` silently drifting apart (e.g. regenerating the
+    /// asset at a different resolution without updating the constant) —
+    /// `egui::IconData` has no way to detect that itself, it would just
+    /// misinterpret the byte buffer as whatever dimensions it's told.
+    #[test]
+    fn app_icon_rgba_byte_length_matches_its_declared_dimensions() {
+        assert_eq!(
+            APP_ICON_RGBA.len(),
+            (APP_ICON_SIZE * APP_ICON_SIZE * 4) as usize
+        );
+    }
 
     fn loaded_source(sourcetype: &str) -> LoadedSource {
         LoadedSource {

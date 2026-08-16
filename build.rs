@@ -64,4 +64,32 @@ fn main() {
         "EVTX_RULE_TOMLS",
         "evtx_builtin_rules.rs",
     );
+
+    #[cfg(windows)]
+    embed_windows_icon();
+}
+
+/// Embeds `resources/windows/peach.ico` as the compiled `.exe`'s icon
+/// resource — what shows in Explorer, the taskbar, and Alt-Tab even before
+/// Peach is running, which `egui::ViewportBuilder::with_icon` (the
+/// *running* window's icon, see `app::run`) can't provide on its own: that
+/// one only takes effect once a window actually exists.
+///
+/// `#[cfg(windows)]`, both on this function and gating its one call site
+/// above, not a `CARGO_CFG_TARGET_OS` runtime check — `build.rs` itself
+/// always runs on (and, unlike the crate it builds, is *itself* compiled
+/// for) the host, so `#[cfg(windows)]` here reflects the host, not
+/// necessarily a cross-compilation target; see `winresource`'s own README
+/// on this exact pitfall for the general case. `release.yml`'s matrix
+/// builds Windows natively on a `windows-latest` runner, never
+/// cross-compiles to it from Linux/macOS, so host and target are always the
+/// same triple family for every build this project actually ships — the
+/// simpler host-based gate is correct here, not a corner cut.
+#[cfg(windows)]
+fn embed_windows_icon() {
+    println!("cargo::rerun-if-changed=resources/windows/peach.ico");
+    winresource::WindowsResource::new()
+        .set_icon("resources/windows/peach.ico")
+        .compile()
+        .expect("failed to embed the Windows .exe icon resource");
 }

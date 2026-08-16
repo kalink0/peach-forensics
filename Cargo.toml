@@ -31,3 +31,6 @@ toml = "1.1.3"
 toml_edit = "0.25"
 uuid = { version = "1.24.0", features = ["v4"] }
 walkdir = "2.5.0"
+
+[target."cfg(windows)".build-dependencies]
+winresource = "0.1.31"
