@@ -22,6 +22,28 @@ every [GitHub release](https://github.com/kalink0/peach-forensics/releases) — 
 toolchain or build step needed. A [nightly build](https://github.com/kalink0/peach-forensics/releases/tag/nightly)
 tracks `main` and is rebuilt automatically whenever new commits land.
 
+### Package managers
+
+**macOS (Homebrew)**
+```bash
+brew tap kalink0/forensics
+brew install peach-forensics
+```
+
+**Windows (winget)**
+```powershell
+winget install kalink0.Peach
+```
+
+**Windows (Scoop)**
+```powershell
+scoop bucket add forensics https://github.com/kalink0/scoop-forensics
+scoop install forensics/peach-forensics
+```
+
+No native package for Linux yet — grab the binary from
+[Releases](https://github.com/kalink0/peach-forensics/releases).
+
 ## Building and running
 
 Building from source is only needed to modify peach yourself — see
