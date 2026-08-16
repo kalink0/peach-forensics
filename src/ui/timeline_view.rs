@@ -18,8 +18,16 @@ pub enum RowAction {
     /// "Tag this event..." — a single manual, analyst-driven tag.
     TagSingle { event_id: EventId },
     /// "Tag all matching (advanced)..." — the clicked row's message seeds
-    /// the pattern for a `message_contains` rule.
-    TagAllMatching { event_id: EventId, message: String },
+    /// the pattern for a `message_contains` rule; `fields` (the same
+    /// populated-on-this-row set `FilterByColumn`'s "Filter by..." submenu
+    /// offers — Sourcetype/Host/Process/Event ID/Subsystem/Category) lets
+    /// the dialog offer an exact-match rule on one of those instead.
+    TagAllMatching {
+        event_id: EventId,
+        message: String,
+        sourcetype: String,
+        fields: Vec<(&'static str, &'static str, String)>,
+    },
     /// "Notes..." — view/add/edit/delete free-text notes on this event,
     /// independent of any tag (see `session::persist`'s `*_event_note`
     /// functions).
@@ -1077,8 +1085,17 @@ impl TimelineView {
                                         ui.close();
                                     }
                                     if ui.button("Tag all matching (advanced)...").clicked() {
-                                        requested =
-                                            Some(RowAction::TagAllMatching { event_id, message });
+                                        requested = Some(RowAction::TagAllMatching {
+                                            event_id,
+                                            message,
+                                            sourcetype: d.sourcetype.clone(),
+                                            fields: filterable
+                                                .iter()
+                                                .map(|&(field, label, value)| {
+                                                    (field, label, value.to_string())
+                                                })
+                                                .collect(),
+                                        });
                                         ui.close();
                                     }
                                     if ui.button("Notes...").clicked() {

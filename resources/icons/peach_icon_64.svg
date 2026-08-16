@@ -1,0 +1,30 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>peach icon 64px</title>
+  <defs>
+    <path id="armShape" d="M26,34 C25,29 26,21 28,14 C29.5,10 31,7 32,5.5 C33,7 34.5,10 36,14 C38,21 39,29 38,34 Z" fill="#fb7185" stroke="#fda4af" stroke-width="0.7"/>
+    <g id="armDots">
+      <circle cx="32" cy="27.5" r="1.1" fill="#fecdd3" opacity="0.5"/>
+      <circle cx="32" cy="21" r="0.8" fill="#fecdd3" opacity="0.4"/>
+    </g>
+  </defs>
+
+  <rect width="64" height="64" rx="11" fill="#0d1117"/>
+
+  <use href="#armShape" transform="rotate(0 32 32)"/>
+  <use href="#armShape" transform="rotate(72 32 32)"/>
+  <use href="#armShape" transform="rotate(144 32 32)"/>
+  <use href="#armShape" transform="rotate(216 32 32)"/>
+  <use href="#armShape" transform="rotate(288 32 32)"/>
+
+  <use href="#armDots" transform="rotate(0 32 32)"/>
+  <use href="#armDots" transform="rotate(72 32 32)"/>
+  <use href="#armDots" transform="rotate(144 32 32)"/>
+  <use href="#armDots" transform="rotate(216 32 32)"/>
+  <use href="#armDots" transform="rotate(288 32 32)"/>
+
+  <circle cx="32" cy="32" r="7.5" fill="#f43f5e" stroke="#fda4af" stroke-width="0.9"/>
+
+  <circle cx="29.75" cy="30.75" r="1.1" fill="#4c0519"/>
+  <circle cx="34.25" cy="30.75" r="1.1" fill="#4c0519"/>
+  <path d="M29.75 33.5 Q32 35.25 34.25 33.5" fill="none" stroke="#4c0519" stroke-width="0.6" stroke-linecap="round"/>
+</svg>

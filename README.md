@@ -1,5 +1,7 @@
 # peach-forensics
 
+![peach](.github/peach_readme_banner.svg)
+
 A lean, local-first forensic log viewer for DFIR work. Parses log sources into a
 normalized, taggable timeline stored in DuckDB, with a Splunk-inspired search syntax
 and a SQLite session layer for analyst tags. Rust + egui, no server, no cloud.

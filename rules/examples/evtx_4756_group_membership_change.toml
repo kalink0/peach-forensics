@@ -1,0 +1,19 @@
+# EVTX Security-Auditing: member added to a security-enabled universal
+# group. Shares the `group_membership_change` tag with 4728 (global group)
+# and 4732 (local group) — see that file's comment for why. Companion tag to
+# the built-in message template for this event ID
+# (message_templates/examples/evtx_security_auditing.toml). Reference:
+# Microsoft's official Security Auditing event reference, "4756(S) A member
+# was added to a security-enabled universal group":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4756
+
+[rule]
+name = "evtx_group_membership_change_universal"
+description = "Member added to a security-enabled universal group (Security-Auditing 4756)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4756
+
+[rule.tag]
+value = "group_membership_change"

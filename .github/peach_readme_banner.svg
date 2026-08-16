@@ -1,0 +1,105 @@
+<svg width="800" height="180" viewBox="0 0 800 180" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>peach – forensic multi-log viewer</title>
+  <desc>README banner for peach-forensics.</desc>
+
+  <defs>
+    <clipPath id="bannerClip">
+      <rect width="800" height="180" rx="8"/>
+    </clipPath>
+
+    <path id="armShape" d="M52,68 C50,58 52,42 56,28 C59,20 62,14 64,11 C66,14 69,20 72,28 C76,42 78,58 76,68 Z" fill="#fb7185" stroke="#fda4af" stroke-width="1.2"/>
+    <g id="armDots">
+      <circle cx="64" cy="55" r="2.2" fill="#fecdd3" opacity="0.5"/>
+      <circle cx="64" cy="42" r="1.6" fill="#fecdd3" opacity="0.4"/>
+      <circle cx="64" cy="29" r="1.1" fill="#fecdd3" opacity="0.32"/>
+    </g>
+  </defs>
+
+  <!-- background -->
+  <rect width="800" height="180" rx="8" fill="#0d1117"/>
+
+  <!-- === DIGITAL WAVE BACKGROUND — clipped === -->
+  <g clip-path="url(#bannerClip)">
+
+    <!-- Wave 1 -->
+    <path id="w1" d="M 0,28 Q 100,14 200,28 Q 300,42 400,28 Q 500,14 600,28 Q 700,42 800,28" fill="none"/>
+    <text font-family="'Courier New',Courier,monospace" font-size="7" fill="#fb7185" opacity="0.4" letter-spacing="1">
+      <textPath href="#w1">0x50 0x65 0x61 0x63 0x68 0x20 0x69 0x73 0x20 0x77 0x61 0x74 0x63 0x68 0x69 0x6E 0x67 0x21 0x20 0x50 0x65 0x61 0x63 0x68 0x20 0x69 0x73 0x20 0x77 0x61 0x74 0x63 0x68 0x69 0x6E 0x67 0x21</textPath>
+    </text>
+
+    <!-- Wave 2 -->
+    <path id="w2" d="M 0,44 Q 100,30 200,44 Q 300,58 400,44 Q 500,30 600,44 Q 700,58 800,44" fill="none"/>
+    <text font-family="'Courier New',Courier,monospace" font-size="7" fill="#fb923c" opacity="0.35" letter-spacing="1">
+      <textPath href="#w2">01010101 01010100 01000011 00100000 01111100 01111100 00100000 01000111 01010100 01000110 01001111 00100000 01010101 01010100 01000011 00100000 01111100 01111100 00100000 01000111 01010100 01000110 01001111 00100000</textPath>
+    </text>
+
+    <!-- Wave 3 — format list -->
+    <path id="w3" d="M 0,140 Q 100,126 200,140 Q 300,154 400,140 Q 500,126 600,140 Q 700,154 800,140" fill="none"/>
+    <text font-family="'Courier New',Courier,monospace" font-size="7" fill="#fb7185" opacity="0.3" letter-spacing="1">
+      <textPath href="#w3">0x41 0x55 0x4C 0x20 0x45 0x56 0x54 0x58 0x20 0x4A 0x4F 0x55 0x52 0x4E 0x41 0x4C 0x44 0x20 0x53 0x59 0x53 0x4C 0x4F 0x47 0x20</textPath>
+    </text>
+
+    <!-- Wave 4 — binary filler -->
+    <path id="w4" d="M 0,156 Q 100,142 200,156 Q 300,170 400,156 Q 500,142 600,156 Q 700,170 800,158" fill="none"/>
+    <text font-family="'Courier New',Courier,monospace" font-size="7" fill="#fb923c" opacity="0.22" letter-spacing="1">
+      <textPath href="#w4">10110100 11001010 01010101 00110011 11110000 10101010 01100011 00110101 11001010 01010110 10110001 01101001</textPath>
+    </text>
+
+  </g>
+
+  <!-- === STARFISH — centered at cx=90 cy=100, mirrors icon geometry translated by (+26,+36) === -->
+  <g transform="translate(26,36)">
+    <use href="#armShape" transform="rotate(0 64 64)"/>
+    <use href="#armShape" transform="rotate(72 64 64)"/>
+    <use href="#armShape" transform="rotate(144 64 64)"/>
+    <use href="#armShape" transform="rotate(216 64 64)"/>
+    <use href="#armShape" transform="rotate(288 64 64)"/>
+
+    <use href="#armDots" transform="rotate(0 64 64)"/>
+    <use href="#armDots" transform="rotate(72 64 64)"/>
+    <use href="#armDots" transform="rotate(144 64 64)"/>
+    <use href="#armDots" transform="rotate(216 64 64)"/>
+    <use href="#armDots" transform="rotate(288 64 64)"/>
+
+    <circle cx="64" cy="64" r="15" fill="#f43f5e" stroke="#fda4af" stroke-width="1.5"/>
+
+    <circle cx="59.5" cy="61.5" r="2.2" fill="#4c0519"/>
+    <circle cx="60.5" cy="60.5" r="0.8" fill="#fff1f2"/>
+    <circle cx="68.5" cy="61.5" r="2.2" fill="#4c0519"/>
+    <circle cx="69.5" cy="60.5" r="0.8" fill="#fff1f2"/>
+    <path d="M59.5 67 Q64 70.5 68.5 67" fill="none" stroke="#4c0519" stroke-width="1.1" stroke-linecap="round"/>
+  </g>
+
+  <!-- === DIVIDER === -->
+  <line x1="148" y1="20" x2="148" y2="160" stroke="#fb7185" stroke-width="0.5" opacity="0.2"/>
+
+  <!-- === TEXT BLOCK === -->
+  <text x="176" y="82"
+    font-family="'Courier New', Courier, monospace"
+    font-size="42" font-weight="600" fill="#fb7185"
+    letter-spacing="-0.5">peach</text>
+
+  <text x="178" y="104"
+    font-family="'Courier New', Courier, monospace"
+    font-size="11" fill="#fda4af" letter-spacing="3">LOCAL-FIRST FORENSIC LOG VIEWER</text>
+
+  <line x1="178" y1="114" x2="775" y2="114" stroke="#fb7185" stroke-width="0.4" opacity="0.2"/>
+
+  <text x="178" y="130"
+    font-family="'Courier New', Courier, monospace"
+    font-size="9.5" fill="#fdba74" opacity="0.75">
+    AUL · EVTX · journald · Syslog · Apache/Nginx · Logcat
+  </text>
+
+  <text x="178" y="148"
+    font-family="'Courier New', Courier, monospace"
+    font-size="9.5" fill="#58a6ff" opacity="0.85">
+    github.com/kalink0/peach-forensics
+  </text>
+
+  <rect x="178" y="156" width="160" height="16" rx="8" fill="#fb7185" opacity="0.08" stroke="#fb7185" stroke-width="0.7"/>
+  <text x="258" y="168"
+    font-family="'Courier New', Courier, monospace"
+    font-size="9" fill="#fda4af" text-anchor="middle" letter-spacing="0.5">Peach is watching 🐠</text>
+
+</svg>

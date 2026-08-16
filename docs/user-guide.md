@@ -39,6 +39,13 @@ button.
 4. Click **Load**. Loading runs in the background so the UI stays responsive; a
    large AUL source can take a while and insert millions of rows.
 
+**Abort** appears next to **Load** while a load is running. It stops after the
+file currently being parsed finishes (or, for one very large file, at the next
+internal checkpoint — every 10,000 entries) — whatever's already been inserted
+stays, nothing gets rolled back. The result shows **"Aborted"**, with the real
+(partial) counts alongside it, and a `--add-source`/multi-select queue does
+**not** auto-continue into its next file after an abort.
+
 Peach never auto-detects a format — you always confirm the sourcetype yourself.
 
 A file that `--add-source`, a multi-select pick, or **"Choose folder..."**
@@ -134,15 +141,50 @@ that lives in a separate SQLite database Peach doesn't parse — but call
 tracking itself (`aul_call_events.toml`) is covered directly from Unified Log
 predicates.
 
-Unlike other rule files (which the analyst selects explicitly via "Choose
-tagging rules..."), this pack ships **embedded in the binary itself**
-(`build.rs` bundles every `rules/examples/aul_*.toml` file at compile time —
-see `src/tagging/builtin.rs`) and is applied automatically on every AUL
-load and re-tag by default — no file to locate or select, works the same in
-a release build with no repo nearby. The "Built-in AUL pattern-of-life
-rules" checkbox next to "Choose tagging rules..." turns this off if you want
-to import/re-tag without it; every rule in the pack matches
-`sourcetype = "aul"` on its own, so leaving it on never tags non-AUL rows.
+`rules/examples/evtx_*.toml` is the tagging companion to the built-in EVTX
+message templates (see [field-extraction.md](field-extraction.md#message-templates-evtx)):
+15 rule files covering the same Security-Auditing event IDs those templates
+render — logon/logoff (4624/4625/4634/4648/4672), process creation (4688),
+service install (4697), account/group management (4720/4724/4728/4732/4738/4740/4756),
+and credential validation (4776) — cross-checked against Microsoft's official
+Security Auditing event reference for each event ID (see each rule file's
+header comment for its specific citation). `event_id`/`provider` are
+normalized match keys resolved against EVTX's actual nested
+`Event.System.*` JSON shape, not a flat top-level lookup — see
+`tagging::rule::normalized_field`'s doc comment if writing a custom rule
+against these fields yourself.
+
+Unlike other rule files (which load either automatically from the
+configured [rules directory](#settings) or by explicit selection via
+"Choose tagging rules..."), both of these packs ship **embedded in the
+binary itself** (`build.rs` bundles every `rules/examples/aul_*.toml` and
+`rules/examples/evtx_*.toml` file at compile time — see
+`src/tagging/builtin.rs`) and every rule in them is applied automatically on
+every load and re-tag by default — no file to locate or select, works the
+same in a release build with no repo nearby. Every rule matches its own
+`sourcetype` on its own, so an enabled AUL rule never tags an EVTX row or
+vice versa.
+
+**Built-in rules...** (next to "Choose tagging rules...", only shown when
+relevant to the current source) opens a picker listing every built-in rule
+from both packs — AUL and EVTX in their own sections, each rule a checkbox
+(hover one for its full match condition, tag, and description), plus
+**Select all**/**Select none** per section. This is exact, per-rule control,
+not just a whole-pack on/off switch: enable only the three or four AUL rules
+you actually care about for this case, say. See
+[rules-reference.md](rules-reference.md) for the same information as a
+static, browsable table (generated from the same `rules/examples/*.toml`
+files this picker reads).
+
+Beyond the built-in packs, every `*.toml` file directly in the configured
+[rules directory](#settings) — your own personal rule collection, see
+Settings — loads automatically, no selection needed. **Choose tagging rules
+(TOML, optional)...** additionally lets you pick specific files from
+anywhere else (it opens in the rules directory by default); doing so
+replaces the current selection rather than adding to it, so it's "pick your
+whole set" rather than "add one more". Either way, the count next to the
+button ("N rule file(s) selected") reflects what's actually active,
+auto-loaded and manually picked alike.
 
 Three modes:
 
@@ -183,14 +225,22 @@ Three modes:
   session's `analyst_tags` (SQLite), separate from rule-produced tags because
   it isn't rule-based. Pick an already-used tag from the dropdown or choose
   "New tag...".
-- **Tag all matching (advanced)...** — tags every entry whose message
-  contains a pattern (prefilled from the clicked row, editable), with a live
-  preview of how many entries currently match before you commit. Choosing an
-  existing tag that's produced by exactly one currently-loaded rule file
-  offers to extend that rule's pattern list instead of creating a new one; a
-  brand-new tag (or one with no single unambiguous owning rule) creates a new
-  rule file under the per-user rules directory and asks you to name it.
-  Applying either path re-tags immediately, same as clicking **Re-tag now**.
+- **Tag all matching (advanced)...** — tags every entry that matches a
+  condition, with a live preview of how many entries currently match before
+  you commit. Choose what to match on via the radio buttons at the top:
+  **Message contains** (a substring, prefilled from the clicked row,
+  editable) or an exact match on one of the row's own populated fields —
+  Sourcetype/Host/Process/Event ID/Subsystem/Category, the same set "Filter
+  by..." offers. Switching the radio button reloads the text field with that
+  field's own value. Choosing an existing tag that's produced by exactly one
+  currently-loaded rule file offers to extend that rule's pattern list
+  instead of creating a new one — but only for a **Message contains**
+  condition; a field condition always creates a fresh rule file, since the
+  tagging engine has no OR-list support for exact-match fields the way
+  `message_contains` has. A brand-new tag (or one with no single unambiguous
+  owning rule) creates a new rule file under the [rules
+  directory](#settings) and asks you to name it. Applying either path
+  re-tags immediately, same as clicking **Re-tag now**.
 
 Both the Tags column and the tag picker in these dialogs combine tags from
 both `import_tags` and `analyst_tags` — one vocabulary regardless of which
@@ -218,6 +268,11 @@ Sourcetype/Host/Process/Event ID/Subsystem/Category, and shows every note on
 each row directly in the table (joined with " | "; hover for one-per-line).
 
 ## Search
+
+The **Columns** picker (above the timeline table) toggles Sourcetype, Host,
+Process, Event ID, Subsystem, Category, and Notes on or off — Timestamp,
+Level, Source, Tags, and Message are always shown. Drag a column header to
+reorder it.
 
 The search box (top of the timeline) uses a small, Splunk-inspired query
 language. Filters apply live as you type — there's no separate "search" button.
@@ -343,6 +398,39 @@ there's more than one). Unlike Level/Tag/Sources, there's no dedicated
 dropdown for these six fields — they're set from the row you're looking
 at, not picked from a list of every possible value up front.
 
+## Settings
+
+**File > Settings...** covers where Peach writes things, and how a folder
+load parallelizes:
+
+- **Sessions directory** — where new sessions' `.duckdb`/`.sqlite` files are
+  created (see [Sessions](#sessions) below). Defaults to the OS-standard
+  per-user data directory; only affects sessions created from now on.
+- **Rules directory** — where **Tag all matching (advanced)...** (see
+  [Tagging](#tagging) above) writes new rule files, and where Peach looks
+  for rules to load automatically. Defaults to the OS-standard per-user data
+  directory too, but this one is meant to be pointed elsewhere: at a folder
+  you keep under your own git repo, for example, to build up a personal
+  rule collection over time, kept separate from `rules/examples/` in the
+  Peach repo itself (a read-only reference library, not a place to write
+  into). Every `*.toml` file directly in this folder (not subfolders) loads
+  automatically on startup and shows up in the "N rule file(s) selected"
+  count, the same way the built-in AUL/EVTX packs always apply — a rule
+  created in a previous session doesn't need re-selecting by hand every
+  time. Changing this and clicking **Save** re-scans the new folder
+  immediately, replacing whatever rule files are currently selected
+  (including any picked from elsewhere via **Choose tagging rules...**,
+  which itself opens in this folder by default).
+- **Parse threads for folder loads** — worker threads for parsing a
+  multi-file folder load (EVTX/journald/Text) in parallel; automatic by
+  default. Irrelevant for AUL or a single-file load — both are always
+  exactly one parse unit, nothing to spread across threads.
+
+Both directory settings always show the effective path — prefixed with
+"(default)" when no override is set — plus **Choose...** to pick a folder,
+**Reset to default** to clear an override, and **Open folder** to reveal it
+in the OS file manager (creating it first if it doesn't exist yet).
+
 ## Sessions
 
 A session is a pair of files (`<id>.duckdb` for the parsed timeline, `<id>.sqlite`
@@ -373,6 +461,42 @@ native file dialog can only show real filenames, and once a session has a
 display name that stopped being a useful way to find one again — "Manage
 sessions..." is the only path now, so the friendly name is always what you
 see.
+
+## Activity Log
+
+**View → Activity Log...** shows every load and re-tag this session has run —
+what was loaded, when it started/finished, how many entries were inserted
+and tags applied, and which files (if any) were skipped and why. Recorded on
+both success *and* failure: a failed load shows up here with its error, not
+just as a transient message that's gone once you dismiss it. Persisted in
+the session's `.sqlite` (same file as tags/notes), so it survives closing
+and reopening Peach — the point is a durable record of what actually
+happened to the evidence, not a live status readout.
+
+## Export
+
+**File > Export (current filter)...** exports exactly what the timeline is
+showing right now — clear the search box first to export everything
+loaded. Pick a `.csv` or `.json` destination (either extension works;
+anything else defaults to CSV). Streamed in 5,000-row chunks with a
+progress readout, so an export of millions of rows doesn't need to hold
+the whole result in memory first.
+
+Each exported row has the same normalized columns the timeline table shows
+— timestamp, level, source path, sourcetype, host, process, event ID,
+subsystem, category, message — plus tags and notes joined into single
+fields (`;`- and ` | `-separated respectively, since neither CSV nor a flat
+JSON row has a native list type). **`raw` (the original record/line) is
+not included** — export is a filtered, normalized view for sharing or
+reporting, not a substitute for the original evidence file, which stays
+wherever it was loaded from.
+
+## View menu
+
+**View > Theme** switches the window chrome: System default (follows the
+OS light/dark setting), Light, Dark, Geek (a phosphor-green terminal look),
+or Rainbow (continuously hue-cycling, animated). Persisted across restarts.
+**View > Activity Log...** is covered above.
 
 ## Command line
 

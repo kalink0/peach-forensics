@@ -35,6 +35,37 @@ pub fn setup_session_schema(conn: &Connection) -> Result<()> {
             key    TEXT PRIMARY KEY,
             value  TEXT
         );
+
+        -- One row per completed (or failed) load/re-tag operation this
+        -- session ever ran — a durable activity log: what was loaded or
+        -- re-tagged, when, how many entries/tags resulted, and which files
+        -- (if any) were skipped and why. Logged on both success and
+        -- failure, per the forensic principle of not letting a problem
+        -- quietly disappear (see `ui::activity_log_dialog`). `skipped`,
+        -- `per_file`, and `tags_by_rule` are all JSON arrays (`'[]'` when
+        -- there's nothing to report) rather than their own tables — same
+        -- reasoning as `fields` in the DuckDB timeline schema for a small,
+        -- source-shaped value: `per_file` is `{\"path\": ..., \"inserted\":
+        -- ...}` per successfully-loaded file (a multi-file load's per-file
+        -- breakdown; empty for a re-tag), `tags_by_rule` is `{\"rule_name\":
+        -- ..., \"count\": ...}` per rule that matched anything (keyed by
+        -- rule *name*, not tag value — several rules can deliberately share
+        -- a tag value, e.g. EVTX's group-membership-change rules).
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id                INTEGER PRIMARY KEY,
+            operation         TEXT NOT NULL,
+            started_at        INTEGER NOT NULL,
+            finished_at       INTEGER NOT NULL,
+            source_path       TEXT,
+            sourcetype        TEXT,
+            status            TEXT NOT NULL,
+            error             TEXT,
+            entries_inserted  INTEGER,
+            tags_applied      INTEGER,
+            skipped           TEXT NOT NULL,
+            per_file          TEXT NOT NULL,
+            tags_by_rule      TEXT NOT NULL
+        );
         ",
     )
 }
@@ -141,6 +172,46 @@ mod tests {
             .unwrap();
 
         assert_eq!(value, r#"["/evidence/system.log"]"#);
+    }
+
+    #[test]
+    fn activity_log_round_trips_through_activity_log_table() {
+        let conn = open_test_db();
+
+        conn.execute(
+            "INSERT INTO activity_log
+                (operation, started_at, finished_at, source_path, sourcetype,
+                 status, error, entries_inserted, tags_applied, skipped,
+                 per_file, tags_by_rule)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                "load",
+                1_753_704_000i64,
+                1_753_704_010i64,
+                "/evidence/system.evtx",
+                "evtx",
+                "ok",
+                Option::<String>::None,
+                1000i64,
+                12i64,
+                "[]",
+                r#"[{"path":"/evidence/system.evtx","inserted":1000}]"#,
+                r#"[{"rule_name":"evtx_logon_success","count":12}]"#,
+            ],
+        )
+        .unwrap();
+
+        let (operation, status, entries_inserted): (String, String, i64) = conn
+            .query_row(
+                "SELECT operation, status, entries_inserted FROM activity_log WHERE source_path = ?1",
+                rusqlite::params!["/evidence/system.evtx"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(operation, "load");
+        assert_eq!(status, "ok");
+        assert_eq!(entries_inserted, 1000);
     }
 
     #[test]

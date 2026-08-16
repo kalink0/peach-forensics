@@ -389,6 +389,169 @@ pub fn delete_event_note(conn: &Connection, note_id: i64) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// One file `run_load` skipped, as recorded in an [`ActivityLogEntry`]/written
+/// via [`NewActivityLogEntry`] — a session-DB-persisted mirror of `app.rs`'s
+/// own (private, DuckDB-load-only) `SkippedFile`, not the same type: this
+/// module can't depend on `app` (the dependency runs the other way), and
+/// the two exist for different reasons — `app::SkippedFile` is transient
+/// per-load UI state, this is what actually gets written to `activity_log`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ActivitySkippedFile {
+    pub path: String,
+    pub reason: String,
+}
+
+/// One successfully-loaded file's contribution to a load, as recorded in
+/// `activity_log.per_file` — a multi-file load's per-file breakdown (e.g. a
+/// folder pick). Always empty for a `"retag"` operation: a re-tag applies
+/// across whatever's already loaded, not to individual files.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ActivityFileCount {
+    pub path: String,
+    pub inserted: usize,
+}
+
+/// One rule's contribution to a load or re-tag's tagging pass, as recorded
+/// in `activity_log.tags_by_rule` — keyed by rule *name*, not `tag.value`:
+/// several rules can deliberately share a tag value (e.g. EVTX's
+/// group-membership-change rules), so a tag-value breakdown wouldn't answer
+/// "how many did rule X tag" at all.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ActivityRuleCount {
+    pub rule_name: String,
+    pub count: usize,
+}
+
+/// One row from `activity_log` — what one load or re-tag operation did, read
+/// back via [`all_activity_log_entries`]. See [`NewActivityLogEntry`] for what's
+/// written; the two aren't the same type because `id` only exists once a
+/// row is actually in the database.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActivityLogEntry {
+    pub id: i64,
+    pub operation: String,
+    pub started_at: i64,
+    pub finished_at: i64,
+    pub source_path: Option<String>,
+    pub sourcetype: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub entries_inserted: Option<i64>,
+    pub tags_applied: Option<i64>,
+    pub skipped: Vec<ActivitySkippedFile>,
+    pub per_file: Vec<ActivityFileCount>,
+    pub tags_by_rule: Vec<ActivityRuleCount>,
+}
+
+/// What [`insert_activity_log_entry`] writes — every field owned rather than
+/// borrowed: callers (`app.rs`'s background load/re-tag threads) build this
+/// from temporaries (`format!`, `.display().to_string()`, a freshly mapped
+/// `Vec`) that don't outlive the call, so borrowing would just make the
+/// call site fight the borrow checker for no benefit.
+pub struct NewActivityLogEntry {
+    pub operation: String,
+    pub started_at: i64,
+    pub finished_at: i64,
+    pub source_path: Option<String>,
+    pub sourcetype: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub entries_inserted: Option<i64>,
+    pub tags_applied: Option<i64>,
+    pub skipped: Vec<ActivitySkippedFile>,
+    pub per_file: Vec<ActivityFileCount>,
+    pub tags_by_rule: Vec<ActivityRuleCount>,
+}
+
+/// Records one completed or failed load/re-tag operation — the durable
+/// activity log (see `db::session_schema::setup_session_schema`'s doc
+/// comment on `activity_log`). Called on both success and failure: a failed
+/// load is exactly the kind of thing this log must not let quietly
+/// disappear.
+pub fn insert_activity_log_entry(
+    conn: &Connection,
+    entry: NewActivityLogEntry,
+) -> anyhow::Result<()> {
+    let skipped_json = serde_json::to_string(&entry.skipped)
+        .context("failed to serialize activity_log skipped-files list")?;
+    let per_file_json = serde_json::to_string(&entry.per_file)
+        .context("failed to serialize activity_log per-file breakdown")?;
+    let tags_by_rule_json = serde_json::to_string(&entry.tags_by_rule)
+        .context("failed to serialize activity_log per-rule breakdown")?;
+    conn.execute(
+        "INSERT INTO activity_log
+            (operation, started_at, finished_at, source_path, sourcetype,
+             status, error, entries_inserted, tags_applied, skipped,
+             per_file, tags_by_rule)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            entry.operation,
+            entry.started_at,
+            entry.finished_at,
+            entry.source_path,
+            entry.sourcetype,
+            entry.status,
+            entry.error,
+            entry.entries_inserted,
+            entry.tags_applied,
+            skipped_json,
+            per_file_json,
+            tags_by_rule_json,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Every activity log entry in this session, newest first — loaded wholesale
+/// like [`all_analyst_tags`]/[`all_event_notes`]: one row per load/re-tag
+/// operation, never per timeline entry, so this table stays small
+/// regardless of how large the loaded evidence is.
+pub fn all_activity_log_entries(conn: &Connection) -> anyhow::Result<Vec<ActivityLogEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, operation, started_at, finished_at, source_path, sourcetype,
+                status, error, entries_inserted, tags_applied, skipped,
+                per_file, tags_by_rule
+         FROM activity_log ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let skipped_json: String = row.get(10)?;
+        let per_file_json: String = row.get(11)?;
+        let tags_by_rule_json: String = row.get(12)?;
+        Ok((
+            ActivityLogEntry {
+                id: row.get(0)?,
+                operation: row.get(1)?,
+                started_at: row.get(2)?,
+                finished_at: row.get(3)?,
+                source_path: row.get(4)?,
+                sourcetype: row.get(5)?,
+                status: row.get(6)?,
+                error: row.get(7)?,
+                entries_inserted: row.get(8)?,
+                tags_applied: row.get(9)?,
+                skipped: Vec::new(),
+                per_file: Vec::new(),
+                tags_by_rule: Vec::new(),
+            },
+            skipped_json,
+            per_file_json,
+            tags_by_rule_json,
+        ))
+    })?;
+
+    rows.map(|row| {
+        let (mut entry, skipped_json, per_file_json, tags_by_rule_json) = row?;
+        entry.skipped = serde_json::from_str(&skipped_json)
+            .context("failed to deserialize activity_log skipped-files list")?;
+        entry.per_file = serde_json::from_str(&per_file_json)
+            .context("failed to deserialize activity_log per-file breakdown")?;
+        entry.tags_by_rule = serde_json::from_str(&tags_by_rule_json)
+            .context("failed to deserialize activity_log per-rule breakdown")?;
+        Ok(entry)
+    })
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,5 +922,175 @@ mod tests {
         let remaining = notes_for_event(&conn, event_id).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].1, "keep me");
+    }
+
+    fn sample_load_entry(source_path: &str, status: &str) -> NewActivityLogEntry {
+        NewActivityLogEntry {
+            operation: "load".to_string(),
+            started_at: 1_753_704_000,
+            finished_at: 1_753_704_010,
+            source_path: Some(source_path.to_string()),
+            sourcetype: Some("evtx".to_string()),
+            status: status.to_string(),
+            error: if status == "failed" {
+                Some("boom".to_string())
+            } else {
+                None
+            },
+            entries_inserted: Some(1000),
+            tags_applied: Some(12),
+            skipped: vec![ActivitySkippedFile {
+                path: "/evidence/bad.evtx".to_string(),
+                reason: "not a valid EVTX file".to_string(),
+            }],
+            per_file: vec![ActivityFileCount {
+                path: source_path.to_string(),
+                inserted: 1000,
+            }],
+            tags_by_rule: vec![ActivityRuleCount {
+                rule_name: "evtx_logon_success".to_string(),
+                count: 12,
+            }],
+        }
+    }
+
+    #[test]
+    fn insert_activity_log_entry_round_trips_every_field() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+
+        insert_activity_log_entry(&conn, sample_load_entry("/evidence/system.evtx", "ok")).unwrap();
+
+        let entries = all_activity_log_entries(&conn).unwrap();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.operation, "load");
+        assert_eq!(entry.started_at, 1_753_704_000);
+        assert_eq!(entry.finished_at, 1_753_704_010);
+        assert_eq!(entry.source_path.as_deref(), Some("/evidence/system.evtx"));
+        assert_eq!(entry.sourcetype.as_deref(), Some("evtx"));
+        assert_eq!(entry.status, "ok");
+        assert_eq!(entry.error, None);
+        assert_eq!(entry.entries_inserted, Some(1000));
+        assert_eq!(entry.tags_applied, Some(12));
+        assert_eq!(
+            entry.skipped,
+            vec![ActivitySkippedFile {
+                path: "/evidence/bad.evtx".to_string(),
+                reason: "not a valid EVTX file".to_string(),
+            }]
+        );
+        assert_eq!(
+            entry.per_file,
+            vec![ActivityFileCount {
+                path: "/evidence/system.evtx".to_string(),
+                inserted: 1000,
+            }]
+        );
+        assert_eq!(
+            entry.tags_by_rule,
+            vec![ActivityRuleCount {
+                rule_name: "evtx_logon_success".to_string(),
+                count: 12,
+            }]
+        );
+    }
+
+    #[test]
+    fn insert_activity_log_entry_records_a_failure_with_its_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+
+        insert_activity_log_entry(&conn, sample_load_entry("/evidence/broken.evtx", "failed"))
+            .unwrap();
+
+        let entries = all_activity_log_entries(&conn).unwrap();
+        assert_eq!(entries[0].status, "failed");
+        assert_eq!(entries[0].error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn all_activity_log_entries_is_empty_with_nothing_recorded() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+
+        assert!(all_activity_log_entries(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn all_activity_log_entries_orders_newest_first() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+
+        insert_activity_log_entry(&conn, sample_load_entry("/evidence/first.evtx", "ok")).unwrap();
+        insert_activity_log_entry(&conn, sample_load_entry("/evidence/second.evtx", "ok")).unwrap();
+
+        let entries = all_activity_log_entries(&conn).unwrap();
+        assert_eq!(
+            entries[0].source_path.as_deref(),
+            Some("/evidence/second.evtx")
+        );
+        assert_eq!(
+            entries[1].source_path.as_deref(),
+            Some("/evidence/first.evtx")
+        );
+    }
+
+    #[test]
+    fn activity_log_entry_with_no_skipped_files_round_trips_as_an_empty_list() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+        let mut entry = sample_load_entry("/evidence/clean.evtx", "ok");
+        entry.skipped = Vec::new();
+
+        insert_activity_log_entry(&conn, entry).unwrap();
+
+        assert!(
+            all_activity_log_entries(&conn).unwrap()[0]
+                .skipped
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn retag_activity_log_entry_has_no_source_path_or_skipped_files() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+
+        insert_activity_log_entry(
+            &conn,
+            NewActivityLogEntry {
+                operation: "retag".to_string(),
+                started_at: 1_753_704_000,
+                finished_at: 1_753_704_005,
+                source_path: None,
+                sourcetype: None,
+                status: "ok".to_string(),
+                error: None,
+                entries_inserted: None,
+                tags_applied: Some(42),
+                skipped: Vec::new(),
+                per_file: Vec::new(),
+                tags_by_rule: vec![ActivityRuleCount {
+                    rule_name: "generic_error".to_string(),
+                    count: 42,
+                }],
+            },
+        )
+        .unwrap();
+
+        let entries = all_activity_log_entries(&conn).unwrap();
+        assert_eq!(entries[0].operation, "retag");
+        assert_eq!(entries[0].source_path, None);
+        assert_eq!(entries[0].entries_inserted, None);
+        assert_eq!(entries[0].tags_applied, Some(42));
+        assert!(entries[0].per_file.is_empty());
+        assert_eq!(
+            entries[0].tags_by_rule,
+            vec![ActivityRuleCount {
+                rule_name: "generic_error".to_string(),
+                count: 42,
+            }]
+        );
     }
 }

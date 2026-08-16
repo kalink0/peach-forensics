@@ -1,0 +1,17 @@
+# EVTX Security-Auditing: account logoff. Companion tag to the built-in
+# message template for this event ID
+# (message_templates/examples/evtx_security_auditing.toml). Reference:
+# Microsoft's official Security Auditing event reference, "4634(S) An
+# account was logged off":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4634
+
+[rule]
+name = "evtx_logoff"
+description = "Account logoff (Security-Auditing 4634)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4634
+
+[rule.tag]
+value = "logoff"

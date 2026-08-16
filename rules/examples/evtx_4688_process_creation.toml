@@ -1,0 +1,17 @@
+# EVTX Security-Auditing: new process created. Companion tag to the
+# built-in message template for this event ID
+# (message_templates/examples/evtx_security_auditing.toml). Reference:
+# Microsoft's official Security Auditing event reference, "4688(S) A new
+# process has been created":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4688
+
+[rule]
+name = "evtx_process_creation"
+description = "New process created (Security-Auditing 4688)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4688
+
+[rule.tag]
+value = "process_creation"

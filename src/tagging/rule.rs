@@ -1,11 +1,14 @@
 use thiserror::Error;
 
 /// A tagging rule, deserialized from a rule TOML file. `match` can contain
-/// a mix of normalized fields
-/// (`sourcetype`, `level`, `message`) and source-specific fields (e.g. AUL
-/// `subsystem`, EVTX `event_id`) — anything not recognized as normalized is
-/// looked up in the entry's `fields` JSON. All conditions in one rule must
-/// hold (AND) for it to match.
+/// a mix of normalized fields (`sourcetype`, `level`, `message`, `event_id`,
+/// `provider`) and source-specific fields (e.g. AUL `subsystem`) — anything
+/// not recognized as normalized is looked up as a flat top-level key in the
+/// entry's `fields` JSON. `event_id`/`provider` need their own sourcetype-aware
+/// resolution rather than that flat lookup: EVTX's `fields` nests them under
+/// `Event.System` (see [`normalized_field`]), unlike AUL's genuinely flat
+/// `subsystem`/`category`. All conditions in one rule must hold (AND) for it
+/// to match.
 ///
 /// `message_contains` is a substring variant of `message`: the value is
 /// either a single string or an array of strings, and the rule matches if
@@ -88,10 +91,63 @@ impl Rule {
                         .iter()
                         .any(|needle| actual.contains(needle.as_str()))
                 }),
+                "event_id" | "provider" | "host" | "process" | "subsystem" | "category" => {
+                    normalized_field(key, sourcetype, fields)
+                        .or_else(|| fields.get(key))
+                        .is_some_and(|actual| toml_matches_json(expected, actual))
+                }
                 other => fields
                     .get(other)
                     .is_some_and(|actual| toml_matches_json(expected, actual)),
             })
+    }
+}
+
+/// Resolves normalized match keys that don't live at a flat top-level key
+/// in every sourcetype's `fields` JSON to their actual sourcetype-specific
+/// location — a flat `fields.get(key)` (the fallback every other
+/// source-specific match key uses, and still tried second via
+/// [`Rule::matches`]'s `.or_else`, e.g. for AUL's genuinely flat
+/// `subsystem`/`category`/`process` or a `text_config` parser whose
+/// `field_mapping` happens to produce a top-level key with the same name)
+/// would never find EVTX's `event_id`/`provider`/`host`/`subsystem`
+/// (nested under `Event.System`) or journald's `host`/`process` (which live
+/// under `_HOSTNAME`/`SYSLOG_IDENTIFIER`/`_COMM`, not `host`/`process`).
+///
+/// Same paths `parsers::evtx::template_rendered_message` resolves against,
+/// and the same ones `db::timeline_queries`'s `host_case_sql`/
+/// `process_case_sql`/`subsystem_case_sql`/`event_code_case_sql` (backing
+/// both the Host/Process/Subsystem/Event ID timeline columns and their
+/// `host=`/`process=`/`subsystem=`/`event_id=` search-grammar filters)
+/// already use — kept in sync with those rather than re-derived, since a
+/// rule condition on one of these fields is meant to match exactly what the
+/// analyst sees in that column. `provider` and `subsystem` deliberately
+/// resolve to the same path: `provider` is EVTX's equivalent of AUL's
+/// `subsystem` (per `docs/field-extraction.md`), and the Advanced tagging
+/// dialog's "Filter by..."-derived field conditions always use the
+/// normalized `subsystem` keyword, never `provider` — `provider` stays
+/// accepted here only because it's the term the tagging docs' own example
+/// rules use. Sourcetype/key combinations with no known nested path
+/// (including AUL, which has no `event_id`/`provider` concept, only its own
+/// already-flat `subsystem`/`category`/`process`) resolve to `None`, same
+/// as an absent generic field — the `.or_else(|| fields.get(key))` fallback
+/// in `Rule::matches` is what makes AUL's flat fields work at all.
+fn normalized_field<'a>(
+    key: &str,
+    sourcetype: &str,
+    fields: &'a serde_json::Value,
+) -> Option<&'a serde_json::Value> {
+    match (sourcetype, key) {
+        ("evtx", "event_id") => fields.pointer("/Event/System/EventID"),
+        ("evtx", "provider" | "subsystem") => {
+            fields.pointer("/Event/System/Provider_attributes/Name")
+        }
+        ("evtx", "host") => fields.pointer("/Event/System/Computer"),
+        ("journald", "host") => fields.pointer("/_HOSTNAME"),
+        ("journald", "process") => fields
+            .pointer("/SYSLOG_IDENTIFIER")
+            .or_else(|| fields.pointer("/_COMM")),
+        _ => None,
     }
 }
 
@@ -226,20 +282,150 @@ value = "error"
         assert!(!rule.matches("evtx", None, None, &null));
     }
 
+    /// `fields` here mirrors the real nested shape `parsers::evtx` actually
+    /// produces (`{"Event": {"System": {"EventID": ...}}}`), not a flat
+    /// `{"event_id": ...}` — the earlier version of this test used the flat
+    /// shape and passed even though `event_id` rules never matched a real
+    /// EVTX entry, because `Rule::matches` only fell back to a top-level
+    /// `fields.get()` lookup. Keep this nested; it's the only thing that
+    /// would have caught that.
     #[test]
-    fn matches_on_source_specific_field_in_fields_json() {
+    fn matches_on_evtx_event_id_via_nested_json_path() {
         let rule = Rule::from_toml_str(
             "[rule]\nname = \"failed_logon\"\n[rule.match]\nsourcetype = \"evtx\"\nevent_id = 4625\n[rule.tag]\nvalue = \"auth_failure\"\n",
         )
         .unwrap();
 
-        let matching = serde_json::json!({"event_id": 4625});
-        let wrong_id = serde_json::json!({"event_id": 4624});
-        let missing_field = serde_json::json!({});
+        let matching = serde_json::json!({"Event": {"System": {"EventID": 4625}}});
+        let wrong_id = serde_json::json!({"Event": {"System": {"EventID": 4624}}});
+        let missing_field = serde_json::json!({"Event": {"System": {}}});
 
         assert!(rule.matches("evtx", None, None, &matching));
         assert!(!rule.matches("evtx", None, None, &wrong_id));
         assert!(!rule.matches("evtx", None, None, &missing_field));
+    }
+
+    #[test]
+    fn matches_on_evtx_provider_via_nested_json_path() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"security_auditing\"\n[rule.match]\nsourcetype = \"evtx\"\nprovider = \"Microsoft-Windows-Security-Auditing\"\n[rule.tag]\nvalue = \"security_auditing\"\n",
+        )
+        .unwrap();
+
+        let matching = serde_json::json!({
+            "Event": {"System": {"Provider_attributes": {"Name": "Microsoft-Windows-Security-Auditing"}}}
+        });
+        let other_provider = serde_json::json!({
+            "Event": {"System": {"Provider_attributes": {"Name": "Microsoft-Windows-Kernel-General"}}}
+        });
+
+        assert!(rule.matches("evtx", None, None, &matching));
+        assert!(!rule.matches("evtx", None, None, &other_provider));
+    }
+
+    /// `subsystem` on EVTX must resolve the same nested path `provider`
+    /// does — the Advanced tagging dialog's "Filter by..."-derived field
+    /// conditions always write `subsystem` (the normalized keyword shared
+    /// with AUL, matching the timeline's Subsystem column), never
+    /// `provider`, so a rule using that keyword must still match real EVTX
+    /// data. Regression guard for the same class of bug `event_id`/
+    /// `provider` had before `normalized_field` existed: routing a
+    /// normalized keyword through the generic flat `fields.get` fallback
+    /// silently never matches EVTX's nested shape.
+    #[test]
+    fn matches_on_evtx_subsystem_via_the_same_nested_path_as_provider() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"security_auditing\"\n[rule.match]\nsourcetype = \"evtx\"\nsubsystem = \"Microsoft-Windows-Security-Auditing\"\n[rule.tag]\nvalue = \"security_auditing\"\n",
+        )
+        .unwrap();
+
+        let matching = serde_json::json!({
+            "Event": {"System": {"Provider_attributes": {"Name": "Microsoft-Windows-Security-Auditing"}}}
+        });
+        let other_provider = serde_json::json!({
+            "Event": {"System": {"Provider_attributes": {"Name": "Microsoft-Windows-Kernel-General"}}}
+        });
+
+        assert!(rule.matches("evtx", None, None, &matching));
+        assert!(!rule.matches("evtx", None, None, &other_provider));
+    }
+
+    #[test]
+    fn matches_on_evtx_host_via_nested_json_path() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"h\"\n[rule.match]\nsourcetype = \"evtx\"\nhost = \"WORKSTATION1\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+
+        let matching = serde_json::json!({"Event": {"System": {"Computer": "WORKSTATION1"}}});
+        let other_host = serde_json::json!({"Event": {"System": {"Computer": "WORKSTATION2"}}});
+
+        assert!(rule.matches("evtx", None, None, &matching));
+        assert!(!rule.matches("evtx", None, None, &other_host));
+    }
+
+    /// journald's own field names (`_HOSTNAME`, `SYSLOG_IDENTIFIER`/
+    /// `_COMM`) don't literally spell "host"/"process" — same nested-vs-flat
+    /// mismatch as EVTX, just with flat-but-differently-named keys instead
+    /// of a nested path.
+    #[test]
+    fn matches_on_journald_host_and_process_via_their_actual_field_names() {
+        let host_rule = Rule::from_toml_str(
+            "[rule]\nname = \"h\"\n[rule.match]\nsourcetype = \"journald\"\nhost = \"web01\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        let process_rule = Rule::from_toml_str(
+            "[rule]\nname = \"p\"\n[rule.match]\nsourcetype = \"journald\"\nprocess = \"sshd\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+
+        let entry = serde_json::json!({"_HOSTNAME": "web01", "SYSLOG_IDENTIFIER": "sshd"});
+        let other_entry = serde_json::json!({"_HOSTNAME": "web02", "_COMM": "cron"});
+
+        assert!(host_rule.matches("journald", None, None, &entry));
+        assert!(!host_rule.matches("journald", None, None, &other_entry));
+        assert!(process_rule.matches("journald", None, None, &entry));
+        assert!(!process_rule.matches("journald", None, None, &other_entry));
+
+        // `_COMM` fallback when `SYSLOG_IDENTIFIER` is absent.
+        let comm_only = serde_json::json!({"_COMM": "sshd"});
+        assert!(process_rule.matches("journald", None, None, &comm_only));
+    }
+
+    /// An `event_id`/`provider` rule is EVTX-specific by construction — a
+    /// non-evtx sourcetype has no known path to resolve them against
+    /// (`normalized_field` returns `None`), so the condition never holds
+    /// regardless of what happens to be in `fields`.
+    #[test]
+    fn evtx_normalized_fields_never_match_a_non_evtx_sourcetype() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"e\"\n[rule.match]\nevent_id = 4625\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+
+        let looks_like_it_could_match = serde_json::json!({"Event": {"System": {"EventID": 4625}}});
+
+        assert!(!rule.matches("aul", None, None, &looks_like_it_could_match));
+        assert!(!rule.matches("text_config", None, None, &looks_like_it_could_match));
+    }
+
+    /// Regression guard for the generic fallback path (`fields.get(other)`)
+    /// that source-specific-but-not-normalized fields like AUL's flat
+    /// `subsystem` still rely on — `event_id`/`provider` gained their own
+    /// sourcetype-aware match arm, but everything else must keep going
+    /// through the flat top-level lookup unchanged.
+    #[test]
+    fn matches_on_a_flat_source_specific_field_via_generic_fallback() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"mdns\"\n[rule.match]\nsourcetype = \"aul\"\nsubsystem = \"com.apple.mDNSResponder\"\n[rule.tag]\nvalue = \"mdns\"\n",
+        )
+        .unwrap();
+
+        let matching = serde_json::json!({"subsystem": "com.apple.mDNSResponder"});
+        let other_subsystem = serde_json::json!({"subsystem": "com.apple.wifi"});
+
+        assert!(rule.matches("aul", None, None, &matching));
+        assert!(!rule.matches("aul", None, None, &other_subsystem));
     }
 
     #[test]

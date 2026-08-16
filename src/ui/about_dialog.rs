@@ -146,10 +146,18 @@ fn acknowledgements_tab(ui: &mut egui::Ui) {
     ui.add_space(10.0);
     ui.strong("Research");
     ui.label(
-        "The built-in AUL pattern-of-life rule pack (rules/examples/aul_*.toml) \
+        "The built-in AUL rule pack (rules/examples/aul_*.toml) \
          is built on predicates from \"Apple Unified Log Predicates in \
          iLEAPP: The Reference\" by Alexis Brignoni, rather than re-derived \
          from scratch \u{2014} leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference.",
+    );
+    ui.add_space(4.0);
+    ui.label(
+        "The built-in EVTX message templates and tagging \
+         rule pack (message_templates/examples/evtx_*.toml, \
+         rules/examples/evtx_*.toml) are cross-checked against Microsoft's \
+         official Security Auditing event reference for each event ID \
+         \u{2014} learn.microsoft.com/windows/security/threat-protection/auditing/.",
     );
 
     ui.add_space(10.0);

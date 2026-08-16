@@ -30,6 +30,29 @@ pub fn default_user_rules_dir() -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Every `*.toml` file directly under `dir` (not recursive — `create_rule`
+/// only ever writes flat into the configured rules directory, never into a
+/// subfolder), sorted for deterministic ordering. This is what "auto-load
+/// this session's personal rule files" means: `app.rs` calls this once at
+/// startup to seed the initial tagging-rule selection, so a rule created via
+/// "Tag all matching (advanced)..." in a previous session applies again
+/// without the analyst having to manually re-pick it via "Choose tagging
+/// rules...". Whether each discovered file is actually a *valid* rule is
+/// left to `Rule::from_toml_str` at load/re-tag time (same as a manually
+/// picked file) — this only discovers candidates.
+pub fn scan_rules_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("failed to read rules directory {}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("toml")
+        })
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
 /// Turns a rule/tag name into a filesystem-safe file stem: lowercase,
 /// non-alphanumeric runs collapsed to a single underscore, trimmed — so
 /// "Screen Lock!" and "screen_lock" both land on `screen_lock.toml`
@@ -53,6 +76,76 @@ pub fn slugify(name: &str) -> String {
         "rule".to_string()
     } else {
         slug
+    }
+}
+
+/// What a rule created from the "Tag all matching (advanced)" dialog
+/// should check — chosen there from either the clicked row's message or one
+/// of its other populated fields (the same set `RowAction::FilterByColumn`'s
+/// "Filter by..." submenu offers: Sourcetype/Host/Process/Event ID/
+/// Subsystem/Category).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuleCondition {
+    /// `message_contains = "..."` — can grow into an OR-list of substrings
+    /// via [`append_message_contains_pattern`].
+    MessageContains(String),
+    /// `<field> = "<value>"` (exact match). No extend path yet, unlike
+    /// `MessageContains`: `tagging::rule::Rule::matches` has no OR-list
+    /// support for arbitrary/normalized fields the way `message_contains`
+    /// has, so there's nothing to append a second value to — [`create_rule`]
+    /// always creates a fresh file for this variant.
+    FieldEquals { field: &'static str, value: String },
+}
+
+/// Writes a brand-new single-condition rule file. Used when the analyst
+/// picks "New tag..." in the tagging UI — there's no existing file to
+/// preserve formatting in, so a plain string template is enough (unlike
+/// [`append_message_contains_pattern`]).
+///
+/// `MessageContains` is deliberately not scoped to `sourcetype`: the
+/// analyst is tagging by message content across whatever's loaded, same as
+/// the "generic, cross-source" example in the tagging docs. `FieldEquals`
+/// *is* always scoped to `sourcetype` — a bare `event_id = 4625` would
+/// otherwise only coincidentally happen to mean the right thing if some
+/// other loaded sourcetype ever used the same field name for something
+/// else; the row it was built from already has exactly one sourcetype, so
+/// there's no reason not to pin it down.
+pub fn create_rule(
+    path: &Path,
+    rule_name: &str,
+    sourcetype: &str,
+    condition: &RuleCondition,
+    tag_value: &str,
+) -> anyhow::Result<()> {
+    match condition {
+        RuleCondition::MessageContains(pattern) => {
+            create_message_contains_rule(path, rule_name, pattern, tag_value)
+        }
+        RuleCondition::FieldEquals { field, value } => {
+            // Written as a bare TOML integer when `value` parses as one
+            // (e.g. `event_id`), a quoted string otherwise — matching the
+            // shipped `rules/examples/evtx_*.toml` convention of writing
+            // `event_id = 4625`, not `"4625"`. The entry's own `fields`
+            // JSON stores EVTX's `EventID` as a JSON number (see
+            // `tagging::rule::toml_matches_json`), so a quoted string here
+            // would silently never match — the exact "looks like it should
+            // work, silently doesn't" failure mode `event_id`/`provider`
+            // matching already had once this session before
+            // `normalized_field` existed.
+            let value_toml = match value.parse::<i64>() {
+                Ok(n) => n.to_string(),
+                Err(_) => format!("\"{}\"", escape_toml_string(value)),
+            };
+            let match_body = format!(
+                "sourcetype = \"{}\"\n{field} = {value_toml}",
+                escape_toml_string(sourcetype),
+            );
+            let contents = format!(
+                "[rule]\nname = \"{rule_name}\"\ndescription = \"Created from the timeline's advanced tagging dialog\"\n\n[rule.match]\n{match_body}\n\n[rule.tag]\nvalue = \"{tag_value}\"\n",
+            );
+            std::fs::write(path, contents)
+                .with_context(|| format!("failed to write new rule file {}", path.display()))
+        }
     }
 }
 
@@ -261,5 +354,131 @@ mod tests {
             &serde_json::Value::Null
         ));
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn create_rule_with_message_contains_delegates_to_the_dedicated_function() {
+        let path = temp_path("create-rule-message");
+        create_rule(
+            &path,
+            "r",
+            "aul",
+            &RuleCondition::MessageContains("Screen did lock".to_string()),
+            "screen_lock",
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rule = Rule::from_toml_str(&text).unwrap();
+        // Not sourcetype-scoped, same as `create_message_contains_rule`
+        // directly — matches regardless of sourcetype.
+        assert!(rule.matches(
+            "evtx",
+            None,
+            Some("Screen did lock now"),
+            &serde_json::Value::Null
+        ));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn create_rule_with_field_equals_scopes_to_sourcetype_and_matches_via_normalized_field() {
+        let path = temp_path("create-rule-field");
+        create_rule(
+            &path,
+            "logon_success_custom",
+            "evtx",
+            &RuleCondition::FieldEquals {
+                field: "event_id",
+                value: "4624".to_string(),
+            },
+            "my_logon_tag",
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rule = Rule::from_toml_str(&text).unwrap();
+        assert_eq!(rule.rule.tag.value, "my_logon_tag");
+
+        let matching_fields = serde_json::json!({"Event": {"System": {"EventID": 4624}}});
+        assert!(rule.matches("evtx", None, None, &matching_fields));
+
+        let wrong_event = serde_json::json!({"Event": {"System": {"EventID": 4625}}});
+        assert!(!rule.matches("evtx", None, None, &wrong_event));
+
+        // Sourcetype scoping actually matters: same field/value shape,
+        // different sourcetype, must not match.
+        assert!(!rule.matches("aul", None, None, &matching_fields));
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn create_rule_with_field_equals_escapes_quotes_in_the_value() {
+        let path = temp_path("create-rule-field-escape");
+        create_rule(
+            &path,
+            "r",
+            "aul",
+            &RuleCondition::FieldEquals {
+                field: "subsystem",
+                value: r#"say "hi""#.to_string(),
+            },
+            "t",
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rule = Rule::from_toml_str(&text).unwrap();
+        let fields = serde_json::json!({"subsystem": "say \"hi\""});
+        assert!(rule.matches("aul", None, None, &fields));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    fn temp_dir_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "peach-rule-file-test-dir-{}-{}-{name}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn scan_rules_dir_finds_only_toml_files_sorted_and_ignores_subdirectories() {
+        let dir = temp_dir_path("scan");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("b_rule.toml"), "").unwrap();
+        std::fs::write(dir.join("a_rule.toml"), "").unwrap();
+        std::fs::write(dir.join("notes.txt"), "").unwrap();
+        std::fs::create_dir_all(dir.join("subdir.toml")).unwrap();
+
+        let found = scan_rules_dir(&dir).unwrap();
+
+        assert_eq!(
+            found,
+            vec![dir.join("a_rule.toml"), dir.join("b_rule.toml")]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scan_rules_dir_on_an_empty_directory_returns_an_empty_list() {
+        let dir = temp_dir_path("scan-empty");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            scan_rules_dir(&dir).unwrap(),
+            Vec::<std::path::PathBuf>::new()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scan_rules_dir_on_a_missing_directory_is_an_error() {
+        let dir = temp_dir_path("scan-missing");
+        assert!(scan_rules_dir(&dir).is_err());
     }
 }

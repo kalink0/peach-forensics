@@ -23,7 +23,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use anyhow::Context;
 use eframe::egui;
 
 use crate::db::timeline_queries::{self, Query};
@@ -261,7 +260,13 @@ impl SessionManagerDialog {
                                      manager — handy for copying the session elsewhere",
                                 )
                                 .clicked()
-                                && let Err(err) = reveal_in_file_manager(&entry.sqlite_path)
+                                // `.sqlite_path` specifically: every one of a
+                                // session's files (`<id>.sqlite`, `<id>.duckdb`,
+                                // its `.wal`) lives in that session's own
+                                // dedicated subdirectory, and `.sqlite_path` is
+                                // the one guaranteed to exist even for a
+                                // brand-new, still-empty session.
+                                && let Err(err) = crate::ui::reveal::reveal_file(&entry.sqlite_path)
                             {
                                 *error = Some(format!("{err:#}"));
                             }
@@ -439,45 +444,6 @@ fn spawn_event_counts(
         }
     });
     Some(rx)
-}
-
-/// Opens the OS file manager at `path`'s containing folder — every one of a
-/// session's files (`<id>.sqlite`, `<id>.duckdb`, its `.wal`) lives in that
-/// session's own dedicated subdirectory (see
-/// `session::persist::SessionPaths`), so revealing any one of them (here,
-/// always `<id>.sqlite` — it's the one path every session, even an empty
-/// one, is guaranteed to have) opens exactly that session's folder, nothing
-/// else's — the whole point being a one-drag copy for a hand-off.
-/// Explorer/Finder select the file itself; `xdg-open` on Linux just opens
-/// the containing folder — there's no cross-desktop convention for "open
-/// and select a specific file" to rely on there. Best-effort: spawns and
-/// returns, doesn't wait for or check an exit status (`explorer.exe` in
-/// particular is well known to report a nonzero exit code even on success).
-fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .arg(format!("/select,{}", path.display()))
-            .spawn()
-            .context("failed to launch Explorer")?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn()
-            .context("failed to launch Finder")?;
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let dir = path.parent().unwrap_or(path);
-        std::process::Command::new("xdg-open")
-            .arg(dir)
-            .spawn()
-            .context("failed to launch the file manager (is xdg-open installed?)")?;
-    }
-    Ok(())
 }
 
 /// Removes a session's whole directory — `<id>.sqlite`, `<id>.duckdb`, and

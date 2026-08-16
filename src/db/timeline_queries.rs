@@ -77,7 +77,14 @@ pub enum Field {
 }
 
 impl Field {
-    fn parse(s: &str) -> Option<Self> {
+    /// `pub(crate)`, not private: `app.rs`'s Advanced tagging preview count
+    /// also needs to turn one of `COLUMN_FILTER_FIELDS`'s keyword strings
+    /// back into a `Field` to build a `Query` directly (see
+    /// `TagDialogOutcome::CreateRule`'s `RuleCondition::FieldEquals`
+    /// handling) — those keyword strings are defined to be exactly what
+    /// this function accepts, so there's no real parsing risk in exposing
+    /// it, just reuse.
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "level" => Some(Self::Level),
             "sourcetype" => Some(Self::Sourcetype),
@@ -632,6 +639,34 @@ pub fn source_counts(conn: &Connection) -> anyhow::Result<HashMap<String, usize>
     let mut stmt =
         conn.prepare("SELECT event_id_source, COUNT(*) FROM log_entries GROUP BY event_id_source")?;
     let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+    })?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(Into::into)
+}
+
+/// `import_tags` counts grouped by `rule_name`, restricted to
+/// `source_file_ids` — the Activity Log's "how many did rule X tag" for one
+/// specific load, not the whole session the way [`tag_counts`] is (which is
+/// also grouped by `tag_value`, not `rule_name` — several rules can
+/// deliberately share a tag value, so that wouldn't answer "which rule"
+/// either). Empty input yields an empty map without querying — an empty
+/// `IN ()` is invalid SQL, and a load where every file was skipped
+/// legitimately has no source file ids to scope by.
+pub fn rule_counts_for_sources(
+    conn: &Connection,
+    source_file_ids: &[String],
+) -> anyhow::Result<HashMap<String, usize>> {
+    if source_file_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = vec!["?"; source_file_ids.len()].join(", ");
+    let sql = format!(
+        "SELECT rule_name, COUNT(*) FROM import_tags \
+         WHERE event_id_source IN ({placeholders}) GROUP BY rule_name"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(duckdb::params_from_iter(source_file_ids), |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
     })?;
     rows.collect::<Result<HashMap<_, _>, _>>()
@@ -2461,6 +2496,64 @@ mod tests {
 
             assert_eq!(counts.get(&source_a.to_string()), Some(&3));
             assert_eq!(counts.get(&source_b.to_string()), Some(&1));
+        }
+
+        fn insert_import_tag(
+            conn: &Connection,
+            event_id: EventId,
+            rule_name: &str,
+            tag_value: &str,
+        ) {
+            conn.execute(
+                "INSERT INTO import_tags (event_id_source, event_id_seq, rule_name, tag_value, applied_at)
+                 VALUES (?, ?, ?, ?, ?)",
+                duckdb::params![
+                    event_id.source_file_id.to_string(),
+                    event_id.sequence_number.value() as i64,
+                    rule_name,
+                    tag_value,
+                    Utc::now().naive_utc(),
+                ],
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn rule_counts_for_sources_groups_by_rule_name_within_scope() {
+            let conn = open_test_db();
+            let in_scope = SourceFileId::new_random();
+            let out_of_scope = SourceFileId::new_random();
+            insert_source(&conn, in_scope, "evtx");
+            insert_source(&conn, out_of_scope, "evtx");
+            let mut counter = SequenceCounter::new();
+            let a = EventId {
+                source_file_id: in_scope,
+                sequence_number: counter.next_sequence_number(),
+            };
+            let b = EventId {
+                source_file_id: in_scope,
+                sequence_number: counter.next_sequence_number(),
+            };
+            let c = EventId {
+                source_file_id: out_of_scope,
+                sequence_number: counter.next_sequence_number(),
+            };
+            insert_import_tag(&conn, a, "evtx_logon_success", "logon_success");
+            insert_import_tag(&conn, b, "evtx_process_creation", "process_creation");
+            // A tag on a source outside the requested scope must not leak in.
+            insert_import_tag(&conn, c, "evtx_logon_success", "logon_success");
+
+            let counts = rule_counts_for_sources(&conn, &[in_scope.to_string()]).unwrap();
+
+            assert_eq!(counts.get("evtx_logon_success"), Some(&1));
+            assert_eq!(counts.get("evtx_process_creation"), Some(&1));
+            assert_eq!(counts.len(), 2);
+        }
+
+        #[test]
+        fn rule_counts_for_sources_is_empty_for_no_source_ids() {
+            let conn = open_test_db();
+            assert!(rule_counts_for_sources(&conn, &[]).unwrap().is_empty());
         }
 
         #[test]

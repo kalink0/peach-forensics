@@ -1,7 +1,8 @@
 //! The two dialogs opened from the timeline's row context menu (see
 //! [`crate::ui::timeline_view::RowAction`]): a single manual tag, and
-//! "advanced tagging" (create or extend a `message_contains` rule with a
-//! live match-count preview).
+//! "advanced tagging" (create or extend a tagging rule — either a
+//! `message_contains` substring match or an exact match on one of the
+//! clicked row's other extracted fields — with a live match-count preview).
 //!
 //! This module only renders widgets and reports what the analyst decided —
 //! it doesn't touch the session DB or rule files itself. `app.rs` owns that
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 use eframe::egui;
 
 use crate::model::event_id::EventId;
+use crate::tagging::rule_file::RuleCondition;
 use crate::ui::dialog_window::show_dialog_window;
 
 /// What the analyst confirmed — `app.rs` executes it.
@@ -25,12 +27,24 @@ pub enum TagDialogOutcome {
     /// "Tag all matching..." confirmed with a brand-new tag/rule.
     CreateRule {
         rule_name: String,
-        pattern: String,
+        sourcetype: String,
+        condition: RuleCondition,
         tag_value: String,
     },
     /// "Tag all matching..." confirmed, reusing an existing tag by
-    /// extending the one loaded rule file that already produces it.
+    /// extending the one loaded rule file that already produces it. Only
+    /// reachable for a `message_contains` condition — see
+    /// [`RuleCondition::FieldEquals`]'s doc comment on why field conditions
+    /// never offer an extend path.
     ExtendRule { path: PathBuf, pattern: String },
+}
+
+/// What the Advanced dialog's currently-configured condition should be
+/// previewed against — `app.rs` uses this to decide which kind of live
+/// match-count query to run (see `update_tag_preview_request`).
+pub enum PreviewTarget<'a> {
+    MessageContains(&'a str),
+    FieldEquals { field: &'static str, value: &'a str },
 }
 
 /// Combo box of already-used tag values, plus a "New tag..." entry that
@@ -90,6 +104,20 @@ impl TagPicker {
     }
 }
 
+/// Which condition the Advanced dialog is currently configured to match on.
+/// `MessageContains` is always available (every entry has a message, even
+/// if empty); `Field` is one of the clicked row's own populated
+/// `COLUMN_FILTER_FIELDS` values (Sourcetype/Host/Process/Event ID/
+/// Subsystem/Category) — same set "Filter by..." offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchKind {
+    MessageContains,
+    Field {
+        field: &'static str,
+        label: &'static str,
+    },
+}
+
 pub enum TagDialog {
     Closed,
     Single {
@@ -98,6 +126,17 @@ pub enum TagDialog {
     },
     Advanced {
         event_id: EventId,
+        sourcetype: String,
+        /// The clicked row's original message — restored into `pattern`
+        /// when switching `match_kind` back to `MessageContains`.
+        message: String,
+        /// The clicked row's other populated fields, `(field, label,
+        /// value)` — restored into `pattern` when switching `match_kind` to
+        /// that field.
+        available_fields: Vec<(&'static str, &'static str, String)>,
+        match_kind: MatchKind,
+        /// Current condition value: a substring (`MessageContains`) or an
+        /// exact value (`Field`) — meaning depends on `match_kind`.
         pattern: String,
         picker: TagPicker,
         rule_name: String,
@@ -113,10 +152,20 @@ impl TagDialog {
         }
     }
 
-    pub fn open_advanced(event_id: EventId, message: String, existing_tags: Vec<String>) -> Self {
+    pub fn open_advanced(
+        event_id: EventId,
+        message: String,
+        sourcetype: String,
+        available_fields: Vec<(&'static str, &'static str, String)>,
+        existing_tags: Vec<String>,
+    ) -> Self {
         Self::Advanced {
             event_id,
-            pattern: message,
+            sourcetype,
+            pattern: message.clone(),
+            message,
+            available_fields,
+            match_kind: MatchKind::MessageContains,
             picker: TagPicker::new(existing_tags),
             rule_name: String::new(),
             extend_path: None,
@@ -127,12 +176,22 @@ impl TagDialog {
         !matches!(self, Self::Closed)
     }
 
-    /// The Advanced dialog's current pattern text, if that's the one open —
-    /// `app.rs` uses this to know what to run the (backgrounded, like the
-    /// timeline's own search count) live match-count preview against.
-    pub fn current_pattern(&self) -> Option<&str> {
+    /// What `app.rs`'s live match-count preview should run against, if the
+    /// Advanced dialog is the one open — `None` otherwise (nothing to
+    /// preview for the Single dialog).
+    pub fn current_preview_target(&self) -> Option<PreviewTarget<'_>> {
         match self {
-            Self::Advanced { pattern, .. } => Some(pattern.as_str()),
+            Self::Advanced {
+                match_kind,
+                pattern,
+                ..
+            } => Some(match match_kind {
+                MatchKind::MessageContains => PreviewTarget::MessageContains(pattern),
+                MatchKind::Field { field, .. } => PreviewTarget::FieldEquals {
+                    field,
+                    value: pattern,
+                },
+            }),
             _ => None,
         }
     }
@@ -142,10 +201,10 @@ impl TagDialog {
     /// exactly one, `None` if zero or several — ambiguous) that already
     /// produces a given tag value; owned by the caller since it needs
     /// `rule_paths`, which this dialog doesn't hold. `preview` is the
-    /// match count for the *current* pattern text, if the caller has one
-    /// ready yet (`None` while a background count is still in flight, or
-    /// briefly right after the pattern changed and a new one hasn't been
-    /// kicked off yet).
+    /// match count for the *current* condition, if the caller has one ready
+    /// yet (`None` while a background count is still in flight, or briefly
+    /// right after the condition changed and a new one hasn't been kicked
+    /// off yet).
     pub fn ui(
         &mut self,
         ctx: &egui::Context,
@@ -186,6 +245,10 @@ impl TagDialog {
                 );
             }
             Self::Advanced {
+                sourcetype,
+                message,
+                available_fields,
+                match_kind,
                 pattern,
                 picker,
                 rule_name,
@@ -196,11 +259,45 @@ impl TagDialog {
                     ctx,
                     "peach_tag_advanced_dialog",
                     "Advanced tagging",
-                    [460.0, 320.0],
+                    [460.0, 360.0],
                     true,
                     |ui, close| {
-                        ui.label("Tag every entry whose message contains:");
-                        ui.text_edit_singleline(pattern);
+                        ui.label("Match on:");
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .radio(
+                                    *match_kind == MatchKind::MessageContains,
+                                    "Message contains",
+                                )
+                                .clicked()
+                                && *match_kind != MatchKind::MessageContains
+                            {
+                                *match_kind = MatchKind::MessageContains;
+                                *pattern = message.clone();
+                            }
+                            for (field, label, value) in available_fields.iter() {
+                                let this_kind = MatchKind::Field { field, label };
+                                if ui.radio(*match_kind == this_kind, *label).clicked()
+                                    && *match_kind != this_kind
+                                {
+                                    *match_kind = this_kind;
+                                    *pattern = value.clone();
+                                }
+                            }
+                        });
+
+                        match match_kind {
+                            MatchKind::MessageContains => {
+                                ui.label("Tag every entry whose message contains:");
+                                ui.text_edit_singleline(pattern);
+                            }
+                            MatchKind::Field { label, .. } => {
+                                ui.label(format!(
+                                    "Tag every {sourcetype} entry whose {label} is exactly:"
+                                ));
+                                ui.text_edit_singleline(pattern);
+                            }
+                        }
                         match preview {
                             Some(count) => {
                                 ui.label(format!("Preview: {count} entries currently match"));
@@ -213,10 +310,20 @@ impl TagDialog {
                         picker.ui(ui);
 
                         let tag_value = picker.tag_value();
-                        *extend_path = tag_value
-                            .as_deref()
-                            .filter(|_| !picker.is_new())
-                            .and_then(&find_rule_for_tag);
+                        // No extend path for a field condition: the tagging
+                        // engine has no OR-list support for arbitrary/
+                        // normalized fields the way `message_contains` has
+                        // (see `RuleCondition::FieldEquals`'s doc comment),
+                        // so there's nothing to append a second value to —
+                        // picking an existing tag while matching on a field
+                        // always creates a fresh rule file.
+                        *extend_path = match match_kind {
+                            MatchKind::MessageContains => tag_value
+                                .as_deref()
+                                .filter(|_| !picker.is_new())
+                                .and_then(&find_rule_for_tag),
+                            MatchKind::Field { .. } => None,
+                        };
 
                         let needs_rule_name = extend_path.is_none();
                         if !picker.is_new() {
@@ -256,7 +363,18 @@ impl TagDialog {
                                     },
                                     None => TagDialogOutcome::CreateRule {
                                         rule_name: rule_name.trim().to_string(),
-                                        pattern: pattern.clone(),
+                                        sourcetype: sourcetype.clone(),
+                                        condition: match match_kind {
+                                            MatchKind::MessageContains => {
+                                                RuleCondition::MessageContains(pattern.clone())
+                                            }
+                                            MatchKind::Field { field, .. } => {
+                                                RuleCondition::FieldEquals {
+                                                    field,
+                                                    value: pattern.clone(),
+                                                }
+                                            }
+                                        },
                                         tag_value: tag_value.expect("Apply is disabled otherwise"),
                                     },
                                 });

@@ -57,4 +57,11 @@ fn main() {
         "EVTX_TEMPLATE_TOMLS",
         "evtx_builtin_templates.rs",
     );
+    embed_toml_dir(
+        &manifest_dir,
+        "rules/examples",
+        "evtx_",
+        "EVTX_RULE_TOMLS",
+        "evtx_builtin_rules.rs",
+    );
 }

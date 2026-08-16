@@ -1,0 +1,21 @@
+# EVTX Security-Auditing: member added to a security-enabled global group.
+# Shares the `group_membership_change` tag with 4732 (local group) and 4756
+# (universal group) — same underlying event, different AD group scope; the
+# scope itself is still visible in the Message column, this tag is for
+# filtering "was any group membership changed" across all three. Companion
+# tag to the built-in message template for this event ID
+# (message_templates/examples/evtx_security_auditing.toml). Reference:
+# Microsoft's official Security Auditing event reference, "4728(S) A member
+# was added to a security-enabled global group":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4728
+
+[rule]
+name = "evtx_group_membership_change_global"
+description = "Member added to a security-enabled global group (Security-Auditing 4728)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4728
+
+[rule.tag]
+value = "group_membership_change"

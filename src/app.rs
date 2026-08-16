@@ -1,5 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use anyhow::Context;
@@ -7,7 +9,7 @@ use eframe::egui;
 use rayon::prelude::*;
 
 use crate::config::{self, Settings, Theme};
-use crate::db::timeline_queries::{self, Query};
+use crate::db::timeline_queries::{self, Connector, Field, Query, Term, TermKind};
 use crate::db::timeline_schema::setup_timeline_schema;
 use crate::export::{self, ExportOutcome};
 use crate::model::event_id::{EventId, SourceFileId};
@@ -19,17 +21,19 @@ use crate::parsers::text_config::TextConfigParser;
 use crate::parsers::text_config_file::{self, TextFormatDraft};
 use crate::parsers::{LogParser, ParserConfig, StreamingProgress, parse_source_streaming};
 use crate::session::persist::{self, LoadedSource, SessionPaths};
-use crate::tagging::engine::{apply_import_time, re_tag};
+use crate::tagging::engine::{RetagSummary, apply_import_time, re_tag};
 use crate::tagging::rule::Rule;
 use crate::tagging::rule_file;
 use crate::ui::about_dialog::{self, AboutDialog};
+use crate::ui::activity_log_dialog::ActivityLogDialog;
+use crate::ui::builtin_rules_dialog::BuiltinRulesDialog;
 use crate::ui::filter_bar::FilterBar;
 use crate::ui::format_dialog::{FormatDialog, FormatDialogOutcome};
 use crate::ui::note_dialog::{NoteDialog, NoteDialogOutcome};
 use crate::ui::raw_fields_dialog::RawFieldsDialog;
 use crate::ui::session_dialog::{self, SessionManagerDialog, SessionManagerOutcome};
 use crate::ui::settings_dialog::{SettingsDialog, SettingsOutcome};
-use crate::ui::tag_dialog::{TagDialog, TagDialogOutcome};
+use crate::ui::tag_dialog::{PreviewTarget, TagDialog, TagDialogOutcome};
 use crate::ui::theme;
 use crate::ui::timeline_view::{RowAction, TimelineView, source_display_label};
 
@@ -71,10 +75,19 @@ enum SourceKind {
 /// doc comment for why a native file dialog stopped being a good fit for
 /// this once sessions could have a display name.
 enum FilePickOutcome {
-    /// Always at least one path when `Some` — never an empty `Vec` (every
-    /// producing site is either a single-path `pick_file`/`pick_folder`
-    /// result mapped into a one-element `Vec`, or `pick_files`, which
-    /// itself never resolves to `Some(vec![])`).
+    /// *Should* always be at least one path when `Some` — every producing
+    /// site is either a single-path `pick_file`/`pick_folder` result mapped
+    /// into a one-element `Vec`, or `pick_files`, which is documented to
+    /// never resolve to `Some(vec![])`. Not actually relied on, though: on
+    /// Linux, closing the native picker via the window's own X button
+    /// (rather than an explicit Cancel) has been observed to come back as
+    /// `Some(vec![])` instead of `None` — an `xdg-desktop-portal`/`rfd`
+    /// quirk, not something fixable here — so the handler
+    /// ([`PeachApp::ui`]'s `SourcePaths(Some(picked))` arm, via
+    /// [`source_path_and_queue_from_pick`]) treats an empty `Vec` the same
+    /// as a cancelled dialog rather than indexing into it. Indexing `[0]`
+    /// unconditionally used to panic with an index-out-of-bounds on exactly
+    /// that interaction.
     SourcePaths(Option<Vec<PathBuf>>),
     ParserConfigFile(Option<PathBuf>),
     RuleFiles(Option<Vec<PathBuf>>),
@@ -155,7 +168,46 @@ struct LoadSummary {
     tags_applied: usize,
     loaded_sources: Vec<LoadedSource>,
     skipped: Vec<SkippedFile>,
+    /// Entries inserted per successfully-loaded file, keyed by
+    /// `LoadedSource::path` — the Activity Log's "how many events came from
+    /// file X" breakdown for a multi-file load (a folder pick, or several
+    /// files chosen at once). Filled in by `run_sequential`/`run_parallel`
+    /// as each file finishes; `run_load` doesn't need to touch it.
+    per_file_inserted: std::collections::BTreeMap<String, usize>,
+    /// `import_tags` counts for *this load's* files only, grouped by
+    /// `rule_name` — filled in by `run_load` itself (a single follow-up
+    /// query after `run_sequential`/`run_parallel` returns, scoped to
+    /// `loaded_sources`' `source_file_id`s) rather than threaded through
+    /// the per-file tagging calls, since `import_tags` already has
+    /// everything needed and this avoids touching the hot per-entry
+    /// tagging loop in `tagging::engine::apply_import_time`.
+    tags_by_rule: HashMap<String, usize>,
+    /// Set when the analyst clicked "Abort" mid-load (`LoadContext::cancel`)
+    /// — everything else in this summary is still exactly what it would be
+    /// for a normal completed load (real inserted/tagged counts, real
+    /// `sources` rows), just fewer files/entries than a full run would have
+    /// produced. Never set by a genuine parse error — that still surfaces
+    /// as an `Err` from `run_load`, same as before.
+    cancelled: bool,
 }
+
+/// Sentinel returned from [`load_one_file`]'s/[`parse_file_for_worker`]'s
+/// streaming sink when `LoadContext::cancel` is set mid-file, so the
+/// `anyhow::Error` it propagates through `parse_source_streaming`'s `?` can
+/// be told apart from a genuine parse failure (`Error::is::<LoadCancelled>()`)
+/// — an aborted load must not be recorded (Activity Log, `LoadState`) as
+/// "failed", and the file it fired in must still be treated as a (smaller
+/// than usual) success, not skipped.
+#[derive(Debug)]
+struct LoadCancelled;
+
+impl std::fmt::Display for LoadCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "load cancelled by analyst")
+    }
+}
+
+impl std::error::Error for LoadCancelled {}
 
 enum LoadState {
     Idle,
@@ -179,18 +231,25 @@ enum LoadState {
         /// Files `collect_source_files` found but that produced no
         /// entries — empty for the common single-good-file case.
         skipped: Vec<SkippedFile>,
+        /// Set when the analyst clicked "Abort" mid-load — `inserted`/
+        /// `tags_applied`/`skipped` above are still exactly what actually
+        /// happened, just less of it than a full run would have produced.
+        cancelled: bool,
     },
     Failed(String),
 }
 
 enum RetagOutcome {
-    Done(Result<usize, String>),
+    Done(Result<RetagSummary, String>),
 }
 
 enum RetagState {
     Idle,
     Running,
-    Done { applied: usize },
+    Done {
+        applied: usize,
+        tags_by_rule: HashMap<String, usize>,
+    },
     Failed(String),
 }
 
@@ -224,13 +283,19 @@ pub struct PeachApp {
     source_path: Option<PathBuf>,
     parser_config_path: Option<PathBuf>,
     rule_paths: Vec<PathBuf>,
-    /// Whether the embedded AUL pattern-of-life pack
-    /// (`tagging::builtin::aul_pattern_of_life_rules`) is applied alongside
-    /// `rule_paths` on every load/re-tag. On by default — the analyst can
-    /// still see and turn it off, it just isn't opt-in by default, since
-    /// pattern-of-life categorization is the normal AUL workflow, not an
-    /// advanced feature (see `docs/`).
-    use_builtin_aul_rules: bool,
+    /// Which built-in rules (from either the AUL or EVTX pack, keyed by
+    /// `rule.name`) are applied alongside `rule_paths` on every load/re-tag
+    /// — every rule from both `tagging::builtin::aul_pattern_of_life_rules`/
+    /// `evtx_security_auditing_rules` by default (the analyst can still see
+    /// and narrow this via the "Built-in rules..." dialog
+    /// (`ui::builtin_rules_dialog`), it just isn't opt-in by default, since
+    /// pattern-of-life/Security-Auditing categorization is the normal
+    /// workflow for those sourcetypes, not an advanced feature). A rule
+    /// name absent here is simply not applied — no separate "disabled"
+    /// list, and no per-pack on/off flag: individual rule selection
+    /// subsumes "the whole pack" (select-all in the dialog) without a
+    /// second mechanism to keep in sync.
+    enabled_builtin_rules: std::collections::BTreeSet<String>,
     /// The still-open native file/folder dialog, if any — see
     /// [`FilePickOutcome`] for the full reasoning. Every picker button
     /// shares this one field rather than getting its own: the OS only ever
@@ -240,6 +305,13 @@ pub struct PeachApp {
     file_pick_rx: Option<mpsc::Receiver<FilePickOutcome>>,
     load_state: LoadState,
     load_rx: Option<mpsc::Receiver<LoadOutcome>>,
+    /// Set (fresh, to `false`) at the start of every `start_load`, cleared
+    /// back to `None` once that load's `LoadOutcome::Done` is handled —
+    /// `Some` exactly when the "Abort" button should be shown/enabled. The
+    /// "Abort" click just flips this to `true`; the background load thread
+    /// (via `LoadContext::cancel`, the same `Arc`) is what actually notices
+    /// and winds down.
+    load_cancel: Option<Arc<AtomicBool>>,
     retag_state: RetagState,
     retag_rx: Option<mpsc::Receiver<RetagOutcome>>,
     export_state: ExportState,
@@ -272,16 +344,20 @@ pub struct PeachApp {
     settings: Settings,
     settings_dialog: SettingsDialog,
     about_dialog: AboutDialog,
+    activity_log_dialog: ActivityLogDialog,
+    builtin_rules_dialog: BuiltinRulesDialog,
     /// Wall-clock anchor for the `Theme::Rainbow` animation — see
     /// `theme::tick`'s doc comment for why it's elapsed-time-based rather
     /// than a per-frame step.
     rainbow_start: Option<std::time::Instant>,
     tag_preview_rx: Option<mpsc::Receiver<usize>>,
-    /// The pattern the current/last `tag_preview` count corresponds to —
-    /// lets the UI tell "counting a stale pattern" apart from "count for
-    /// what's on screen right now" instead of showing a preview number
-    /// that's quietly wrong for what's currently typed.
-    tag_preview_pattern: String,
+    /// The condition the current/last `tag_preview` count corresponds to —
+    /// `(field, value)`, where `field` is `None` for a `message_contains`
+    /// substring search and `Some(field)` for an exact-match field
+    /// condition. Lets the UI tell "counting a stale condition" apart from
+    /// "count for what's configured right now" instead of showing a preview
+    /// number that's quietly wrong for the dialog's current state.
+    tag_preview_key: Option<(Option<&'static str>, String)>,
     tag_preview: Option<usize>,
 }
 
@@ -321,24 +397,39 @@ fn source_kind_for_path(path: &Path) -> SourceKind {
     }
 }
 
-/// Whether the "Built-in AUL pattern-of-life rules" checkbox is worth
-/// showing at all. That rule pack only ever matches AUL entries (it's a
-/// hard-coded `sourcetype = "aul"` condition on every rule in it — see
-/// `tagging::builtin`), so displaying the checkbox while the analyst is
-/// about to load something else, with no AUL data loaded either, would
+/// Splits a multi-file pick into "becomes `source_path`" (the first path)
+/// and "queued after" (the rest, in original order) — `None` for an empty
+/// pick, treated the same as the analyst cancelling the dialog outright.
+/// Defensive rather than trusting [`FilePickOutcome::SourcePaths`]'s
+/// documented "never empty" contract: see that variant's doc comment for
+/// the real-world case (closing the native picker via the window's X
+/// button on Linux) where it's been observed not to hold.
+fn source_path_and_queue_from_pick(mut picked: Vec<PathBuf>) -> Option<(PathBuf, Vec<PathBuf>)> {
+    if picked.is_empty() {
+        return None;
+    }
+    let first = picked.remove(0);
+    Some((first, picked))
+}
+
+/// Whether the "Built-in rules..." button is worth showing at all. Every
+/// built-in rule (either pack) only ever matches AUL or EVTX entries (a
+/// hard-coded `sourcetype` condition on every rule — see
+/// `tagging::builtin`), so offering the button while the analyst is about
+/// to load something else, with no AUL/EVTX data loaded either, would
 /// offer a control that provably cannot affect anything currently
 /// relevant: neither the upcoming load nor a re-tag of what's already in
-/// the timeline. True either when an AUL load is about to happen (current
-/// `source_kind`) or when the session already holds at least one loaded
-/// AUL source that "Re-tag now" could apply the pack to.
-fn aul_builtin_rules_checkbox_is_relevant(
+/// the timeline. True either when an AUL or EVTX load is about to happen
+/// (current `source_kind`) or when the session already holds at least one
+/// loaded AUL/EVTX source that "Re-tag now" could apply the rules to.
+fn builtin_rules_button_is_relevant(
     source_kind: SourceKind,
     loaded_sources: &[LoadedSource],
 ) -> bool {
-    source_kind == SourceKind::Aul
+    matches!(source_kind, SourceKind::Aul | SourceKind::Evtx)
         || loaded_sources
             .iter()
-            .any(|source| source.sourcetype == "aul")
+            .any(|source| source.sourcetype == "aul" || source.sourcetype == "evtx")
 }
 
 impl PeachApp {
@@ -396,11 +487,27 @@ impl PeachApp {
             source_kind,
             source_path,
             parser_config_path: None,
-            rule_paths: Vec::new(),
-            use_builtin_aul_rules: true,
+            // Every `*.toml` already sitting in the configured rules
+            // directory applies from the start, same as the built-in packs
+            // — a rule created via "Tag all matching (advanced)..." in a
+            // previous session doesn't need manually re-picking every time
+            // Peach starts. Best-effort: an unreadable/nonexistent rules
+            // directory (e.g. a stale configured override that was since
+            // deleted) just means starting with no extra rules selected,
+            // same as before this existed — still visible in the "N rule
+            // file(s) selected" label either way, so not a silent failure.
+            rule_paths: settings
+                .rules_dir()
+                .and_then(|dir| rule_file::scan_rules_dir(&dir))
+                .unwrap_or_default(),
+            enabled_builtin_rules: crate::tagging::builtin::all_builtin_rules()
+                .iter()
+                .map(|rule| rule.rule.name.clone())
+                .collect(),
             file_pick_rx: None,
             load_state: LoadState::Idle,
             load_rx: None,
+            load_cancel: None,
             retag_state: RetagState::Idle,
             retag_rx: None,
             export_state: ExportState::Idle,
@@ -422,9 +529,11 @@ impl PeachApp {
             settings,
             settings_dialog: SettingsDialog::Closed,
             about_dialog: AboutDialog::Closed,
+            activity_log_dialog: ActivityLogDialog::Closed,
+            builtin_rules_dialog: BuiltinRulesDialog::Closed,
             rainbow_start: None,
             tag_preview_rx: None,
-            tag_preview_pattern: String::new(),
+            tag_preview_key: None,
             tag_preview: None,
         }
     }
@@ -461,7 +570,7 @@ impl PeachApp {
     }
 
     fn start_retag(&mut self) {
-        if self.rule_paths.is_empty() && !self.use_builtin_aul_rules {
+        if self.rule_paths.is_empty() && self.enabled_builtin_rules.is_empty() {
             return;
         }
         let Some(conn) = self.timeline.try_clone_conn() else {
@@ -474,11 +583,19 @@ impl PeachApp {
         self.retag_state = RetagState::Running;
 
         let rule_paths = self.rule_paths.clone();
-        let include_builtin_aul_rules = self.use_builtin_aul_rules;
+        let enabled_builtin_rules = self.enabled_builtin_rules.clone();
+        let session_sqlite_path = self.session_paths.sqlite_path.clone();
 
         std::thread::spawn(move || {
-            let result = run_retag(&rule_paths, include_builtin_aul_rules, conn)
-                .map_err(|err| format!("{err:#}"));
+            let started_at = chrono::Utc::now().timestamp();
+            let retag_result = run_retag(&rule_paths, &enabled_builtin_rules, conn);
+            record_retag_activity_entry(
+                &session_sqlite_path,
+                started_at,
+                chrono::Utc::now().timestamp(),
+                &retag_result,
+            );
+            let result = retag_result.map_err(|err| format!("{err:#}"));
             let _ = tx.send(RetagOutcome::Done(result));
         });
     }
@@ -530,30 +647,45 @@ impl PeachApp {
             bytes_total: 0,
             total_entries: None,
         };
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.load_cancel = Some(Arc::clone(&cancel));
 
         let source_kind = self.source_kind;
         let parser_config_path = self.parser_config_path.clone();
         let rule_paths = self.rule_paths.clone();
-        let include_builtin_aul_rules = self.use_builtin_aul_rules;
+        let enabled_builtin_rules = self.enabled_builtin_rules.clone();
         let load_threads = self.settings.effective_load_threads();
+        let session_sqlite_path = self.session_paths.sqlite_path.clone();
 
         std::thread::spawn(move || {
             let progress_tx = tx.clone();
+            let started_at = chrono::Utc::now().timestamp();
             let start = std::time::Instant::now();
-            let result = run_load(
+            let load_result = run_load(
                 source_kind,
                 &source_path,
                 parser_config_path.as_deref(),
                 RuleSelection {
                     paths: &rule_paths,
-                    include_builtin_aul: include_builtin_aul_rules,
+                    enabled_builtin_rules: &enabled_builtin_rules,
                 },
                 conn,
                 load_threads,
-                &progress_tx,
-            )
-            .map(|summary| (summary, start.elapsed()))
-            .map_err(|err| format!("{err:#}"));
+                LoadControl {
+                    progress_tx: &progress_tx,
+                    cancel,
+                },
+            );
+            record_load_activity_entry(
+                &session_sqlite_path,
+                &source_path,
+                started_at,
+                chrono::Utc::now().timestamp(),
+                &load_result,
+            );
+            let result = load_result
+                .map(|summary| (summary, start.elapsed()))
+                .map_err(|err| format!("{err:#}"));
             let _ = tx.send(LoadOutcome::Done(result));
         });
     }
@@ -581,13 +713,19 @@ impl PeachApp {
                 let existing = self.combined_tag_vocabulary();
                 self.tag_dialog = TagDialog::open_single(event_id, existing);
                 self.tag_preview = None;
-                self.tag_preview_pattern.clear();
+                self.tag_preview_key = None;
             }
-            RowAction::TagAllMatching { event_id, message } => {
+            RowAction::TagAllMatching {
+                event_id,
+                message,
+                sourcetype,
+                fields,
+            } => {
                 let existing = self.combined_tag_vocabulary();
-                self.tag_dialog = TagDialog::open_advanced(event_id, message, existing);
+                self.tag_dialog =
+                    TagDialog::open_advanced(event_id, message, sourcetype, fields, existing);
                 self.tag_preview = None;
-                self.tag_preview_pattern.clear();
+                self.tag_preview_key = None;
             }
             RowAction::ShowContext { query_text } => {
                 self.filter_bar.set_text(query_text.clone());
@@ -731,30 +869,50 @@ impl PeachApp {
     }
 
     /// Kicks off a background match count for the Advanced dialog's
-    /// current pattern if it changed since the last one — same "don't
+    /// current condition if it changed since the last one — same "don't
     /// freeze the UI on every keystroke" reasoning as
-    /// `TimelineView::recount`, since this is the same kind of
-    /// leading-wildcard `LIKE` scan.
+    /// `TimelineView::recount`, since this is the same kind of scan over a
+    /// multi-million-row table.
     fn update_tag_preview_request(&mut self) {
-        let Some(pattern) = self.tag_dialog.current_pattern() else {
+        let Some(target) = self.tag_dialog.current_preview_target() else {
             return;
         };
-        if pattern == self.tag_preview_pattern || self.tag_preview_rx.is_some() {
+        let key: (Option<&'static str>, String) = match &target {
+            PreviewTarget::MessageContains(pattern) => (None, pattern.to_string()),
+            PreviewTarget::FieldEquals { field, value } => (Some(*field), value.to_string()),
+        };
+        if self.tag_preview_key.as_ref() == Some(&key) || self.tag_preview_rx.is_some() {
             return;
         }
-        self.tag_preview_pattern = pattern.to_string();
+        self.tag_preview_key = Some(key.clone());
         self.tag_preview = None;
-        if pattern.trim().is_empty() {
+        let (key_field, key_value) = key;
+        if key_value.trim().is_empty() {
             return;
         }
 
         let (tx, rx) = mpsc::channel();
         self.tag_preview_rx = Some(rx);
         let conn = self.timeline.try_clone_conn();
-        let pattern = pattern.to_string();
         std::thread::spawn(move || {
             let count = conn
-                .and_then(|conn| timeline_queries::count_message_contains(&conn, &pattern).ok())
+                .and_then(|conn| match key_field {
+                    None => timeline_queries::count_message_contains(&conn, &key_value).ok(),
+                    Some(field) => {
+                        let query = Query {
+                            terms: vec![Term {
+                                connector: Connector::And,
+                                negate: false,
+                                kind: TermKind::Field {
+                                    field: Field::parse(field)?,
+                                    value: key_value,
+                                    is_regex: false,
+                                },
+                            }],
+                        };
+                        timeline_queries::count_matching(&conn, &query).ok()
+                    }
+                })
                 .unwrap_or(0);
             let _ = tx.send(count);
         });
@@ -783,10 +941,15 @@ impl PeachApp {
             return;
         }
         let rule_paths = self.rule_paths.clone();
-        let preview = self
+        let current_key = self
             .tag_dialog
-            .current_pattern()
-            .filter(|pattern| *pattern == self.tag_preview_pattern)
+            .current_preview_target()
+            .map(|target| match target {
+                PreviewTarget::MessageContains(pattern) => (None, pattern.to_string()),
+                PreviewTarget::FieldEquals { field, value } => (Some(field), value.to_string()),
+            });
+        let preview = current_key
+            .filter(|key| Some(key) == self.tag_preview_key.as_ref())
             .and(self.tag_preview);
         let Some(outcome) = self.tag_dialog.ui(
             ctx,
@@ -808,13 +971,18 @@ impl PeachApp {
             }
             TagDialogOutcome::CreateRule {
                 rule_name,
-                pattern,
+                sourcetype,
+                condition,
                 tag_value,
             } => {
-                if let Ok(dir) = rule_file::default_user_rules_dir() {
+                if let Ok(dir) = self.settings.rules_dir() {
                     let path = dir.join(format!("{}.toml", rule_file::slugify(&rule_name)));
-                    if rule_file::create_message_contains_rule(
-                        &path, &rule_name, &pattern, &tag_value,
+                    if rule_file::create_rule(
+                        &path,
+                        &rule_name,
+                        &sourcetype,
+                        &condition,
+                        &tag_value,
                     )
                     .is_ok()
                     {
@@ -865,6 +1033,38 @@ impl PeachApp {
         };
         self.session_dialog =
             SessionManagerDialog::open(&dir, &self.session_paths.id, current_conn);
+    }
+
+    /// Opens the "Activity Log" dialog, populated with a fresh read of every
+    /// load/re-tag this session has recorded so far — same synchronous
+    /// `persist::open_session_db` + query pattern as `ManageNotes`
+    /// (`RowAction::ManageNotes`), not backgrounded: `activity_log` stays small
+    /// (one row per operation, never per timeline entry), so there's no UI
+    /// freeze risk to guard against here the way `SessionManagerDialog`'s
+    /// per-session row counts need to be.
+    fn open_activity_log_dialog(&mut self) {
+        let entries = persist::open_session_db(&self.session_paths.sqlite_path)
+            .and_then(|conn| persist::all_activity_log_entries(&conn))
+            .unwrap_or_default();
+        self.activity_log_dialog = ActivityLogDialog::open(entries);
+    }
+
+    /// Re-reads `activity_log` and pushes it into the dialog if it's currently
+    /// open — called right after a load or re-tag finishes (both the
+    /// success and failure paths already wrote an entry by this point, from
+    /// inside the background thread, before the outcome even reached this
+    /// UI-thread handler). Without this, a dialog left open across a load
+    /// would keep showing whatever it had at open time until manually
+    /// closed and reopened — the whole point of leaving it open while
+    /// working is to watch it update.
+    fn refresh_activity_log_dialog_if_open(&mut self) {
+        if !self.activity_log_dialog.is_open() {
+            return;
+        }
+        let entries = persist::open_session_db(&self.session_paths.sqlite_path)
+            .and_then(|conn| persist::all_activity_log_entries(&conn))
+            .unwrap_or_default();
+        self.activity_log_dialog.set_entries(entries);
     }
 
     /// Renders the "Manage sessions" dialog if open and switches to
@@ -924,6 +1124,23 @@ impl PeachApp {
             SettingsOutcome::Save(new_settings) => {
                 if let Err(err) = config::save(&new_settings) {
                     eprintln!("peach: failed to save settings: {err:#}");
+                }
+                // Re-scan and replace the current rule selection if the
+                // rules directory actually changed — otherwise saving
+                // Settings for an unrelated reason (e.g. Theme) would
+                // silently wipe out whatever's currently selected, rule
+                // files picked from elsewhere via "Choose tagging rules..."
+                // included. Same replace-the-whole-selection semantics that
+                // button already has, just triggered from here instead —
+                // not a merge, since there's no way to tell "still wanted"
+                // apart from "leftover from the old directory" otherwise.
+                let old_dir = self.settings.rules_dir().ok();
+                let new_dir = new_settings.rules_dir().ok();
+                if old_dir != new_dir
+                    && let Some(dir) = &new_dir
+                    && let Ok(paths) = rule_file::scan_rules_dir(dir)
+                {
+                    self.rule_paths = paths;
                 }
                 self.settings = new_settings;
             }
@@ -1010,21 +1227,22 @@ impl eframe::App for PeachApp {
                 Ok(outcome) => {
                     match outcome {
                         FilePickOutcome::SourcePaths(Some(picked)) => {
-                            // `picked` is never empty (see `FilePickOutcome::
-                            // SourcePaths`'s doc comment) — `[0]` and
-                            // `[1..]` are both always in bounds.
-                            self.source_path = Some(picked[0].clone());
-                            // Same "next queued source becomes the new
-                            // `source_path` once the current load finishes"
-                            // flow `--add-source` already drives (see the
-                            // `pending_cli_sources.pop_front()` handler in
-                            // this same match, below) — a multi-file pick
-                            // just seeds that queue directly instead of via
-                            // the CLI. Pushed to the *front*, in order, so
-                            // these take priority over anything already
-                            // queued rather than landing after it.
-                            for path in picked[1..].iter().rev() {
-                                self.pending_cli_sources.push_front(path.clone());
+                            if let Some((first, rest)) = source_path_and_queue_from_pick(picked) {
+                                self.source_path = Some(first);
+                                // Same "next queued source becomes the new
+                                // `source_path` once the current load
+                                // finishes" flow `--add-source` already
+                                // drives (see the
+                                // `pending_cli_sources.pop_front()` handler
+                                // in this same match, below) — a multi-file
+                                // pick just seeds that queue directly
+                                // instead of via the CLI. Pushed to the
+                                // *front*, in order, so these take priority
+                                // over anything already queued rather than
+                                // landing after it.
+                                for path in rest.into_iter().rev() {
+                                    self.pending_cli_sources.push_front(path);
+                                }
                             }
                         }
                         FilePickOutcome::ParserConfigFile(Some(picked)) => {
@@ -1076,11 +1294,13 @@ impl eframe::App for PeachApp {
                     Ok(LoadOutcome::Done(result)) => {
                         match result {
                             Ok((summary, elapsed)) => {
+                                let cancelled = summary.cancelled;
                                 self.load_state = LoadState::Done {
                                     inserted: summary.inserted,
                                     tags_applied: summary.tags_applied,
                                     elapsed,
                                     skipped: summary.skipped,
+                                    cancelled,
                                 };
                                 // Releases the multi-GB DuckDB Appender
                                 // memory the bulk load just left attached to
@@ -1104,7 +1324,14 @@ impl eframe::App for PeachApp {
                                     let _ =
                                         persist::save_loaded_sources(&conn, &self.loaded_sources);
                                 }
-                                if let Some(next) = self.pending_cli_sources.pop_front() {
+                                // An aborted load shouldn't silently barrel on
+                                // into the next `--add-source`-queued file —
+                                // the analyst cancelled *because* this was
+                                // taking too long/too much, so auto-starting
+                                // another load right away would defeat that.
+                                if !cancelled
+                                    && let Some(next) = self.pending_cli_sources.pop_front()
+                                {
                                     self.source_kind = source_kind_for_path(&next);
                                     self.source_path = Some(next);
                                     self.parser_config_path = None;
@@ -1112,7 +1339,9 @@ impl eframe::App for PeachApp {
                             }
                             Err(err) => self.load_state = LoadState::Failed(err),
                         }
+                        self.refresh_activity_log_dialog_if_open();
                         self.load_rx = None;
+                        self.load_cancel = None;
                         break;
                     }
                     Err(mpsc::TryRecvError::Empty) => {
@@ -1123,6 +1352,7 @@ impl eframe::App for PeachApp {
                         self.load_state =
                             LoadState::Failed("load worker disconnected unexpectedly".to_string());
                         self.load_rx = None;
+                        self.load_cancel = None;
                         break;
                     }
                 }
@@ -1133,8 +1363,11 @@ impl eframe::App for PeachApp {
             match rx.try_recv() {
                 Ok(RetagOutcome::Done(result)) => {
                     match result {
-                        Ok(applied) => {
-                            self.retag_state = RetagState::Done { applied };
+                        Ok(summary) => {
+                            self.retag_state = RetagState::Done {
+                                applied: summary.applied,
+                                tags_by_rule: summary.tags_by_rule,
+                            };
                             // Same reasoning as the load-completion handler:
                             // `re_tag`'s DELETE+Appender-rewrite of
                             // `import_tags` leaves memory attached to the
@@ -1154,6 +1387,7 @@ impl eframe::App for PeachApp {
                         }
                         Err(err) => self.retag_state = RetagState::Failed(err),
                     }
+                    self.refresh_activity_log_dialog_if_open();
                     self.retag_rx = None;
                 }
                 Err(mpsc::TryRecvError::Empty) => {
@@ -1283,6 +1517,11 @@ impl eframe::App for PeachApp {
                             }
                         }
                     });
+                    ui.separator();
+                    if ui.button("Activity Log...").clicked() {
+                        self.open_activity_log_dialog();
+                        ui.close();
+                    }
                 });
 
                 ui.menu_button("Help", |ui| {
@@ -1444,16 +1683,17 @@ impl eframe::App for PeachApp {
             }
 
             ui.horizontal(|ui| {
-                if aul_builtin_rules_checkbox_is_relevant(self.source_kind, &self.loaded_sources) {
-                    ui.checkbox(
-                        &mut self.use_builtin_aul_rules,
-                        "Built-in AUL pattern-of-life rules",
-                    )
-                    .on_hover_text(
-                        "Applies the bundled AUL rule pack (screen lock, WiFi, app launches, \
-                             etc.) on every load and re-tag, regardless of which rule files are \
-                             also selected below. Only ever matches AUL entries.",
-                    );
+                if builtin_rules_button_is_relevant(self.source_kind, &self.loaded_sources)
+                    && ui
+                        .button("Built-in rules...")
+                        .on_hover_text(
+                            "Choose exactly which built-in AUL/EVTX rules apply on every load \
+                             and re-tag, regardless of which rule files are also selected \
+                             below. Every built-in rule is enabled by default.",
+                        )
+                        .clicked()
+                {
+                    self.builtin_rules_dialog = BuiltinRulesDialog::open();
                 }
 
                 if ui
@@ -1463,9 +1703,15 @@ impl eframe::App for PeachApp {
                     )
                     .clicked()
                 {
-                    let task = rfd::AsyncFileDialog::new()
-                        .add_filter("TOML", &["toml"])
-                        .pick_files();
+                    let mut dialog = rfd::AsyncFileDialog::new().add_filter("TOML", &["toml"]);
+                    // Opens where rule files actually live by default — the
+                    // configured rules directory (same one auto-loaded at
+                    // startup, see `PeachApp::new`) — rather than wherever
+                    // the OS picker last happened to be.
+                    if let Ok(dir) = self.settings.rules_dir() {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    let task = dialog.pick_files();
                     self.file_pick_rx = Some(spawn_dialog_pick(task, |picked| {
                         FilePickOutcome::RuleFiles(picked.map(|handles: Vec<rfd::FileHandle>| {
                             handles.iter().map(|h| h.path().to_path_buf()).collect()
@@ -1480,7 +1726,7 @@ impl eframe::App for PeachApp {
 
                 let can_retag = !matches!(self.load_state, LoadState::Loading { .. })
                     && !matches!(self.retag_state, RetagState::Running)
-                    && (!self.rule_paths.is_empty() || self.use_builtin_aul_rules)
+                    && (!self.rule_paths.is_empty() || !self.enabled_builtin_rules.is_empty())
                     && self.timeline.total_rows() > 0;
                 if ui
                     .add_enabled(can_retag, egui::Button::new("Re-tag now"))
@@ -1498,8 +1744,21 @@ impl eframe::App for PeachApp {
                         ui.spinner();
                         ui.label("Re-tagging...");
                     }
-                    RetagState::Done { applied } => {
-                        ui.label(format!("Re-tag applied {applied} tags"));
+                    RetagState::Done {
+                        applied,
+                        tags_by_rule,
+                    } => {
+                        let response = ui.label(format!("Re-tag applied {applied} tags"));
+                        if !tags_by_rule.is_empty() {
+                            response.on_hover_ui(|ui| {
+                                let mut rules: Vec<(&String, &usize)> =
+                                    tags_by_rule.iter().collect();
+                                rules.sort_by(|a, b| a.0.cmp(b.0));
+                                for (rule_name, count) in rules {
+                                    ui.label(format!("{rule_name}: {count}"));
+                                }
+                            });
+                        }
                     }
                     RetagState::Failed(err) => {
                         ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
@@ -1537,6 +1796,19 @@ impl eframe::App for PeachApp {
                     .clicked()
                 {
                     self.start_load();
+                }
+                if matches!(self.load_state, LoadState::Loading { .. })
+                    && ui
+                        .button("Abort")
+                        .on_hover_text(
+                            "Stops after the file currently being parsed finishes (or, for a \
+                             large single file, at the next internal checkpoint) — whatever's \
+                             already inserted stays; nothing gets rolled back.",
+                        )
+                        .clicked()
+                    && let Some(cancel) = &self.load_cancel
+                {
+                    cancel.store(true, Ordering::Relaxed);
                 }
                 match &self.load_state {
                     LoadState::Idle => {}
@@ -1595,11 +1867,15 @@ impl eframe::App for PeachApp {
                         tags_applied,
                         elapsed,
                         skipped,
+                        cancelled,
                     } => {
                         ui.label(format!(
                             "Loaded {inserted} entries, applied {tags_applied} tags in {:.1}s",
                             elapsed.as_secs_f64()
                         ));
+                        if *cancelled {
+                            ui.colored_label(egui::Color32::from_rgb(230, 160, 0), "Aborted");
+                        }
                         if !skipped.is_empty() {
                             ui.colored_label(
                                 egui::Color32::from_rgb(230, 160, 0),
@@ -1669,6 +1945,9 @@ impl eframe::App for PeachApp {
         self.handle_session_dialog(ui.ctx());
         self.handle_settings_dialog(ui.ctx());
         self.about_dialog.ui(ui.ctx());
+        self.activity_log_dialog.ui(ui.ctx());
+        self.builtin_rules_dialog
+            .ui(ui.ctx(), &mut self.enabled_builtin_rules);
     }
 }
 
@@ -1779,13 +2058,24 @@ fn path_byte_size(path: &Path) -> u64 {
 /// [`run_sequential`] regardless of `thread_count`: there's nothing to
 /// parallelize across a list of one.
 /// Which tagging rules a load/re-tag should apply — user-selected files plus
-/// whether the embedded AUL pattern-of-life pack
-/// (`tagging::builtin::aul_pattern_of_life_rules`) is also merged in. A
-/// struct rather than two more `run_load` parameters, same reasoning as
-/// [`LoadContext`] bundling its own fields.
+/// which built-in rules (by name, from either
+/// `tagging::builtin::aul_pattern_of_life_rules` or
+/// `evtx_security_auditing_rules`) are also merged in. A struct rather than
+/// two more `run_load` parameters, same reasoning as [`LoadContext`]
+/// bundling its own fields.
 struct RuleSelection<'a> {
     paths: &'a [PathBuf],
-    include_builtin_aul: bool,
+    enabled_builtin_rules: &'a std::collections::BTreeSet<String>,
+}
+
+/// How the caller watches/steers an in-flight load — where to report
+/// progress, and how it notices "Abort" was clicked. Bundled together
+/// rather than two more `run_load` parameters, same reasoning as
+/// [`RuleSelection`]/[`LoadContext`] (and keeps `run_load` under clippy's
+/// `too_many_arguments` threshold).
+struct LoadControl<'a> {
+    progress_tx: &'a mpsc::Sender<LoadOutcome>,
+    cancel: Arc<AtomicBool>,
 }
 
 fn run_load(
@@ -1795,7 +2085,7 @@ fn run_load(
     rules: RuleSelection,
     conn: duckdb::Connection,
     thread_count: usize,
-    progress_tx: &mpsc::Sender<LoadOutcome>,
+    control: LoadControl,
 ) -> anyhow::Result<LoadSummary> {
     setup_timeline_schema(&conn)?;
 
@@ -1829,7 +2119,7 @@ fn run_load(
     // ...) depending on which config is loaded, so its own sourcetype() is
     // just a generic marker (see parsers/mod.rs doc comment).
     let sourcetype = config.parser.sourcetype.clone();
-    let rules = load_rules(rules.paths, rules.include_builtin_aul)?;
+    let rules = load_rules(rules.paths, rules.enabled_builtin_rules)?;
 
     let files = collect_source_files(source_kind, source_path);
     if files.is_empty() {
@@ -1843,10 +2133,11 @@ fn run_load(
         sourcetype: &sourcetype,
         rules: &rules,
         parser_config_path,
+        cancel: Arc::clone(&control.cancel),
     };
 
-    if files.len() <= 1 {
-        run_sequential(&load_ctx, files, &conn, bytes_total, progress_tx)
+    let mut summary = if files.len() <= 1 {
+        run_sequential(&load_ctx, files, &conn, bytes_total, control.progress_tx)?
     } else {
         run_parallel(
             &load_ctx,
@@ -1854,9 +2145,24 @@ fn run_load(
             &conn,
             bytes_total,
             thread_count,
-            progress_tx,
-        )
-    }
+            control.progress_tx,
+        )?
+    };
+    summary.cancelled = control.cancel.load(Ordering::Relaxed);
+
+    // One follow-up query against `import_tags` (already has `rule_name`
+    // per row) rather than threading a per-rule breakdown through
+    // `run_sequential`/`run_parallel`'s per-file tagging calls — scoped to
+    // just this load's own `source_file_id`s so a re-tag-driven or earlier
+    // load's tags in the same session don't leak into this load's numbers.
+    let source_file_ids: Vec<String> = summary
+        .loaded_sources
+        .iter()
+        .map(|source| source.source_file_id.clone())
+        .collect();
+    summary.tags_by_rule = timeline_queries::rule_counts_for_sources(&conn, &source_file_ids)?;
+
+    Ok(summary)
 }
 
 /// Everything about a `run_load` call that's the same for every file it
@@ -1870,6 +2176,13 @@ struct LoadContext<'a> {
     sourcetype: &'a str,
     rules: &'a [Rule],
     parser_config_path: Option<&'a Path>,
+    /// Set by the "Abort" button (`PeachApp::load_cancel`) to stop an
+    /// in-flight load early — checked between files in
+    /// `run_sequential`/`run_parallel`'s loops and inside the per-batch
+    /// streaming sink in `load_one_file`/`parse_file_for_worker`. An `Arc`
+    /// (not a plain `bool`) because it has to be visible from both this
+    /// background load thread and the UI thread's click handler at once.
+    cancel: Arc<AtomicBool>,
 }
 
 /// The single-parse-unit path — always used for AUL (its `.logarchive` is
@@ -1890,11 +2203,20 @@ fn run_sequential(
         tags_applied: 0,
         loaded_sources: Vec::new(),
         skipped: Vec::new(),
+        per_file_inserted: std::collections::BTreeMap::new(),
+        tags_by_rule: HashMap::new(),
+        cancelled: false,
     };
     let mut total_inserted = 0usize;
     let mut bytes_done = 0u64;
 
     for file_path in files {
+        // Already cancelled before this file even started (e.g. "Abort"
+        // clicked while between-files, or before the load began at all) —
+        // don't start parsing something that's just going to be discarded.
+        if ctx.cancel.load(Ordering::Relaxed) {
+            break;
+        }
         let file_bytes = path_byte_size(&file_path);
         match load_one_file(
             ctx,
@@ -1905,8 +2227,11 @@ fn run_sequential(
             bytes_total,
             progress_tx,
         ) {
-            Ok(Some((tags_applied, loaded_source))) => {
+            Ok(Some((tags_applied, loaded_source, inserted_this_file))) => {
                 summary.tags_applied += tags_applied;
+                summary
+                    .per_file_inserted
+                    .insert(loaded_source.path.clone(), inserted_this_file);
                 summary.loaded_sources.push(loaded_source);
             }
             Ok(None) => summary.skipped.push(SkippedFile {
@@ -1929,6 +2254,13 @@ fn run_sequential(
             // starts its own count from scratch.
             total_entries: None,
         });
+        // Checked here (between files) in addition to inside
+        // `load_one_file`'s own per-batch check: a file that finished (or
+        // was itself cancelled) right as "Abort" was clicked must not be
+        // followed by starting another one.
+        if ctx.cancel.load(Ordering::Relaxed) {
+            break;
+        }
     }
     summary.inserted = total_inserted;
 
@@ -1950,7 +2282,16 @@ fn run_sequential(
 ///
 /// `Ok(None)` — not an error — when the file parsed cleanly but matched
 /// zero entries: still worth a note in the skip report ([`run_load`]), but
-/// not a parse failure, so it's kept distinct from `Err`.
+/// not a parse failure, so it's kept distinct from `Err`. On `Ok(Some(...))`,
+/// the third element is this file's own insert count (not the running
+/// `total_inserted`) — [`LoadSummary::per_file_inserted`]'s source.
+///
+/// A mid-file [`LoadCancelled`] (the "Abort" button, `ctx.cancel`) also
+/// surfaces here as `Ok(Some(...))`/`Ok(None)` rather than `Err` — whatever
+/// was flushed before the cancel is a perfectly valid, if smaller than
+/// usual, result; the caller ([`run_sequential`]/[`run_parallel`]) learns
+/// the load was cancelled by checking `ctx.cancel` itself, not from this
+/// return value.
 fn load_one_file(
     ctx: &LoadContext,
     file_path: &Path,
@@ -1959,7 +2300,7 @@ fn load_one_file(
     bytes_done_before: u64,
     bytes_total: u64,
     progress_tx: &mpsc::Sender<LoadOutcome>,
-) -> anyhow::Result<Option<(usize, LoadedSource)>> {
+) -> anyhow::Result<Option<(usize, LoadedSource, usize)>> {
     let mut batch: Vec<LogEntry> = Vec::with_capacity(LOAD_BATCH_SIZE);
     let mut inserted_this_file = 0usize;
     let mut tags_applied = 0usize;
@@ -1973,6 +2314,12 @@ fn load_one_file(
     let inserted_cell = std::cell::Cell::new(*total_inserted);
     let bytes_done_cell = std::cell::Cell::new(bytes_done_before);
     let total_entries_cell: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
+    // Every entry carries the same `source_file_id` (assigned once per file
+    // by `parse_source_streaming`, before the first one reaches this sink),
+    // so capturing it off the first entry gives `load_one_file` its own copy
+    // even if streaming is cut short by [`LoadCancelled`] below —
+    // `parse_source_streaming`'s `Err` path doesn't return the id at all.
+    let captured_source_file_id: std::cell::Cell<Option<SourceFileId>> = std::cell::Cell::new(None);
     let send_progress = |inserted: usize, bytes_done: u64, total_entries: Option<usize>| {
         // Best-effort: if the UI thread has already dropped its receiver
         // (e.g. app shutting down mid-load), there's nobody to tell and the
@@ -1985,11 +2332,14 @@ fn load_one_file(
         });
     };
 
-    let source_file_id = parse_source_streaming(
+    let stream_result = parse_source_streaming(
         ctx.parser,
         file_path,
         ctx.config,
         |entry| {
+            if captured_source_file_id.get().is_none() {
+                captured_source_file_id.set(Some(entry.event_id.source_file_id));
+            }
             inserted_this_file += 1;
             inserted_cell.set(inserted_cell.get() + 1);
             batch.push(entry);
@@ -2000,6 +2350,9 @@ fn load_one_file(
                     bytes_done_cell.get(),
                     total_entries_cell.get(),
                 );
+                if ctx.cancel.load(Ordering::Relaxed) {
+                    anyhow::bail!(LoadCancelled);
+                }
             }
             Ok(())
         },
@@ -2017,8 +2370,20 @@ fn load_one_file(
                 send_progress(inserted_cell.get(), bytes_done_cell.get(), Some(total));
             },
         },
-    )?;
+    );
     *total_inserted = inserted_cell.get();
+
+    // A batch already flushed above (right before the cancel check that
+    // fired) leaves nothing in `batch` — this only ever has something to do
+    // for a normal end-of-file remainder under `LOAD_BATCH_SIZE`.
+    let source_file_id = match stream_result {
+        Ok(id) => id,
+        Err(err) if err.is::<LoadCancelled>() => match captured_source_file_id.get() {
+            Some(id) if inserted_this_file > 0 => id,
+            _ => return Ok(None),
+        },
+        Err(err) => return Err(err),
+    };
     tags_applied += flush_batch(conn, &mut batch, ctx.rules, ctx.sourcetype)?;
 
     if inserted_this_file == 0 {
@@ -2032,7 +2397,7 @@ fn load_one_file(
         parser_config_path: ctx.parser_config_path.map(|p| p.display().to_string()),
         source_file_id: source_file_id.to_string(),
     };
-    Ok(Some((tags_applied, loaded_source)))
+    Ok(Some((tags_applied, loaded_source, inserted_this_file)))
 }
 
 /// One worker's report back to [`run_parallel`]'s writer loop.
@@ -2102,10 +2467,20 @@ fn run_parallel(
         tags_applied: 0,
         loaded_sources: Vec::new(),
         skipped: Vec::new(),
+        per_file_inserted: std::collections::BTreeMap::new(),
+        tags_by_rule: HashMap::new(),
+        cancelled: false,
     };
     let mut total_inserted = 0usize;
     let mut bytes_done = 0u64;
     let mut write_error = None;
+    // Batches from different files arrive interleaved (multiple workers in
+    // flight at once), so per-file counts can't just be a running total the
+    // way `total_inserted` is — tallied by `source_file_id` here as batches
+    // arrive (every `LogEntry` already carries its own, see `ParseEvent::Batch`'s
+    // doc comment) and looked up by path once `FileDone` reports which path
+    // that id belongs to.
+    let mut inserted_by_source_id: HashMap<SourceFileId, usize> = HashMap::new();
 
     // Bounded, not `mpsc::channel`'s unbounded default: with `thread_count`
     // workers producing `LOAD_BATCH_SIZE`-entry batches purely CPU-bound
@@ -2134,6 +2509,11 @@ fn run_parallel(
             match event {
                 ParseEvent::Batch { entries } => {
                     total_inserted += entries.len();
+                    for entry in &entries {
+                        *inserted_by_source_id
+                            .entry(entry.event_id.source_file_id)
+                            .or_insert(0) += 1;
+                    }
                     let mut entries = entries;
                     match flush_batch(conn, &mut entries, ctx.rules, ctx.sourcetype) {
                         Ok(applied) => summary.tags_applied += applied,
@@ -2157,6 +2537,10 @@ fn run_parallel(
                                 write_error = Some(err);
                                 break;
                             }
+                            summary.per_file_inserted.insert(
+                                file_path.display().to_string(),
+                                inserted_by_source_id.get(&id).copied().unwrap_or(0),
+                            );
                             summary.loaded_sources.push(LoadedSource {
                                 path: file_path.display().to_string(),
                                 sourcetype: ctx.sourcetype.to_string(),
@@ -2213,9 +2597,20 @@ fn run_parallel(
 /// DB-level error elsewhere aborted the load), there's nobody left to
 /// tell, and this worker's own work is already sunk cost at that point.
 fn parse_file_for_worker(ctx: &LoadContext, file_path: &Path, tx: &mpsc::SyncSender<ParseEvent>) {
+    // Already cancelled before this worker even got to this file (rayon
+    // dispatches every file up front, regardless) — don't start parsing
+    // something that's just going to be thrown away.
+    if ctx.cancel.load(Ordering::Relaxed) {
+        return;
+    }
+
     let bytes = path_byte_size(file_path);
     let mut batch: Vec<LogEntry> = Vec::with_capacity(LOAD_BATCH_SIZE);
     let mut inserted = 0usize;
+    // Same reasoning as `load_one_file`'s own capture: `parse_source_streaming`
+    // only returns the id on `Ok`, but a [`LoadCancelled`] `Err` still needs
+    // it to report a `FileDone` for whatever was already sent.
+    let captured_source_file_id: std::cell::Cell<Option<SourceFileId>> = std::cell::Cell::new(None);
 
     // `on_bytes_progress` is a no-op here: `run_parallel` (this function's
     // only caller) never runs for AUL — it's always exactly one atomic
@@ -2226,6 +2621,9 @@ fn parse_file_for_worker(ctx: &LoadContext, file_path: &Path, tx: &mpsc::SyncSen
         file_path,
         ctx.config,
         |entry| {
+            if captured_source_file_id.get().is_none() {
+                captured_source_file_id.set(Some(entry.event_id.source_file_id));
+            }
             inserted += 1;
             batch.push(entry);
             if batch.len() >= LOAD_BATCH_SIZE {
@@ -2233,6 +2631,9 @@ fn parse_file_for_worker(ctx: &LoadContext, file_path: &Path, tx: &mpsc::SyncSen
                 let _ = tx.send(ParseEvent::Batch {
                     entries: full_batch,
                 });
+                if ctx.cancel.load(Ordering::Relaxed) {
+                    anyhow::bail!(LoadCancelled);
+                }
             }
             Ok(())
         },
@@ -2242,26 +2643,28 @@ fn parse_file_for_worker(ctx: &LoadContext, file_path: &Path, tx: &mpsc::SyncSen
         },
     );
 
-    match result {
-        Ok(source_file_id) => {
-            if !batch.is_empty() {
-                let _ = tx.send(ParseEvent::Batch { entries: batch });
-            }
-            let source_file_id = (inserted > 0).then_some(source_file_id);
-            let _ = tx.send(ParseEvent::FileDone {
-                file_path: file_path.to_path_buf(),
-                bytes,
-                source_file_id,
-            });
-        }
+    let source_file_id = match result {
+        Ok(id) => Some(id),
+        Err(err) if err.is::<LoadCancelled>() => captured_source_file_id.get(),
         Err(err) => {
             let _ = tx.send(ParseEvent::FileFailed {
                 file_path: file_path.to_path_buf(),
                 bytes,
                 reason: format!("{err:#}"),
             });
+            return;
         }
+    };
+
+    if !batch.is_empty() {
+        let _ = tx.send(ParseEvent::Batch { entries: batch });
     }
+    let source_file_id = source_file_id.filter(|_| inserted > 0);
+    let _ = tx.send(ParseEvent::FileDone {
+        file_path: file_path.to_path_buf(),
+        bytes,
+        source_file_id,
+    });
 }
 
 /// Appends `batch` to `log_entries` via the DuckDB Appender, applies
@@ -2306,25 +2709,168 @@ fn flush_batch(
 /// an already-open `conn`, same reasoning as `run_load`.
 fn run_retag(
     rule_paths: &[PathBuf],
-    include_builtin_aul_rules: bool,
+    enabled_builtin_rules: &std::collections::BTreeSet<String>,
     conn: duckdb::Connection,
-) -> anyhow::Result<usize> {
-    let rules = load_rules(rule_paths, include_builtin_aul_rules)?;
+) -> anyhow::Result<RetagSummary> {
+    let rules = load_rules(rule_paths, enabled_builtin_rules)?;
     re_tag(&conn, &rules)
 }
 
-/// `include_builtin_aul_rules` appends the embedded AUL pattern-of-life
-/// pack (`tagging::builtin::aul_pattern_of_life_rules`) after the
-/// user-selected file-based rules — order doesn't affect tagging (every
-/// matching rule applies independently, see `tagging::engine`), it's just
-/// where they land in `import_tags`. Every embedded rule already scopes
-/// itself to `sourcetype = "aul"`, so merging it in unconditionally (not
-/// just when the *current* load/retag's sourcetype happens to be AUL) is
-/// safe — it simply never matches non-AUL rows, including during a retag
-/// of a session that also has EVTX/journald/Text data alongside AUL.
+/// Writes one `activity_log` row for a completed or failed load — best-effort:
+/// a failure to record the entry itself is logged to stderr and otherwise
+/// swallowed, same as `config::save`'s error handling elsewhere. The load
+/// already succeeded or failed on its own terms by the time this runs; the
+/// activity log is a record of what happened, not something a load should
+/// itself fail over just because writing the record failed.
+fn record_load_activity_entry(
+    sqlite_path: &Path,
+    source_path: &Path,
+    started_at: i64,
+    finished_at: i64,
+    result: &anyhow::Result<LoadSummary>,
+) {
+    let Ok(conn) = persist::open_session_db(sqlite_path) else {
+        eprintln!("peach: failed to open session DB to record activity log entry");
+        return;
+    };
+    let entry = match result {
+        Ok(summary) => persist::NewActivityLogEntry {
+            operation: "load".to_string(),
+            started_at,
+            finished_at,
+            source_path: Some(source_path.display().to_string()),
+            sourcetype: summary
+                .loaded_sources
+                .first()
+                .map(|source| source.sourcetype.clone()),
+            status: if summary.cancelled {
+                "cancelled".to_string()
+            } else {
+                "ok".to_string()
+            },
+            error: None,
+            entries_inserted: Some(summary.inserted as i64),
+            tags_applied: Some(summary.tags_applied as i64),
+            skipped: summary
+                .skipped
+                .iter()
+                .map(|file| persist::ActivitySkippedFile {
+                    path: file.path.display().to_string(),
+                    reason: file.reason.clone(),
+                })
+                .collect(),
+            per_file: summary
+                .per_file_inserted
+                .iter()
+                .map(|(path, inserted)| persist::ActivityFileCount {
+                    path: path.clone(),
+                    inserted: *inserted,
+                })
+                .collect(),
+            tags_by_rule: rule_counts_to_activity_counts(&summary.tags_by_rule),
+        },
+        Err(err) => persist::NewActivityLogEntry {
+            operation: "load".to_string(),
+            started_at,
+            finished_at,
+            source_path: Some(source_path.display().to_string()),
+            sourcetype: None,
+            status: "failed".to_string(),
+            error: Some(format!("{err:#}")),
+            entries_inserted: None,
+            tags_applied: None,
+            skipped: Vec::new(),
+            per_file: Vec::new(),
+            tags_by_rule: Vec::new(),
+        },
+    };
+    if let Err(err) = persist::insert_activity_log_entry(&conn, entry) {
+        eprintln!("peach: failed to record activity log entry: {err:#}");
+    }
+}
+
+/// Sorted by rule name for determinism — a `HashMap`'s iteration order
+/// isn't stable, and the forensic principle of "same inputs, same result"
+/// (see CLAUDE.md) applies just as much to what lands in the Activity Log
+/// as to anything else recorded about a load.
+fn rule_counts_to_activity_counts(
+    tags_by_rule: &HashMap<String, usize>,
+) -> Vec<persist::ActivityRuleCount> {
+    let mut counts: Vec<persist::ActivityRuleCount> = tags_by_rule
+        .iter()
+        .map(|(rule_name, count)| persist::ActivityRuleCount {
+            rule_name: rule_name.clone(),
+            count: *count,
+        })
+        .collect();
+    counts.sort_by(|a, b| a.rule_name.cmp(&b.rule_name));
+    counts
+}
+
+/// Same reasoning as [`record_load_activity_entry`], for a re-tag — no
+/// `source_path`/`sourcetype`/`skipped` (a re-tag applies across whatever's
+/// already loaded, not to one file) or `entries_inserted` (nothing new gets
+/// inserted, only `import_tags` recomputed).
+fn record_retag_activity_entry(
+    sqlite_path: &Path,
+    started_at: i64,
+    finished_at: i64,
+    result: &anyhow::Result<RetagSummary>,
+) {
+    let Ok(conn) = persist::open_session_db(sqlite_path) else {
+        eprintln!("peach: failed to open session DB to record activity log entry");
+        return;
+    };
+    let entry = match result {
+        Ok(summary) => persist::NewActivityLogEntry {
+            operation: "retag".to_string(),
+            started_at,
+            finished_at,
+            source_path: None,
+            sourcetype: None,
+            status: "ok".to_string(),
+            error: None,
+            entries_inserted: None,
+            tags_applied: Some(summary.applied as i64),
+            skipped: Vec::new(),
+            per_file: Vec::new(),
+            tags_by_rule: rule_counts_to_activity_counts(&summary.tags_by_rule),
+        },
+        Err(err) => persist::NewActivityLogEntry {
+            operation: "retag".to_string(),
+            started_at,
+            finished_at,
+            source_path: None,
+            sourcetype: None,
+            status: "failed".to_string(),
+            error: Some(format!("{err:#}")),
+            entries_inserted: None,
+            tags_applied: None,
+            skipped: Vec::new(),
+            per_file: Vec::new(),
+            tags_by_rule: Vec::new(),
+        },
+    };
+    if let Err(err) = persist::insert_activity_log_entry(&conn, entry) {
+        eprintln!("peach: failed to record activity log entry: {err:#}");
+    }
+}
+
+/// `enabled_builtin_rules` (rule *names*, from either
+/// `tagging::builtin::aul_pattern_of_life_rules` or
+/// `evtx_security_auditing_rules`) appends whichever built-in rules are
+/// currently enabled after the user-selected file-based rules — order
+/// doesn't affect tagging (every matching rule applies independently, see
+/// `tagging::engine`), it's just where they land in `import_tags`. Every
+/// built-in rule already scopes itself to its own sourcetype
+/// (`"aul"`/`"evtx"`), so filtering by name rather than by pack is safe the
+/// same way the old per-pack toggle was — a rule not in `enabled_builtin_rules`
+/// simply isn't included, and an included one still only ever matches rows
+/// from its own source, including during a retag of a session that also has
+/// other sourcetypes loaded alongside.
 fn load_rules(
     rule_paths: &[PathBuf],
-    include_builtin_aul_rules: bool,
+    enabled_builtin_rules: &std::collections::BTreeSet<String>,
 ) -> anyhow::Result<Vec<Rule>> {
     let mut rules: Vec<Rule> = rule_paths
         .iter()
@@ -2335,9 +2881,11 @@ fn load_rules(
                 .with_context(|| format!("invalid rule file {}", path.display()))
         })
         .collect::<anyhow::Result<Vec<Rule>>>()?;
-    if include_builtin_aul_rules {
-        rules.extend(crate::tagging::builtin::aul_pattern_of_life_rules());
-    }
+    rules.extend(
+        crate::tagging::builtin::all_builtin_rules()
+            .into_iter()
+            .filter(|rule| enabled_builtin_rules.contains(&rule.rule.name)),
+    );
     Ok(rules)
 }
 
@@ -2430,43 +2978,92 @@ mod tests {
     }
 
     #[test]
-    fn aul_builtin_checkbox_is_relevant_when_source_kind_is_aul() {
-        assert!(aul_builtin_rules_checkbox_is_relevant(SourceKind::Aul, &[]));
+    fn builtin_rules_button_is_relevant_when_source_kind_is_aul() {
+        assert!(builtin_rules_button_is_relevant(SourceKind::Aul, &[]));
     }
 
     #[test]
-    fn aul_builtin_checkbox_is_relevant_when_an_aul_source_is_already_loaded() {
-        let loaded = [loaded_source("evtx"), loaded_source("aul")];
-        assert!(aul_builtin_rules_checkbox_is_relevant(
-            SourceKind::Evtx,
-            &loaded
-        ));
+    fn builtin_rules_button_is_relevant_when_source_kind_is_evtx() {
+        assert!(builtin_rules_button_is_relevant(SourceKind::Evtx, &[]));
     }
 
     #[test]
-    fn aul_builtin_checkbox_is_not_relevant_for_a_non_aul_source_kind_with_no_aul_loaded() {
-        let loaded = [loaded_source("evtx"), loaded_source("journald")];
-        assert!(!aul_builtin_rules_checkbox_is_relevant(
-            SourceKind::Evtx,
-            &loaded
-        ));
-        assert!(!aul_builtin_rules_checkbox_is_relevant(
-            SourceKind::Text,
-            &[]
-        ));
+    fn builtin_rules_button_is_relevant_when_an_aul_source_is_already_loaded() {
+        let loaded = [loaded_source("journald"), loaded_source("aul")];
+        assert!(builtin_rules_button_is_relevant(SourceKind::Text, &loaded));
+    }
+
+    #[test]
+    fn builtin_rules_button_is_relevant_when_an_evtx_source_is_already_loaded() {
+        let loaded = [loaded_source("journald"), loaded_source("evtx")];
+        assert!(builtin_rules_button_is_relevant(SourceKind::Text, &loaded));
+    }
+
+    #[test]
+    fn builtin_rules_button_is_not_relevant_with_neither_aul_nor_evtx_involved() {
+        let loaded = [loaded_source("journald"), loaded_source("text_config")];
+        assert!(!builtin_rules_button_is_relevant(SourceKind::Text, &loaded));
+        assert!(!builtin_rules_button_is_relevant(SourceKind::Journald, &[]));
+    }
+
+    fn no_builtin_rules() -> std::collections::BTreeSet<String> {
+        std::collections::BTreeSet::new()
+    }
+
+    fn no_cancel() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
+    fn all_builtin_rule_names() -> std::collections::BTreeSet<String> {
+        crate::tagging::builtin::all_builtin_rules()
+            .iter()
+            .map(|r| r.rule.name.clone())
+            .collect()
+    }
+
+    fn builtin_rule_names(tag_values: &[&str]) -> std::collections::BTreeSet<String> {
+        crate::tagging::builtin::all_builtin_rules()
+            .into_iter()
+            .filter(|r| tag_values.contains(&r.rule.tag.value.as_str()))
+            .map(|r| r.rule.name)
+            .collect()
     }
 
     #[test]
     fn load_rules_with_no_files_and_no_builtin_pack_is_empty() {
-        let rules = load_rules(&[], false).unwrap();
+        let rules = load_rules(&[], &no_builtin_rules()).unwrap();
         assert!(rules.is_empty());
     }
 
     #[test]
     fn load_rules_merges_the_builtin_aul_pack_with_no_files_selected() {
-        let rules = load_rules(&[], true).unwrap();
+        let rules = load_rules(&[], &all_builtin_rule_names()).unwrap();
         assert!(rules.len() >= 33);
         assert!(rules.iter().any(|r| r.rule.tag.value == "wifi_status"));
+    }
+
+    #[test]
+    fn load_rules_merges_the_builtin_evtx_pack_with_no_files_selected() {
+        let rules = load_rules(&[], &all_builtin_rule_names()).unwrap();
+        assert!(rules.len() >= 15);
+        assert!(rules.iter().any(|r| r.rule.tag.value == "logon_success"));
+    }
+
+    #[test]
+    fn load_rules_merges_both_builtin_packs_together() {
+        let rules = load_rules(&[], &all_builtin_rule_names()).unwrap();
+        assert!(rules.iter().any(|r| r.rule.tag.value == "wifi_status"));
+        assert!(rules.iter().any(|r| r.rule.tag.value == "logon_success"));
+    }
+
+    #[test]
+    fn load_rules_only_includes_explicitly_enabled_builtin_rules() {
+        // Point 3's whole reason to exist: a subset of one pack, not just
+        // "the pack" as a unit.
+        let enabled = builtin_rule_names(&["wifi_status"]);
+        let rules = load_rules(&[], &enabled).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule.tag.value, "wifi_status");
     }
 
     #[test]
@@ -2508,7 +3105,8 @@ mod tests {
         )
         .unwrap();
 
-        let rules = load_rules(std::slice::from_ref(&rule_path), true).unwrap();
+        let rules =
+            load_rules(std::slice::from_ref(&rule_path), &all_builtin_rule_names()).unwrap();
 
         assert!(rules.iter().any(|r| r.rule.tag.value == "custom_tag"));
         assert!(rules.iter().any(|r| r.rule.tag.value == "wifi_status"));
@@ -2569,6 +3167,46 @@ mod tests {
     fn queue_from_cli_sources_with_no_sources_is_empty() {
         let (first, _, rest) = queue_from_cli_sources(vec![]);
         assert_eq!(first, None);
+        assert!(rest.is_empty());
+    }
+
+    /// Regression test for the index-out-of-bounds panic an empty pick used
+    /// to cause: closing the native multi-file picker via the window's own
+    /// X button (rather than an explicit Cancel) has been observed on Linux
+    /// to resolve `pick_files()` to `Some(vec![])` instead of `None` — see
+    /// `FilePickOutcome::SourcePaths`'s doc comment.
+    #[test]
+    fn source_path_and_queue_from_pick_treats_an_empty_pick_as_none() {
+        assert_eq!(source_path_and_queue_from_pick(vec![]), None);
+    }
+
+    #[test]
+    fn source_path_and_queue_from_pick_splits_first_from_rest() {
+        let picked = vec![
+            PathBuf::from("/evidence/a.evtx"),
+            PathBuf::from("/evidence/b.evtx"),
+            PathBuf::from("/evidence/c.evtx"),
+        ];
+
+        let (first, rest) = source_path_and_queue_from_pick(picked).unwrap();
+
+        assert_eq!(first, PathBuf::from("/evidence/a.evtx"));
+        assert_eq!(
+            rest,
+            vec![
+                PathBuf::from("/evidence/b.evtx"),
+                PathBuf::from("/evidence/c.evtx"),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_path_and_queue_from_pick_with_one_file_has_an_empty_rest() {
+        let picked = vec![PathBuf::from("/evidence/only.evtx")];
+
+        let (first, rest) = source_path_and_queue_from_pick(picked).unwrap();
+
+        assert_eq!(first, PathBuf::from("/evidence/only.evtx"));
         assert!(rest.is_empty());
     }
 
@@ -2800,11 +3438,14 @@ mod tests {
             Some(&config_path),
             RuleSelection {
                 paths: &[],
-                include_builtin_aul: false,
+                enabled_builtin_rules: &no_builtin_rules(),
             },
             conn,
             2, // 3 files > 1, so this exercises run_parallel
-            &tx,
+            LoadControl {
+                progress_tx: &tx,
+                cancel: no_cancel(),
+            },
         )
         .unwrap();
 
@@ -2817,6 +3458,75 @@ mod tests {
             bad_entry.reason.contains("does not match"),
             "unexpected skip reason: {}",
             bad_entry.reason
+        );
+        // Per-file breakdown must attribute each file's own count, not the
+        // running total — this is exactly what the interleaved-batch
+        // tallying in `run_parallel`'s `ParseEvent::Batch` handler exists
+        // to get right.
+        assert_eq!(summary.per_file_inserted.len(), 2);
+        let a_log_path = logs_dir.join("a.log").display().to_string();
+        let b_log_path = logs_dir.join("b.log").display().to_string();
+        assert_eq!(summary.per_file_inserted.get(&a_log_path), Some(&1));
+        assert_eq!(summary.per_file_inserted.get(&b_log_path), Some(&2));
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// `LoadSummary::tags_by_rule` is computed by `run_load` itself (a
+    /// follow-up query, not threaded through `run_sequential`/`run_parallel`)
+    /// — this exercises that end to end with two rules matching different
+    /// subsets of one file's entries.
+    #[test]
+    fn run_load_breaks_down_tags_applied_by_rule_name() {
+        let base = temp_test_dir("run-load-tags-by-rule");
+        let log_path = base.join("mixed.log");
+        std::fs::write(
+            &log_path,
+            "2026-07-28T12:00:00+0200 ERROR something broke\n\
+             2026-07-28T12:01:00+0200 INFO all fine\n",
+        )
+        .unwrap();
+        let config_path = base.join("config.toml");
+        std::fs::write(&config_path, text_parser_config()).unwrap();
+        let rule_path = base.join("rule.toml");
+        std::fs::write(
+            &rule_path,
+            "[rule]\nname = \"errors_only\"\n[rule.match]\nlevel = \"ERROR\"\n[rule.tag]\nvalue = \"error\"\n",
+        )
+        .unwrap();
+
+        let db_path = base.join("test.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        let (tx, _rx) = mpsc::channel();
+
+        let summary = run_load(
+            SourceKind::Text,
+            &log_path,
+            Some(&config_path),
+            RuleSelection {
+                paths: &[rule_path],
+                enabled_builtin_rules: &no_builtin_rules(),
+            },
+            conn,
+            1,
+            LoadControl {
+                progress_tx: &tx,
+                cancel: no_cancel(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.tags_applied, 1);
+        assert_eq!(summary.tags_by_rule.get("errors_only"), Some(&1));
+        assert_eq!(summary.tags_by_rule.len(), 1);
+        // Single file, sequential path — `load_one_file`'s own
+        // `inserted_this_file` is the source here, not `run_parallel`'s
+        // batch-tallying.
+        assert_eq!(
+            summary
+                .per_file_inserted
+                .get(&log_path.display().to_string()),
+            Some(&2)
         );
 
         std::fs::remove_dir_all(base).unwrap();
@@ -2849,11 +3559,14 @@ mod tests {
             Some(&config_path),
             RuleSelection {
                 paths: &[],
-                include_builtin_aul: false,
+                enabled_builtin_rules: &no_builtin_rules(),
             },
             conn,
             4, // irrelevant with a single file — must still behave correctly
-            &tx,
+            LoadControl {
+                progress_tx: &tx,
+                cancel: no_cancel(),
+            },
         )
         .unwrap();
 
@@ -2864,6 +3577,150 @@ mod tests {
             log_path.display().to_string()
         );
         assert!(summary.skipped.is_empty());
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn run_load_already_cancelled_before_starting_loads_nothing_sequential() {
+        let base = temp_test_dir("run-load-cancel-before-sequential");
+        let log_path = base.join("only.log");
+        std::fs::write(
+            &log_path,
+            "2026-07-28T12:00:00+0200 ERROR something broke\n",
+        )
+        .unwrap();
+        let config_path = base.join("config.toml");
+        std::fs::write(&config_path, text_parser_config()).unwrap();
+        let db_path = base.join("test.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        let (tx, _rx) = mpsc::channel();
+
+        let summary = run_load(
+            SourceKind::Text,
+            &log_path,
+            Some(&config_path),
+            RuleSelection {
+                paths: &[],
+                enabled_builtin_rules: &no_builtin_rules(),
+            },
+            conn,
+            1,
+            LoadControl {
+                progress_tx: &tx,
+                cancel: Arc::new(AtomicBool::new(true)), // already cancelled
+            },
+        )
+        .unwrap();
+
+        assert!(summary.cancelled);
+        assert_eq!(summary.inserted, 0);
+        assert!(summary.loaded_sources.is_empty());
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn run_load_already_cancelled_before_starting_loads_nothing_parallel() {
+        let base = temp_test_dir("run-load-cancel-before-parallel");
+        let logs_dir = base.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(logs_dir.join("a.log"), "2026-07-28T12:00:00+0200 ERROR a\n").unwrap();
+        std::fs::write(logs_dir.join("b.log"), "2026-07-28T12:00:00+0200 ERROR b\n").unwrap();
+        let config_path = base.join("config.toml");
+        std::fs::write(&config_path, text_parser_config()).unwrap();
+        let db_path = base.join("test.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        let (tx, _rx) = mpsc::channel();
+
+        let summary = run_load(
+            SourceKind::Text,
+            &logs_dir,
+            Some(&config_path),
+            RuleSelection {
+                paths: &[],
+                enabled_builtin_rules: &no_builtin_rules(),
+            },
+            conn,
+            2, // 2 files > 1, exercises run_parallel
+            LoadControl {
+                progress_tx: &tx,
+                cancel: Arc::new(AtomicBool::new(true)), // already cancelled
+            },
+        )
+        .unwrap();
+
+        assert!(summary.cancelled);
+        assert_eq!(summary.inserted, 0);
+        assert!(summary.loaded_sources.is_empty());
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Cancellation mid-*file* (not just between files) only has a
+    /// checkpoint to fire at every `LOAD_BATCH_SIZE` (10,000) entries — so
+    /// this needs a file that large to exercise it at all. A background
+    /// thread flips `cancel` as soon as it sees the first `Progress` update
+    /// (sent right after the first full batch flushes), so the load stops
+    /// partway through instead of consuming the whole file — proving
+    /// `load_one_file` salvages what was already flushed (a real `sources`
+    /// row, real `log_entries` rows) rather than losing or orphaning it.
+    #[test]
+    fn run_load_cancelled_mid_file_keeps_the_entries_already_flushed() {
+        let base = temp_test_dir("run-load-cancel-mid-file");
+        let log_path = base.join("big.log");
+        let mut contents = String::new();
+        for i in 0..(LOAD_BATCH_SIZE * 2 + 500) {
+            contents.push_str(&format!("2026-07-28T12:00:00+0200 INFO line {i}\n"));
+        }
+        std::fs::write(&log_path, contents).unwrap();
+        let config_path = base.join("config.toml");
+        std::fs::write(&config_path, text_parser_config()).unwrap();
+        let db_path = base.join("test.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_watcher = Arc::clone(&cancel);
+
+        let watcher = std::thread::spawn(move || {
+            for outcome in rx {
+                if let LoadOutcome::Progress { .. } = outcome {
+                    cancel_for_watcher.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+
+        let summary = run_load(
+            SourceKind::Text,
+            &log_path,
+            Some(&config_path),
+            RuleSelection {
+                paths: &[],
+                enabled_builtin_rules: &no_builtin_rules(),
+            },
+            conn,
+            1,
+            LoadControl {
+                progress_tx: &tx,
+                cancel,
+            },
+        )
+        .unwrap();
+        drop(tx);
+        watcher.join().unwrap();
+
+        assert!(summary.cancelled);
+        assert!(
+            summary.inserted > 0 && summary.inserted < LOAD_BATCH_SIZE * 2 + 500,
+            "expected a partial insert count, got {}",
+            summary.inserted
+        );
+        // The salvaged partial file must still be a properly registered
+        // source, not orphaned `log_entries` rows with no matching `sources`
+        // entry — this is exactly the bug the capture-the-id-off-the-first-
+        // entry approach in `load_one_file` exists to avoid.
+        assert_eq!(summary.loaded_sources.len(), 1);
+        assert_eq!(summary.per_file_inserted.len(), 1);
 
         std::fs::remove_dir_all(base).unwrap();
     }
@@ -2922,6 +3779,7 @@ mod tests {
             sourcetype: "test-total-known",
             rules: &[],
             parser_config_path: None,
+            cancel: no_cancel(),
         };
         let file_path = base.join("fake-source");
         std::fs::write(&file_path, b"unused").unwrap();
@@ -2982,11 +3840,14 @@ mod tests {
                 Some(&config_path),
                 RuleSelection {
                     paths: &[],
-                    include_builtin_aul: false,
+                    enabled_builtin_rules: &no_builtin_rules(),
                 },
                 conn,
                 thread_count,
-                &tx,
+                LoadControl {
+                    progress_tx: &tx,
+                    cancel: no_cancel(),
+                },
             )
             .unwrap();
             let paths: Vec<String> = summary

@@ -1,12 +1,13 @@
-//! Persistent app settings — currently just an optional override for where
-//! session files (`.duckdb`/`.sqlite`, see
-//! [`crate::session::persist::SessionPaths`]) get created.
+//! Persistent app settings — theme, load thread count, and optional
+//! overrides for where session files (`.duckdb`/`.sqlite`, see
+//! [`crate::session::persist::SessionPaths`]) and analyst-created rule
+//! files (see [`crate::tagging::rule_file`]) get created.
 //!
 //! Lives in its own TOML file under the OS *config* directory
-//! (`ProjectDirs::config_dir`), deliberately separate from the sessions
-//! directory itself: that one is exactly the thing this file can override,
-//! so settings have to live somewhere fixed, or overriding their own
-//! storage location would be circular.
+//! (`ProjectDirs::config_dir`), deliberately separate from the sessions/
+//! rules directories themselves: those are exactly the things this file can
+//! override, so settings have to live somewhere fixed, or overriding their
+//! own storage location would be circular.
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::session::persist;
+use crate::tagging::rule_file;
 
 /// Window chrome color scheme. Deliberately toolkit-agnostic (no `egui`
 /// import here) — turning this into actual colors is `crate::ui::theme`'s
@@ -53,6 +55,17 @@ pub struct Settings {
     /// backward-compat reason `theme` has it.
     #[serde(default)]
     pub load_threads: Option<usize>,
+    /// Overrides [`rule_file::default_user_rules_dir`] when set — where
+    /// rules created via the timeline's "Tag all matching (advanced)..."
+    /// dialog get written. `None` (the default) means the OS-standard
+    /// per-user data directory, same reasoning as `sessions_dir`. Pointing
+    /// this at an analyst-chosen folder (e.g. one they put under their own
+    /// git repo) is deliberately supported: `rules/examples/` in the Peach
+    /// repo itself is a read-only reference library, not meant to be a
+    /// personal rule collection's home. `#[serde(default)]` for the same
+    /// backward-compat reason `theme`/`load_threads` have it.
+    #[serde(default)]
+    pub rules_dir: Option<PathBuf>,
 }
 
 impl Settings {
@@ -65,6 +78,17 @@ impl Settings {
         };
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create sessions directory {}", dir.display()))?;
+        Ok(dir.clone())
+    }
+
+    /// Resolves the effective rules directory — same override-or-default
+    /// shape as [`Self::sessions_dir`].
+    pub fn rules_dir(&self) -> anyhow::Result<PathBuf> {
+        let Some(dir) = &self.rules_dir else {
+            return rule_file::default_user_rules_dir();
+        };
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create rules directory {}", dir.display()))?;
         Ok(dir.clone())
     }
 
@@ -152,6 +176,7 @@ mod tests {
             sessions_dir: Some(PathBuf::from("/tmp/some-case-drive/peach-sessions")),
             theme: Theme::Geek,
             load_threads: Some(3),
+            rules_dir: Some(PathBuf::from("/tmp/some-case-drive/peach-rules")),
         };
 
         save_to(&path, &settings).unwrap();
@@ -242,5 +267,44 @@ mod tests {
         assert_eq!(resolved, dir);
         assert!(dir.exists());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn defaults_to_no_rules_dir_override() {
+        assert_eq!(Settings::default().rules_dir, None);
+    }
+
+    #[test]
+    fn rules_dir_creates_and_returns_the_configured_override() {
+        let dir = std::env::temp_dir().join(format!(
+            "peach-config-test-rules-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!dir.exists());
+        let settings = Settings {
+            rules_dir: Some(dir.clone()),
+            ..Settings::default()
+        };
+
+        let resolved = settings.rules_dir().unwrap();
+
+        assert_eq!(resolved, dir);
+        assert!(dir.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn load_from_a_file_predating_the_rules_dir_field_defaults_to_none() {
+        let path = temp_config_path("no-rules-dir-field");
+        std::fs::write(&path, b"sessions_dir = \"/tmp/some-case-drive\"\n").unwrap();
+
+        let loaded = load_from(&path);
+
+        assert_eq!(loaded.rules_dir, None);
+        std::fs::remove_file(path).unwrap();
     }
 }

@@ -1,0 +1,17 @@
+# EVTX Security-Auditing: a user account was locked out — often a
+# brute-force indicator. Companion tag to the built-in message template for
+# this event ID (message_templates/examples/evtx_security_auditing.toml).
+# Reference: Microsoft's official Security Auditing event reference,
+# "4740(S) A user account was locked out":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4740
+
+[rule]
+name = "evtx_account_lockout"
+description = "A user account was locked out (Security-Auditing 4740)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4740
+
+[rule.tag]
+value = "account_lockout"

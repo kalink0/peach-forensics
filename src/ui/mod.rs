@@ -1,10 +1,13 @@
 pub mod about_dialog;
+pub mod activity_log_dialog;
+pub mod builtin_rules_dialog;
 pub mod colors;
 pub mod dialog_window;
 pub mod filter_bar;
 pub mod format_dialog;
 pub mod note_dialog;
 pub mod raw_fields_dialog;
+pub(crate) mod reveal;
 pub mod session_dialog;
 pub mod settings_dialog;
 pub mod tag_dialog;

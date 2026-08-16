@@ -1,0 +1,17 @@
+# EVTX Security-Auditing: a service was installed — a classic persistence
+# indicator. Companion tag to the built-in message template for this event ID
+# (message_templates/examples/evtx_security_auditing.toml). Reference:
+# Microsoft's official Security Auditing event reference, "4697(S) A service
+# was installed in the system":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4697
+
+[rule]
+name = "evtx_service_install"
+description = "A service was installed (Security-Auditing 4697)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4697
+
+[rule.tag]
+value = "service_install"

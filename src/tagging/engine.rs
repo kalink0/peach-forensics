@@ -1,9 +1,22 @@
+use std::collections::HashMap;
+
 use chrono::Utc;
 use duckdb::{Connection, params};
 
 use crate::model::event_id::{EventId, SequenceNumber, SourceFileId};
 use crate::model::log_entry::LogEntry;
 use crate::tagging::rule::Rule;
+
+/// [`re_tag`]'s result — the total applied, plus a per-rule-name breakdown
+/// for the Activity Log's "how many did rule X tag" display. Keyed by
+/// `rule.name` (unique per rule file), not `tag.value` (several rules can
+/// deliberately share a tag value — e.g. the EVTX group-membership-change
+/// rules — so that wouldn't answer "which rule" at all).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RetagSummary {
+    pub applied: usize,
+    pub tags_by_rule: HashMap<String, usize>,
+}
 
 /// Evaluates `rules` against `entries` and persists matches into
 /// `import_tags` via the DuckDB Appender (bulk insert) — the import-time
@@ -55,10 +68,10 @@ pub fn apply_import_time(
 /// Streams rows straight out of DuckDB (a source-file-id/sourcetype join,
 /// `level`/`message`/`fields` only) instead of collecting a `Vec<LogEntry>`
 /// first — a `.logarchive` can mean millions of rows.
-pub fn re_tag(conn: &Connection, rules: &[Rule]) -> anyhow::Result<usize> {
+pub fn re_tag(conn: &Connection, rules: &[Rule]) -> anyhow::Result<RetagSummary> {
     conn.execute("DELETE FROM import_tags", [])?;
     if rules.is_empty() {
-        return Ok(0);
+        return Ok(RetagSummary::default());
     }
 
     let mut matches: Vec<(String, i64, &str, &str)> = Vec::new();
@@ -81,6 +94,7 @@ pub fn re_tag(conn: &Connection, rules: &[Rule]) -> anyhow::Result<usize> {
 
     let applied_at = Utc::now().naive_utc();
     let mut appender = conn.appender("import_tags")?;
+    let mut tags_by_rule: HashMap<String, usize> = HashMap::new();
     for (source_file_id, sequence_number, rule_name, tag_value) in &matches {
         appender.append_row(params![
             source_file_id,
@@ -89,9 +103,13 @@ pub fn re_tag(conn: &Connection, rules: &[Rule]) -> anyhow::Result<usize> {
             *tag_value,
             applied_at
         ])?;
+        *tags_by_rule.entry(rule_name.to_string()).or_insert(0) += 1;
     }
 
-    Ok(matches.len())
+    Ok(RetagSummary {
+        applied: matches.len(),
+        tags_by_rule,
+    })
 }
 
 /// Query-time-only, ad-hoc evaluation — evaluates `rules`
@@ -321,9 +339,10 @@ mod tests {
         )
         .unwrap();
 
-        let applied = re_tag(&conn, std::slice::from_ref(&rule)).unwrap();
+        let summary = re_tag(&conn, std::slice::from_ref(&rule)).unwrap();
 
-        assert_eq!(applied, 1);
+        assert_eq!(summary.applied, 1);
+        assert_eq!(summary.tags_by_rule.get("generic_error"), Some(&1));
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM import_tags", [], |row| row.get(0))
             .unwrap();
@@ -342,13 +361,56 @@ mod tests {
         )
         .unwrap();
 
-        let applied = re_tag(&conn, &[]).unwrap();
+        let summary = re_tag(&conn, &[]).unwrap();
 
-        assert_eq!(applied, 0);
+        assert_eq!(summary.applied, 0);
+        assert!(summary.tags_by_rule.is_empty());
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM import_tags", [], |row| row.get(0))
             .unwrap();
         assert_eq!(total, 0);
+    }
+
+    /// `tags_by_rule` is keyed by rule *name*, not tag *value* — two rules
+    /// deliberately sharing a tag value (like the EVTX group-membership
+    /// rules) must still be distinguishable in the breakdown.
+    #[test]
+    fn re_tag_breaks_down_applied_counts_by_rule_name() {
+        let conn = open_test_db();
+        let source_file_id = SourceFileId::new_random();
+        insert_source(&conn, source_file_id, "text_config");
+        let mut counter = SequenceCounter::new();
+        let error_entry = LogEntry {
+            event_id: EventId {
+                source_file_id,
+                sequence_number: counter.next_sequence_number(),
+            },
+            ..sample_entry(Some("ERROR"), serde_json::Value::Null)
+        };
+        let info_entry = LogEntry {
+            event_id: EventId {
+                source_file_id,
+                sequence_number: counter.next_sequence_number(),
+            },
+            ..sample_entry(Some("INFO"), serde_json::Value::Null)
+        };
+        insert_entry(&conn, &error_entry);
+        insert_entry(&conn, &info_entry);
+
+        let rule_a = Rule::from_toml_str(
+            "[rule]\nname = \"errors_only\"\n[rule.match]\nlevel = \"ERROR\"\n[rule.tag]\nvalue = \"shared_tag\"\n",
+        )
+        .unwrap();
+        let rule_b = Rule::from_toml_str(
+            "[rule]\nname = \"everything\"\n[rule.match]\nsourcetype = \"text_config\"\n[rule.tag]\nvalue = \"shared_tag\"\n",
+        )
+        .unwrap();
+
+        let summary = re_tag(&conn, &[rule_a, rule_b]).unwrap();
+
+        assert_eq!(summary.applied, 3); // error_entry x2 rules + info_entry x1 rule
+        assert_eq!(summary.tags_by_rule.get("errors_only"), Some(&1));
+        assert_eq!(summary.tags_by_rule.get("everything"), Some(&2));
     }
 
     #[test]

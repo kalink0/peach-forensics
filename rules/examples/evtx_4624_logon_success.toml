@@ -1,0 +1,17 @@
+# EVTX Security-Auditing: successful account logon. Companion tag to the
+# built-in message template for this event ID
+# (message_templates/examples/evtx_security_auditing.toml). Reference:
+# Microsoft's official Security Auditing event reference, "4624(S) An
+# account was successfully logged on":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4624
+
+[rule]
+name = "evtx_logon_success"
+description = "Successful account logon (Security-Auditing 4624)"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4624
+
+[rule.tag]
+value = "logon_success"

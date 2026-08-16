@@ -1,0 +1,33 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>peach icon 128px</title>
+  <defs>
+    <path id="armShape" d="M52,68 C50,58 52,42 56,28 C59,20 62,14 64,11 C66,14 69,20 72,28 C76,42 78,58 76,68 Z" fill="#fb7185" stroke="#fda4af" stroke-width="1.2"/>
+    <g id="armDots">
+      <circle cx="64" cy="55" r="2.2" fill="#fecdd3" opacity="0.5"/>
+      <circle cx="64" cy="42" r="1.6" fill="#fecdd3" opacity="0.4"/>
+      <circle cx="64" cy="29" r="1.1" fill="#fecdd3" opacity="0.32"/>
+    </g>
+  </defs>
+
+  <rect width="128" height="128" rx="22" fill="#0d1117"/>
+
+  <use href="#armShape" transform="rotate(0 64 64)"/>
+  <use href="#armShape" transform="rotate(72 64 64)"/>
+  <use href="#armShape" transform="rotate(144 64 64)"/>
+  <use href="#armShape" transform="rotate(216 64 64)"/>
+  <use href="#armShape" transform="rotate(288 64 64)"/>
+
+  <use href="#armDots" transform="rotate(0 64 64)"/>
+  <use href="#armDots" transform="rotate(72 64 64)"/>
+  <use href="#armDots" transform="rotate(144 64 64)"/>
+  <use href="#armDots" transform="rotate(216 64 64)"/>
+  <use href="#armDots" transform="rotate(288 64 64)"/>
+
+  <circle cx="64" cy="64" r="15" fill="#f43f5e" stroke="#fda4af" stroke-width="1.5"/>
+
+  <circle cx="59.5" cy="61.5" r="2.2" fill="#4c0519"/>
+  <circle cx="60.5" cy="60.5" r="0.8" fill="#fff1f2"/>
+  <circle cx="68.5" cy="61.5" r="2.2" fill="#4c0519"/>
+  <circle cx="69.5" cy="60.5" r="0.8" fill="#fff1f2"/>
+  <path d="M59.5 67 Q64 70.5 68.5 67" fill="none" stroke="#4c0519" stroke-width="1.1" stroke-linecap="round"/>
+</svg>
