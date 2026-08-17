@@ -8,6 +8,7 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::db::timeline_queries::{self, DisplayRow, Query};
 use crate::model::event_id::EventId;
+use crate::model::timezone_spec::TimezoneSpec;
 use crate::session::persist;
 use crate::ui::colors::categorical_color;
 
@@ -87,7 +88,13 @@ enum ColumnKind {
 impl ColumnKind {
     fn label(self) -> &'static str {
         match self {
-            Self::Timestamp => "Timestamp (UTC)",
+            // Not "Timestamp (UTC)" — the column can now show any
+            // configured display timezone, not always UTC. Each cell is
+            // self-describing on its own instead (`d.timestamp_display`
+            // always carries its own `%:z` offset via
+            // `TimezoneSpec::format_utc`), so the header doesn't need to
+            // name a specific zone.
+            Self::Timestamp => "Timestamp",
             Self::Level => "Level",
             Self::Source => "Source",
             Self::Sourcetype => "Sourcetype",
@@ -303,6 +310,13 @@ pub struct TimelineView {
     /// another one (see [`reorder_columns`]). Not persisted across
     /// restarts, same as the `show_*_column` visibility flags above.
     column_order: Vec<ColumnKind>,
+    /// `Settings::display_timezone`, resolved to a `TimezoneSpec` — what
+    /// every window/full-entry fetch formats `timestamp_display` in.
+    /// Defaults to UTC (same as every display before this setting
+    /// existed); `app.rs` calls [`Self::set_display_timezone`] on startup
+    /// and again whenever Settings are saved, the same refresh-on-save
+    /// pattern `rules_dir` already uses.
+    display_tz: TimezoneSpec,
 }
 
 impl TimelineView {
@@ -333,7 +347,19 @@ impl TimelineView {
             show_category_column: false,
             show_notes_column: false,
             column_order: DEFAULT_COLUMN_ORDER.to_vec(),
+            display_tz: TimezoneSpec::Fixed(chrono::FixedOffset::east_opt(0).unwrap()),
         }
+    }
+
+    /// Sets the timezone future window/full-entry fetches format
+    /// `timestamp_display` in — called by `app.rs` on startup (from
+    /// `Settings::display_timezone`) and again whenever Settings are saved.
+    /// Does not retroactively reformat the current cache; the next
+    /// `ensure_window`/`fetch_full_entry` call picks it up, same as every
+    /// other "changed setting only affects fetches from now on" case in
+    /// this view.
+    pub fn set_display_timezone(&mut self, display_tz: TimezoneSpec) {
+        self.display_tz = display_tz;
     }
 
     /// `column_order`, filtered down to whichever columns are actually
@@ -685,13 +711,15 @@ impl TimelineView {
         let query = self.query.clone();
         let conn = self.try_clone_conn();
         let session_sqlite_path = self.session_sqlite_path.clone();
+        let display_tz = self.display_tz;
         let (tx, rx) = mpsc::channel();
         self.window_rx = Some(rx);
         std::thread::spawn(move || {
             let Some(conn) = conn else {
                 return;
             };
-            let Ok(mut rows) = timeline_queries::fetch_window(&conn, &query, offset, WINDOW_SIZE)
+            let Ok(mut rows) =
+                timeline_queries::fetch_window(&conn, &query, offset, WINDOW_SIZE, &display_tz)
             else {
                 return;
             };
@@ -872,7 +900,7 @@ impl TimelineView {
                             let Some(d) = display else { return };
                             match kind {
                                 ColumnKind::Timestamp => {
-                                    ui.label(d.timestamp_utc.as_str());
+                                    ui.label(d.timestamp_display.as_str());
                                 }
                                 ColumnKind::Level => {
                                     if !d.level.is_empty() {
@@ -1007,8 +1035,12 @@ impl TimelineView {
                                         if let Some(text) = conn
                                             .as_ref()
                                             .and_then(|conn| {
-                                                timeline_queries::fetch_full_entry(conn, event_id)
-                                                    .ok()
+                                                timeline_queries::fetch_full_entry(
+                                                    conn,
+                                                    event_id,
+                                                    &self.display_tz,
+                                                )
+                                                .ok()
                                             })
                                             .flatten()
                                             .map(|entry| entry.to_text())
@@ -1021,8 +1053,12 @@ impl TimelineView {
                                         if let Some(entry) = conn
                                             .as_ref()
                                             .and_then(|conn| {
-                                                timeline_queries::fetch_full_entry(conn, event_id)
-                                                    .ok()
+                                                timeline_queries::fetch_full_entry(
+                                                    conn,
+                                                    event_id,
+                                                    &self.display_tz,
+                                                )
+                                                .ok()
                                             })
                                             .flatten()
                                         {

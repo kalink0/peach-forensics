@@ -1,0 +1,22 @@
+# Built-in starter format: Android logcat's "brief" output format —
+# "MM-DD HH:MM:SS.mmm PID TID L tag: message" (L is a single-character
+# level: V/D/I/W/E/F/S). Regex/timestamp_format style-confirmed against
+# real-world logcat output (matches the same shape crush's own multi-log
+# viewer detects for this format).
+#
+# Neither a year nor a timezone appears in this format — both
+# `assume_year` and `assume_offset` are deliberately left unset here, not
+# guessed; the live preview will show every line failing to parse until
+# both are filled in for this specific source.
+
+[parser]
+name = "Android Logcat (brief)"
+sourcetype = "logcat"
+
+[parser.pattern]
+regex = '^(?P<timestamp>\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\s+\d+\s+\d+\s+(?P<level_raw>[A-Z])\s+(?P<tag>[^:]+):\s*(?P<message>.*)$'
+timestamp_format = "%m-%d %H:%M:%S%.f"
+
+[parser.field_mapping]
+level = "level_raw"
+message = "message"

@@ -27,12 +27,14 @@ use crate::tagging::rule_file;
 use crate::ui::about_dialog::{self, AboutDialog};
 use crate::ui::activity_log_dialog::ActivityLogDialog;
 use crate::ui::builtin_rules_dialog::BuiltinRulesDialog;
+use crate::ui::display_timezone_dialog::DisplayTimezoneDialog;
 use crate::ui::filter_bar::FilterBar;
 use crate::ui::format_dialog::{FormatDialog, FormatDialogOutcome};
 use crate::ui::note_dialog::{NoteDialog, NoteDialogOutcome};
 use crate::ui::raw_fields_dialog::RawFieldsDialog;
+use crate::ui::rules_reference_dialog::RulesReferenceDialog;
 use crate::ui::session_dialog::{self, SessionManagerDialog, SessionManagerOutcome};
-use crate::ui::settings_dialog::{SettingsDialog, SettingsOutcome};
+use crate::ui::settings_dialog::{self, SettingsDialog, SettingsOutcome};
 use crate::ui::tag_dialog::{PreviewTarget, TagDialog, TagDialogOutcome};
 use crate::ui::theme;
 use crate::ui::timeline_view::{RowAction, TimelineView, source_display_label};
@@ -346,6 +348,7 @@ pub struct PeachApp {
     about_dialog: AboutDialog,
     activity_log_dialog: ActivityLogDialog,
     builtin_rules_dialog: BuiltinRulesDialog,
+    rules_reference_dialog: RulesReferenceDialog,
     /// Wall-clock anchor for the `Theme::Rainbow` animation — see
     /// `theme::tick`'s doc comment for why it's elapsed-time-based rather
     /// than a per-frame step.
@@ -359,6 +362,24 @@ pub struct PeachApp {
     /// number that's quietly wrong for the dialog's current state.
     tag_preview_key: Option<(Option<&'static str>, String)>,
     tag_preview: Option<usize>,
+    /// Free-typed text for `settings.default_source_timezone`, edited
+    /// directly in the load controls (shown once `source_kind` is `Text`)
+    /// rather than only reachable via the Settings dialog — the session
+    /// default is exactly the kind of thing worth seeing and adjusting
+    /// right when about to load a text source, not something to remember
+    /// to go set up beforehand. Applied and persisted live on every valid
+    /// change (see the controls-panel rendering), same immediate-effect
+    /// pattern View > Theme already uses, rather than needing a separate
+    /// Save step. Kept in sync with `settings_dialog`'s own copy of this
+    /// same field whenever Settings is opened/saved, so the two can't
+    /// silently disagree.
+    default_source_timezone_input: String,
+    /// `View > Display timezone` — a small dedicated window rather than
+    /// nested directly in the View menu the way `default_source_timezone`'s
+    /// quick-access copy is: see [`crate::ui::display_timezone_dialog`]'s
+    /// doc comment for why a live `TextEdit` inside a transient popup menu
+    /// turned out to be unreliable.
+    display_timezone_dialog: DisplayTimezoneDialog,
 }
 
 /// Pops the first `--add-source` path (if any) to pre-fill, determining its
@@ -478,9 +499,21 @@ impl PeachApp {
 
         let (source_path, source_kind, pending_cli_sources) = queue_from_cli_sources(add_sources);
 
+        let mut timeline = TimelineView::new(db_path.clone(), session_paths.sqlite_path.clone());
+        // Best-effort, same reasoning as `rule_paths` above: a bad
+        // hand-edited `display_timezone` just means starting at UTC (the
+        // default it would already be at), not a crash on startup —
+        // `Settings::display_timezone_spec`'s own doc comment covers why a
+        // *save* from the Settings dialog is stricter than this.
+        if let Ok(display_tz) = settings.display_timezone_spec() {
+            timeline.set_display_timezone(display_tz);
+        }
+        let default_source_timezone_input =
+            settings.default_source_timezone.clone().unwrap_or_default();
+
         Self {
             db_path: db_path.clone(),
-            timeline: TimelineView::new(db_path, session_paths.sqlite_path.clone()),
+            timeline,
             visited_sessions: vec![session_paths.sqlite_path.clone()],
             session_paths,
             // A session `new_session_id()` just minted has no
@@ -534,10 +567,13 @@ impl PeachApp {
             about_dialog: AboutDialog::Closed,
             activity_log_dialog: ActivityLogDialog::Closed,
             builtin_rules_dialog: BuiltinRulesDialog::Closed,
+            rules_reference_dialog: RulesReferenceDialog::Closed,
             rainbow_start: None,
             tag_preview_rx: None,
             tag_preview_key: None,
             tag_preview: None,
+            default_source_timezone_input,
+            display_timezone_dialog: DisplayTimezoneDialog::Closed,
         }
     }
 
@@ -553,6 +589,9 @@ impl PeachApp {
 
         self.db_path = session_paths.duckdb_path.clone();
         self.timeline = TimelineView::new(self.db_path.clone(), session_paths.sqlite_path.clone());
+        if let Ok(display_tz) = self.settings.display_timezone_spec() {
+            self.timeline.set_display_timezone(display_tz);
+        }
         if !self.visited_sessions.contains(&session_paths.sqlite_path) {
             self.visited_sessions
                 .push(session_paths.sqlite_path.clone());
@@ -614,6 +653,16 @@ impl PeachApp {
                 ExportState::Failed("failed to open a database connection for export".into());
             return;
         };
+        // Same precedence a typo'd `assume_offset` gets — a bad
+        // `display_timezone` surfaces as a failed export rather than
+        // silently exporting in the wrong (or UTC) timezone.
+        let display_tz = match self.settings.display_timezone_spec() {
+            Ok(spec) => spec,
+            Err(err) => {
+                self.export_state = ExportState::Failed(format!("{err:#}"));
+                return;
+            }
+        };
         let (tx, rx) = mpsc::channel();
         self.export_rx = Some(rx);
         self.export_state = ExportState::Running {
@@ -626,9 +675,16 @@ impl PeachApp {
         let format = export::ExportFormat::from_path(&out_path);
 
         std::thread::spawn(move || {
-            let result =
-                export::export_to_file(&conn, &session_sqlite_path, &query, format, &out_path, &tx)
-                    .map_err(|err| format!("{err:#}"));
+            let result = export::export_to_file(
+                &conn,
+                &session_sqlite_path,
+                &query,
+                &display_tz,
+                format,
+                &out_path,
+                &tx,
+            )
+            .map_err(|err| format!("{err:#}"));
             let _ = tx.send(ExportOutcome::Done(result));
         });
     }
@@ -658,6 +714,7 @@ impl PeachApp {
         let rule_paths = self.rule_paths.clone();
         let enabled_builtin_rules = self.enabled_builtin_rules.clone();
         let load_threads = self.settings.effective_load_threads();
+        let default_source_timezone = self.settings.default_source_timezone.clone();
         let session_sqlite_path = self.session_paths.sqlite_path.clone();
 
         std::thread::spawn(move || {
@@ -673,7 +730,10 @@ impl PeachApp {
                     enabled_builtin_rules: &enabled_builtin_rules,
                 },
                 conn,
-                load_threads,
+                LoadSettings {
+                    thread_count: load_threads,
+                    default_source_timezone,
+                },
                 LoadControl {
                     progress_tx: &progress_tx,
                     cancel,
@@ -826,7 +886,12 @@ impl PeachApp {
         let saved = text_config_file::default_user_parsers_dir()
             .map(|dir| text_config_file::list_saved_configs(&dir))
             .unwrap_or_default();
-        self.format_dialog = FormatDialog::open(preview_lines, draft, saved);
+        self.format_dialog = FormatDialog::open(
+            preview_lines,
+            draft,
+            saved,
+            self.settings.default_source_timezone.clone(),
+        );
     }
 
     /// Same overall pattern as `handle_settings_dialog`: `app.rs` owns the
@@ -865,6 +930,10 @@ impl PeachApp {
                 Err(err) => self.format_dialog.set_error(format!("{err:#}")),
             },
             FormatDialogOutcome::Load(path) => match TextFormatDraft::from_file(&path) {
+                Ok(draft) => self.format_dialog.set_draft(draft),
+                Err(err) => self.format_dialog.set_error(format!("{err:#}")),
+            },
+            FormatDialogOutcome::LoadBuiltin(toml) => match TextFormatDraft::from_toml_str(toml) {
                 Ok(draft) => self.format_dialog.set_draft(draft),
                 Err(err) => self.format_dialog.set_error(format!("{err:#}")),
             },
@@ -1145,8 +1214,53 @@ impl PeachApp {
                 {
                     self.rule_paths = paths;
                 }
+                // Same best-effort reasoning as startup: the Settings
+                // dialog validates the field before allowing Save (see
+                // `SettingsDialog`), so a parse failure here would only
+                // mean a config file hand-edited to something invalid
+                // between opening the dialog and clicking Save — keep
+                // whatever display timezone was already in effect rather
+                // than silently reverting to UTC.
+                if let Ok(display_tz) = new_settings.display_timezone_spec() {
+                    self.timeline.set_display_timezone(display_tz);
+                }
+                // Keep the load-controls quick-access copy of this field in
+                // sync — otherwise saving a change via Settings would leave
+                // it showing a stale value until the app restarts. Display
+                // timezone has no such copy to keep in sync: it's only
+                // editable from View > Display timezone now, not Settings
+                // (see that dialog's doc comment for why one field ended up
+                // with two editable locations and the other doesn't).
+                self.default_source_timezone_input = new_settings
+                    .default_source_timezone
+                    .clone()
+                    .unwrap_or_default();
                 self.settings = new_settings;
             }
+        }
+    }
+
+    /// Applies a validated `Display Timezone` edit the moment it lands —
+    /// same immediate-apply/immediate-save shape as `View > Theme` and the
+    /// load-controls' own `default_source_timezone` field, just routed
+    /// through a real window instead of directly in the View menu (see
+    /// `DisplayTimezoneDialog`'s doc comment for why).
+    fn handle_display_timezone_dialog(&mut self, ctx: &egui::Context) {
+        if !self.display_timezone_dialog.is_open() {
+            return;
+        }
+        let Some(value) = self.display_timezone_dialog.ui(ctx) else {
+            return;
+        };
+        if value == self.settings.display_timezone {
+            return;
+        }
+        self.settings.display_timezone = value;
+        if let Ok(display_tz) = self.settings.display_timezone_spec() {
+            self.timeline.set_display_timezone(display_tz);
+        }
+        if let Err(err) = config::save(&self.settings) {
+            eprintln!("peach: failed to save display timezone: {err:#}");
         }
     }
 }
@@ -1192,18 +1306,6 @@ fn find_rule_producing_tag(rule_paths: &[PathBuf], tag_value: &str) -> Option<Pa
         Some(first.clone())
     }
 }
-
-/// GitHub-hosted, not a local file path: release builds ship only the
-/// binary (`build.rs` embeds the rule *files themselves*, but not
-/// `docs/rules-reference.md`, which is generated from them for browsing,
-/// not needed at runtime) — a repo-relative path would silently point at
-/// nothing once Peach isn't running from a git checkout. Points at `main`
-/// rather than pinning a release tag, so the link itself never needs
-/// updating — the tradeoff is that it can show rules newer than whatever
-/// release the analyst is actually running, same as any other
-/// "see the latest docs" link.
-const RULES_REFERENCE_URL: &str =
-    "https://github.com/kalink0/peach-forensics/blob/main/docs/rules-reference.md";
 
 impl eframe::App for PeachApp {
     fn on_exit(&mut self) {
@@ -1533,6 +1635,12 @@ impl eframe::App for PeachApp {
                         }
                     });
                     ui.separator();
+                    if ui.button("Display timezone...").clicked() {
+                        self.display_timezone_dialog =
+                            DisplayTimezoneDialog::open(self.settings.display_timezone.as_deref());
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Activity Log...").clicked() {
                         self.open_activity_log_dialog();
                         ui.close();
@@ -1545,8 +1653,7 @@ impl eframe::App for PeachApp {
                         ui.close();
                     }
                     if ui.button("Rules reference...").clicked() {
-                        ui.ctx()
-                            .open_url(egui::OpenUrl::same_tab(RULES_REFERENCE_URL));
+                        self.rules_reference_dialog = RulesReferenceDialog::open();
                         ui.close();
                     }
                 });
@@ -1700,6 +1807,43 @@ impl eframe::App for PeachApp {
                         self.open_format_dialog();
                     }
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Assume timezone for logs with no timezone of their own:");
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.default_source_timezone_input)
+                            .desired_width(160.0)
+                            .hint_text("+0100, +02:00, UTC, or Europe/Berlin"),
+                    );
+                    match settings_dialog::parse_timezone_field(&self.default_source_timezone_input)
+                    {
+                        Ok(value) => {
+                            // Only on an actual edit, not every frame — a
+                            // `config::save` per frame regardless of change
+                            // would be pure waste, and this field is valid
+                            // (or blank) far more of the time than the
+                            // display-timezone field below, since it's only
+                            // ever a fallback rather than something typed
+                            // character-by-character toward a specific goal.
+                            if response.changed() && value != self.settings.default_source_timezone
+                            {
+                                self.settings.default_source_timezone = value;
+                                if let Err(err) = config::save(&self.settings) {
+                                    eprintln!(
+                                        "peach: failed to save default source timezone: {err:#}"
+                                    );
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            ui.colored_label(ui.visuals().error_fg_color, err);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Fallback when a text source's own \"Assume offset\" isn't set. \
+                     Applies immediately.",
+                );
             }
 
             ui.horizontal(|ui| {
@@ -1964,10 +2108,12 @@ impl eframe::App for PeachApp {
         self.raw_fields_dialog.ui(ui.ctx());
         self.handle_session_dialog(ui.ctx());
         self.handle_settings_dialog(ui.ctx());
+        self.handle_display_timezone_dialog(ui.ctx());
         self.about_dialog.ui(ui.ctx());
         self.activity_log_dialog.ui(ui.ctx());
         self.builtin_rules_dialog
             .ui(ui.ctx(), &mut self.enabled_builtin_rules);
+        self.rules_reference_dialog.ui(ui.ctx());
     }
 }
 
@@ -2098,28 +2244,58 @@ struct LoadControl<'a> {
     cancel: Arc<AtomicBool>,
 }
 
+/// Settings-derived values `run_load` needs but that don't belong on
+/// [`RuleSelection`]/[`LoadControl`] — bundled for the same
+/// clippy-argument-count reason as those two, not because these two
+/// particularly belong together.
+struct LoadSettings {
+    thread_count: usize,
+    /// `Settings::default_source_timezone` — only used for
+    /// `SourceKind::Text` (`TextConfigParser::default_assume_offset`); every
+    /// other sourcetype's own timestamps are already absolute, see
+    /// `parsers::text_config`'s own doc comment on why only text sources
+    /// ever need this at all.
+    default_source_timezone: Option<String>,
+}
+
 fn run_load(
     source_kind: SourceKind,
     source_path: &Path,
     parser_config_path: Option<&Path>,
     rules: RuleSelection,
     conn: duckdb::Connection,
-    thread_count: usize,
+    settings: LoadSettings,
     control: LoadControl,
 ) -> anyhow::Result<LoadSummary> {
     setup_timeline_schema(&conn)?;
 
+    // Constructed unconditionally, not just inside the `SourceKind::Text`
+    // match arm below: `&dyn LogParser` needs something to borrow from for
+    // the rest of this function, and only the arm that's actually taken
+    // ever gets referenced — the other three unit structs cost nothing to
+    // instantiate. `text_parser` is the only one that isn't a plain unit
+    // struct (it carries `default_source_timezone`), which is exactly why
+    // this had to move out of the match arm: a value constructed *inside*
+    // an arm doesn't live long enough to be borrowed as `&dyn LogParser`
+    // past the match.
+    let aul_parser = AulParser;
+    let evtx_parser = EvtxFileParser;
+    let journald_parser = JournaldFileParser;
+    let text_parser = TextConfigParser {
+        default_assume_offset: settings.default_source_timezone,
+    };
+
     let (parser, config): (&dyn LogParser, ParserConfig) = match source_kind {
         SourceKind::Aul => (
-            &AulParser,
+            &aul_parser,
             ParserConfig::from_toml_str("[parser]\nname = \"aul\"\nsourcetype = \"aul\"\n")?,
         ),
         SourceKind::Evtx => (
-            &EvtxFileParser,
+            &evtx_parser,
             ParserConfig::from_toml_str("[parser]\nname = \"evtx\"\nsourcetype = \"evtx\"\n")?,
         ),
         SourceKind::Journald => (
-            &JournaldFileParser,
+            &journald_parser,
             ParserConfig::from_toml_str(
                 "[parser]\nname = \"journald\"\nsourcetype = \"journald\"\n",
             )?,
@@ -2128,10 +2304,7 @@ fn run_load(
             let config_path = parser_config_path
                 .ok_or_else(|| anyhow::anyhow!("no parser config selected for a text source"))?;
             let config_text = std::fs::read_to_string(config_path)?;
-            (
-                &TextConfigParser,
-                ParserConfig::from_toml_str(&config_text)?,
-            )
+            (&text_parser, ParserConfig::from_toml_str(&config_text)?)
         }
     };
     // The config's sourcetype is authoritative, not `parser.sourcetype()`:
@@ -2164,7 +2337,7 @@ fn run_load(
             files,
             &conn,
             bytes_total,
-            thread_count,
+            settings.thread_count,
             control.progress_tx,
         )?
     };
@@ -3504,7 +3677,10 @@ mod tests {
                 enabled_builtin_rules: &no_builtin_rules(),
             },
             conn,
-            2, // 3 files > 1, so this exercises run_parallel
+            LoadSettings {
+                thread_count: 2, // 3 files > 1, so this exercises run_parallel
+                default_source_timezone: None,
+            },
             LoadControl {
                 progress_tx: &tx,
                 cancel: no_cancel(),
@@ -3571,7 +3747,10 @@ mod tests {
                 enabled_builtin_rules: &no_builtin_rules(),
             },
             conn,
-            1,
+            LoadSettings {
+                thread_count: 1,
+                default_source_timezone: None,
+            },
             LoadControl {
                 progress_tx: &tx,
                 cancel: no_cancel(),
@@ -3625,7 +3804,10 @@ mod tests {
                 enabled_builtin_rules: &no_builtin_rules(),
             },
             conn,
-            4, // irrelevant with a single file — must still behave correctly
+            LoadSettings {
+                thread_count: 4, // irrelevant with a single file — must still behave correctly
+                default_source_timezone: None,
+            },
             LoadControl {
                 progress_tx: &tx,
                 cancel: no_cancel(),
@@ -3668,7 +3850,10 @@ mod tests {
                 enabled_builtin_rules: &no_builtin_rules(),
             },
             conn,
-            1,
+            LoadSettings {
+                thread_count: 1,
+                default_source_timezone: None,
+            },
             LoadControl {
                 progress_tx: &tx,
                 cancel: Arc::new(AtomicBool::new(true)), // already cancelled
@@ -3705,7 +3890,10 @@ mod tests {
                 enabled_builtin_rules: &no_builtin_rules(),
             },
             conn,
-            2, // 2 files > 1, exercises run_parallel
+            LoadSettings {
+                thread_count: 2, // 2 files > 1, exercises run_parallel
+                default_source_timezone: None,
+            },
             LoadControl {
                 progress_tx: &tx,
                 cancel: Arc::new(AtomicBool::new(true)), // already cancelled
@@ -3762,7 +3950,10 @@ mod tests {
                 enabled_builtin_rules: &no_builtin_rules(),
             },
             conn,
-            1,
+            LoadSettings {
+                thread_count: 1,
+                default_source_timezone: None,
+            },
             LoadControl {
                 progress_tx: &tx,
                 cancel,
@@ -3906,7 +4097,10 @@ mod tests {
                     enabled_builtin_rules: &no_builtin_rules(),
                 },
                 conn,
-                thread_count,
+                LoadSettings {
+                    thread_count,
+                    default_source_timezone: None,
+                },
                 LoadControl {
                     progress_tx: &tx,
                     cancel: no_cancel(),

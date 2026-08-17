@@ -66,6 +66,30 @@ pub struct Settings {
     /// backward-compat reason `theme`/`load_threads` have it.
     #[serde(default)]
     pub rules_dir: Option<PathBuf>,
+    /// Session-wide fallback for a text source's `pattern.assume_offset`
+    /// when that source's own config doesn't set one — a fixed offset
+    /// (`"+02:00"`, `"UTC"`) or an IANA zone name (`"Europe/Berlin"`), see
+    /// [`crate::model::timezone_spec::TimezoneSpec`]. `None` (the default)
+    /// means every text source still needs its own `assume_offset`, same
+    /// as before this setting existed. Never applies to AUL/EVTX/journald
+    /// — their own timestamps are already absolute, see
+    /// `parsers::text_config`'s doc comment for why only text sources ever
+    /// need an assumed timezone at all. `#[serde(default)]` for the same
+    /// backward-compat reason every override field here has it.
+    #[serde(default)]
+    pub default_source_timezone: Option<String>,
+    /// Timezone the timeline table (and CSV/JSON export) renders
+    /// timestamps in — same `TimezoneSpec` shape as
+    /// `default_source_timezone`. `None` (the default) means UTC, same as
+    /// every display before this setting existed. Deliberately display-only
+    /// in the sense that it never touches what's stored: `log_entries.
+    /// timestamp_utc` stays real UTC regardless, this only changes how a
+    /// UTC instant gets formatted for a human to read — the formatted
+    /// string always carries its own offset (`TimezoneSpec::format_utc`),
+    /// so a value is self-describing even if this setting changes later or
+    /// the exported file outlives the session that produced it.
+    #[serde(default)]
+    pub display_timezone: Option<String>,
 }
 
 impl Settings {
@@ -96,6 +120,23 @@ impl Settings {
     /// override if set, otherwise [`default_load_threads`].
     pub fn effective_load_threads(&self) -> usize {
         self.load_threads.unwrap_or_else(default_load_threads)
+    }
+
+    /// The effective display timezone — the configured override if set and
+    /// valid, otherwise UTC (same as every display before this setting
+    /// existed). Parse failure only realistically happens if a hand-edited
+    /// `config.toml` has a bad value; propagated as an error rather than
+    /// silently falling back to UTC, so a typo in this field surfaces
+    /// instead of quietly changing what every timestamp in the app means.
+    pub fn display_timezone_spec(
+        &self,
+    ) -> anyhow::Result<crate::model::timezone_spec::TimezoneSpec> {
+        match &self.display_timezone {
+            Some(s) => crate::model::timezone_spec::TimezoneSpec::parse(s),
+            None => Ok(crate::model::timezone_spec::TimezoneSpec::Fixed(
+                chrono::FixedOffset::east_opt(0).unwrap(),
+            )),
+        }
     }
 }
 
@@ -177,6 +218,8 @@ mod tests {
             theme: Theme::Geek,
             load_threads: Some(3),
             rules_dir: Some(PathBuf::from("/tmp/some-case-drive/peach-rules")),
+            default_source_timezone: Some("Europe/Berlin".to_string()),
+            display_timezone: Some("America/New_York".to_string()),
         };
 
         save_to(&path, &settings).unwrap();
@@ -306,5 +349,71 @@ mod tests {
 
         assert_eq!(loaded.rules_dir, None);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn defaults_to_no_default_source_timezone_override() {
+        assert_eq!(Settings::default().default_source_timezone, None);
+    }
+
+    #[test]
+    fn load_from_a_file_predating_the_default_source_timezone_field_defaults_to_none() {
+        let path = temp_config_path("no-default-source-timezone-field");
+        std::fs::write(&path, b"sessions_dir = \"/tmp/some-case-drive\"\n").unwrap();
+
+        let loaded = load_from(&path);
+
+        assert_eq!(loaded.default_source_timezone, None);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn defaults_to_no_display_timezone_override() {
+        assert_eq!(Settings::default().display_timezone, None);
+    }
+
+    #[test]
+    fn load_from_a_file_predating_the_display_timezone_field_defaults_to_none() {
+        let path = temp_config_path("no-display-timezone-field");
+        std::fs::write(&path, b"sessions_dir = \"/tmp/some-case-drive\"\n").unwrap();
+
+        let loaded = load_from(&path);
+
+        assert_eq!(loaded.display_timezone, None);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn display_timezone_spec_defaults_to_utc() {
+        let settings = Settings::default();
+        let spec = settings.display_timezone_spec().unwrap();
+        assert_eq!(
+            spec,
+            crate::model::timezone_spec::TimezoneSpec::Fixed(
+                chrono::FixedOffset::east_opt(0).unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn display_timezone_spec_uses_the_configured_override() {
+        let settings = Settings {
+            display_timezone: Some("Europe/Berlin".to_string()),
+            ..Settings::default()
+        };
+        let spec = settings.display_timezone_spec().unwrap();
+        assert_eq!(
+            spec,
+            crate::model::timezone_spec::TimezoneSpec::parse("Europe/Berlin").unwrap()
+        );
+    }
+
+    #[test]
+    fn display_timezone_spec_propagates_a_parse_error_instead_of_silently_falling_back() {
+        let settings = Settings {
+            display_timezone: Some("not a real zone".to_string()),
+            ..Settings::default()
+        };
+        assert!(settings.display_timezone_spec().is_err());
     }
 }

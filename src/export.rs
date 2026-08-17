@@ -19,6 +19,7 @@ use std::sync::mpsc;
 use anyhow::Context;
 
 use crate::db::timeline_queries::{self, DisplayRow, Query};
+use crate::model::timezone_spec::TimezoneSpec;
 use crate::session::persist;
 
 /// Rows fetched and written per chunk — same order of magnitude as
@@ -53,9 +54,18 @@ impl ExportFormat {
 /// CSV has no concept of a nested value, and keeping both formats
 /// structurally identical means the export is predictable regardless of
 /// which one was chosen, not richer in one than the other.
+///
+/// `timestamp` (not `timestamp_utc`) — export follows the configured
+/// display timezone, not necessarily UTC (the analyst's explicit choice:
+/// showing one timezone on screen and exporting a different one silently
+/// would be far more confusing than an export that isn't UTC). The column
+/// is still self-describing on its own: `DisplayRow::timestamp_display`
+/// always carries its own `%:z` offset via `TimezoneSpec::format_utc`, so a
+/// reader never has to already know what Peach was configured to at export
+/// time.
 #[derive(serde::Serialize)]
 struct ExportRow<'a> {
-    timestamp_utc: &'a str,
+    timestamp: &'a str,
     level: &'a str,
     source: &'a str,
     sourcetype: &'a str,
@@ -72,7 +82,7 @@ struct ExportRow<'a> {
 impl<'a> From<&'a DisplayRow> for ExportRow<'a> {
     fn from(row: &'a DisplayRow) -> Self {
         Self {
-            timestamp_utc: &row.timestamp_utc,
+            timestamp: &row.timestamp_display,
             level: &row.level,
             source: &row.source_path,
             sourcetype: &row.sourcetype,
@@ -166,6 +176,7 @@ pub fn export_to_file(
     conn: &duckdb::Connection,
     session_sqlite_path: &Path,
     query: &Query,
+    display_tz: &TimezoneSpec,
     format: ExportFormat,
     out_path: &Path,
     progress_tx: &mpsc::Sender<ExportOutcome>,
@@ -187,7 +198,8 @@ pub fn export_to_file(
     let mut offset = 0usize;
 
     loop {
-        let mut chunk = timeline_queries::fetch_window(conn, query, offset, EXPORT_CHUNK_SIZE)?;
+        let mut chunk =
+            timeline_queries::fetch_window(conn, query, offset, EXPORT_CHUNK_SIZE, display_tz)?;
         if chunk.is_empty() {
             break;
         }
@@ -295,6 +307,7 @@ mod tests {
             &conn,
             &sqlite_path,
             &Query::default(),
+            &TimezoneSpec::Fixed(chrono::FixedOffset::east_opt(0).unwrap()),
             ExportFormat::Csv,
             &out_path,
             &tx,
@@ -305,7 +318,7 @@ mod tests {
         let contents = std::fs::read_to_string(&out_path).unwrap();
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 4, "header + 3 rows"); // header + 3 rows
-        assert!(lines[0].starts_with("timestamp_utc,level,source,"));
+        assert!(lines[0].starts_with("timestamp,level,source,"));
         assert!(contents.contains("hello"));
         assert!(contents.contains("world"));
         drop(rx);
@@ -324,6 +337,7 @@ mod tests {
             &conn,
             &sqlite_path,
             &Query::default(),
+            &TimezoneSpec::Fixed(chrono::FixedOffset::east_opt(0).unwrap()),
             ExportFormat::Json,
             &out_path,
             &tx,
@@ -351,6 +365,7 @@ mod tests {
             &conn,
             &sqlite_path,
             &Query::parse("hello"),
+            &TimezoneSpec::Fixed(chrono::FixedOffset::east_opt(0).unwrap()),
             ExportFormat::Csv,
             &out_path,
             &tx,
@@ -381,6 +396,7 @@ mod tests {
             &conn,
             &sqlite_path,
             &Query::default(),
+            &TimezoneSpec::Fixed(chrono::FixedOffset::east_opt(0).unwrap()),
             ExportFormat::Csv,
             &out_path,
             &tx,
@@ -406,6 +422,7 @@ mod tests {
             &conn,
             &sqlite_path,
             &Query::default(),
+            &TimezoneSpec::Fixed(chrono::FixedOffset::east_opt(0).unwrap()),
             ExportFormat::Csv,
             &out_path,
             &tx,
@@ -420,6 +437,58 @@ mod tests {
             })
             .collect();
         assert_eq!(progress, vec![3]);
+        std::fs::remove_file(&out_path).unwrap();
+    }
+
+    /// Regression coverage for the analyst's explicit choice ("export
+    /// follows the display timezone, but it must be clearly labeled"): a
+    /// non-UTC `display_tz` must actually shift the exported value, and the
+    /// exported string must carry its own offset rather than relying on the
+    /// reader already knowing what Peach was configured to.
+    #[test]
+    fn export_to_file_uses_the_display_timezone_and_labels_the_offset() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        setup_timeline_schema(&conn).unwrap();
+        let source_file_id = SourceFileId::new_random();
+        let mut sequence_counter = SequenceCounter::new();
+        let event_id = EventId {
+            source_file_id,
+            sequence_number: sequence_counter.next_sequence_number(),
+        };
+        conn.execute(
+            "INSERT INTO log_entries
+                (event_id_source, event_id_seq, timestamp_utc, level, message, raw, fields)
+             VALUES (?, ?, ?, 'INFO', 'noon in utc', 'raw', '{}')",
+            duckdb::params![
+                event_id.source_file_id.to_string(),
+                event_id.sequence_number.value() as i64,
+                chrono::NaiveDate::from_ymd_opt(2026, 7, 28)
+                    .unwrap()
+                    .and_hms_opt(12, 0, 0)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let sqlite_path = temp_path("tz-session", "sqlite");
+        let out_path = temp_path("tz-out", "csv");
+        let (tx, _rx) = mpsc::channel();
+
+        export_to_file(
+            &conn,
+            &sqlite_path,
+            &Query::default(),
+            &TimezoneSpec::parse("+02:00").unwrap(),
+            ExportFormat::Csv,
+            &out_path,
+            &tx,
+        )
+        .unwrap();
+
+        let contents = std::fs::read_to_string(&out_path).unwrap();
+        assert!(
+            contents.contains("2026-07-28 14:00:00.000 +02:00"),
+            "expected the +02:00-shifted, offset-labeled timestamp, got: {contents}"
+        );
         std::fs::remove_file(&out_path).unwrap();
     }
 }

@@ -6,6 +6,7 @@ use crate::model::event_id::{EventId, SequenceCounter, SourceFileId};
 use crate::model::log_entry::{LogEntry, ParsedRecord};
 
 pub mod aul;
+pub mod builtin_text_formats;
 pub mod evtx;
 mod evtx_templates;
 pub mod journald;

@@ -3,6 +3,13 @@ use std::collections::HashMap;
 use duckdb::{Connection, types::Value};
 
 use crate::model::event_id::EventId;
+use crate::model::timezone_spec::TimezoneSpec;
+
+/// The format `timestamp_display` is always rendered in, before
+/// [`TimezoneSpec::format_utc`] appends its self-describing `%:z` offset —
+/// same precision `timestamp_utc` itself always used, just no longer
+/// hardcoded to UTC.
+const DISPLAY_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f";
 
 /// A Splunk-inspired v1 search grammar — whitespace-separated terms,
 /// implicit `AND`, explicit `OR`, `NOT`/`-` negation, `field=value` /
@@ -501,7 +508,17 @@ fn parse_query_timestamp(value: &str) -> Option<chrono::NaiveDateTime> {
 /// One row as shown in the timeline table.
 pub struct DisplayRow {
     pub event_id: EventId,
+    /// Always literal UTC (`%Y-%m-%d %H:%M:%S%.3f`, no offset suffix) —
+    /// internal logic (the context-window re-parse in `timeline_view`'s row
+    /// context menu, sorting) depends on this being UTC regardless of the
+    /// configured display timezone, so it's never repurposed for rendering.
+    /// See [`Self::timestamp_display`] for what the table actually shows.
     pub timestamp_utc: String,
+    /// `timestamp_utc` formatted in `Settings::display_timezone` (UTC if
+    /// unset) via [`TimezoneSpec::format_utc`] — always carries its own
+    /// `%:z` offset, so it's self-describing on its own. This is what the
+    /// Timestamp column renders; `timestamp_utc` stays internal.
+    pub timestamp_display: String,
     pub level: String,
     pub message: String,
     pub tags: Vec<String>,
@@ -712,7 +729,12 @@ pub fn count_message_contains(conn: &Connection, pattern: &str) -> anyhow::Resul
 /// avoid. A single-event lookup by primary key is cheap enough to run
 /// synchronously, unlike the window/count queries.
 pub struct FullEntry {
+    /// Always literal UTC, same reasoning as `DisplayRow::timestamp_utc`.
     pub timestamp_utc: String,
+    /// Same as `DisplayRow::timestamp_display` — what "Copy whole event as
+    /// text" and the "View raw/fields" dialog actually show, since both are
+    /// analyst-facing rather than internal.
+    pub timestamp_display: String,
     pub level: String,
     pub message: String,
     pub raw: String,
@@ -734,7 +756,7 @@ impl FullEntry {
     pub fn to_text(&self) -> String {
         format!(
             "Timestamp: {}\nLevel: {}\nTags: {}\nMessage: {}\nRaw: {}\nFields: {}",
-            self.timestamp_utc,
+            self.timestamp_display,
             self.level,
             self.tags.join(", "),
             self.message,
@@ -747,7 +769,11 @@ impl FullEntry {
 /// Looks up one entry by its primary key (`event_id_source`,
 /// `event_id_seq`) — see [`FullEntry`] for why this is separate from
 /// [`fetch_window`].
-pub fn fetch_full_entry(conn: &Connection, event_id: EventId) -> anyhow::Result<Option<FullEntry>> {
+pub fn fetch_full_entry(
+    conn: &Connection,
+    event_id: EventId,
+    display_tz: &TimezoneSpec,
+) -> anyhow::Result<Option<FullEntry>> {
     let mut stmt = conn.prepare(
         "SELECT le.timestamp_utc, le.level, le.message, le.raw, le.fields,
                 (SELECT string_agg(it.tag_value, ',') FROM import_tags AS it
@@ -775,7 +801,8 @@ pub fn fetch_full_entry(conn: &Connection, event_id: EventId) -> anyhow::Result<
     tags.sort();
 
     Ok(Some(FullEntry {
-        timestamp_utc: timestamp_utc.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+        timestamp_utc: timestamp_utc.format(DISPLAY_TIMESTAMP_FORMAT).to_string(),
+        timestamp_display: display_tz.format_utc(timestamp_utc.and_utc(), DISPLAY_TIMESTAMP_FORMAT),
         level: level.unwrap_or_default(),
         message: message.unwrap_or_default(),
         raw,
@@ -939,6 +966,7 @@ pub fn fetch_window(
     query: &Query,
     offset: usize,
     limit: usize,
+    display_tz: &TimezoneSpec,
 ) -> anyhow::Result<Vec<DisplayRow>> {
     let compiled = query.compile();
     let where_sql = compiled
@@ -1052,7 +1080,9 @@ pub fn fetch_window(
         tags.sort();
         display_rows.push(DisplayRow {
             event_id,
-            timestamp_utc: timestamp_utc.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+            timestamp_utc: timestamp_utc.format(DISPLAY_TIMESTAMP_FORMAT).to_string(),
+            timestamp_display: display_tz
+                .format_utc(timestamp_utc.and_utc(), DISPLAY_TIMESTAMP_FORMAT),
             level: level.unwrap_or_default(),
             message: message.unwrap_or_default(),
             tags,
@@ -1072,6 +1102,15 @@ pub fn fetch_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `fetch_window`/`fetch_full_entry` test cares about `raw`
+    /// UTC-based behavior, not display-timezone conversion (that's
+    /// `timezone_spec`'s own test module's job) — a fixed UTC spec keeps
+    /// every existing assertion against `timestamp_utc`-shaped values
+    /// meaningful without each test needing its own timezone concern.
+    fn utc() -> TimezoneSpec {
+        TimezoneSpec::Fixed(chrono::FixedOffset::east_opt(0).unwrap())
+    }
 
     #[test]
     fn after_and_before_parse_as_fields_not_free_text() {
@@ -1483,7 +1522,7 @@ mod tests {
 
             let query = Query::parse("refused");
             assert_eq!(count_matching(&conn, &query).unwrap(), 1);
-            let rows = fetch_window(&conn, &query, 0, 10).unwrap();
+            let rows = fetch_window(&conn, &query, 0, 10, &utc()).unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(count_message_contains(&conn, "refused").unwrap(), 1);
             assert_eq!(count_message_contains(&conn, "raw line").unwrap(), 0);
@@ -1526,13 +1565,13 @@ mod tests {
             );
 
             let hide_a = Query::parse(&format!("NOT source_id={source_a}"));
-            let rows = fetch_window(&conn, &hide_a, 0, 10).unwrap();
+            let rows = fetch_window(&conn, &hide_a, 0, 10, &utc()).unwrap();
             assert_eq!(count_matching(&conn, &hide_a).unwrap(), 1);
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].message, "from source b");
 
             let only_a = Query::parse(&format!("source_id={source_a}"));
-            let rows = fetch_window(&conn, &only_a, 0, 10).unwrap();
+            let rows = fetch_window(&conn, &only_a, 0, 10, &utc()).unwrap();
             assert_eq!(count_matching(&conn, &only_a).unwrap(), 1);
             assert_eq!(rows[0].message, "from source a");
         }
@@ -1570,7 +1609,7 @@ mod tests {
             let query = Query::parse(&format!(
                 "NOT source_id={source_a} NOT source_id={source_b}"
             ));
-            let rows = fetch_window(&conn, &query, 0, 10).unwrap();
+            let rows = fetch_window(&conn, &query, 0, 10, &utc()).unwrap();
             assert_eq!(count_matching(&conn, &query).unwrap(), 1);
             assert_eq!(rows[0].message, "from c");
         }
@@ -1594,11 +1633,50 @@ mod tests {
             insert_tag(&conn, tagged, "wifi_status");
             insert_tag(&conn, tagged, "app_launch");
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
 
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].tags, vec!["app_launch", "wifi_status"]);
             assert!(rows[1].tags.is_empty());
+        }
+
+        /// `timestamp_utc` must stay literal UTC regardless of the
+        /// configured display timezone — `timeline_view`'s context-window
+        /// re-parse depends on that — while `timestamp_display` reflects
+        /// the requested zone and carries its own offset.
+        #[test]
+        fn fetch_window_keeps_timestamp_utc_literal_while_timestamp_display_follows_the_configured_zone()
+         {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "text_config");
+            let mut counter = SequenceCounter::new();
+            let event_id = EventId {
+                source_file_id,
+                sequence_number: counter.next_sequence_number(),
+            };
+            insert_entry_at(
+                &conn,
+                event_id,
+                chrono::NaiveDate::from_ymd_opt(2026, 7, 28)
+                    .unwrap()
+                    .and_hms_opt(12, 0, 0)
+                    .unwrap(),
+                "noon in utc",
+            );
+
+            let rows = fetch_window(
+                &conn,
+                &Query::parse(""),
+                0,
+                10,
+                &TimezoneSpec::parse("+02:00").unwrap(),
+            )
+            .unwrap();
+
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].timestamp_utc, "2026-07-28 12:00:00.000");
+            assert_eq!(rows[0].timestamp_display, "2026-07-28 14:00:00.000 +02:00");
         }
 
         #[test]
@@ -1711,7 +1789,7 @@ mod tests {
                 "a",
             );
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
 
             assert_eq!(rows[0].source_path, "/evidence/test.log");
             assert_eq!(rows[0].sourcetype, "journald");
@@ -1735,7 +1813,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
 
             assert_eq!(rows[0].host, "workstation1");
             assert_eq!(rows[0].process, "sshd");
@@ -1758,7 +1836,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
 
             assert_eq!(rows[0].process, "systemd");
         }
@@ -1780,7 +1858,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
 
             assert_eq!(rows[0].process, "/usr/bin/example");
             assert_eq!(
@@ -1817,7 +1895,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
 
             assert_eq!(rows[0].host, "WORKSTATION1");
             assert_eq!(rows[0].event_code, "4625");
@@ -1864,7 +1942,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
 
             assert_eq!(rows[0].event_code, "4111");
         }
@@ -1919,7 +1997,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse("event_id=4625"), 0, 10).unwrap();
+            let rows = fetch_window(&conn, &Query::parse("event_id=4625"), 0, 10, &utc()).unwrap();
 
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].message, "a");
@@ -1943,7 +2021,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
 
             assert_eq!(rows[0].subsystem, "com.apple.mDNSResponder");
             assert_eq!(rows[0].category, "mDNS");
@@ -1985,12 +2063,14 @@ mod tests {
                 &Query::parse("subsystem=com.apple.mDNSResponder"),
                 0,
                 10,
+                &utc(),
             )
             .unwrap();
             assert_eq!(by_subsystem.len(), 1);
             assert_eq!(by_subsystem[0].message, "a");
 
-            let by_category = fetch_window(&conn, &Query::parse("category=WiFi"), 0, 10).unwrap();
+            let by_category =
+                fetch_window(&conn, &Query::parse("category=WiFi"), 0, 10, &utc()).unwrap();
             assert_eq!(by_category.len(), 1);
             assert_eq!(by_category[0].message, "b");
         }
@@ -2026,11 +2106,12 @@ mod tests {
             )
             .unwrap();
 
-            let by_host = fetch_window(&conn, &Query::parse("host=host-a"), 0, 10).unwrap();
+            let by_host = fetch_window(&conn, &Query::parse("host=host-a"), 0, 10, &utc()).unwrap();
             assert_eq!(by_host.len(), 1);
             assert_eq!(by_host[0].message, "a");
 
-            let by_process = fetch_window(&conn, &Query::parse("process=cron"), 0, 10).unwrap();
+            let by_process =
+                fetch_window(&conn, &Query::parse("process=cron"), 0, 10, &utc()).unwrap();
             assert_eq!(by_process.len(), 1);
             assert_eq!(by_process[0].message, "b");
         }
@@ -2051,7 +2132,7 @@ mod tests {
                 "a",
             );
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
 
             assert_eq!(rows[0].subsystem, "");
             assert_eq!(rows[0].category, "");
@@ -2073,7 +2154,7 @@ mod tests {
                 "a",
             );
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
 
             assert_eq!(rows[0].event_code, "");
         }
@@ -2569,7 +2650,7 @@ mod tests {
             insert_tag(&conn, event_id, "wifi_status");
             insert_tag(&conn, event_id, "app_launch");
 
-            let entry = fetch_full_entry(&conn, event_id).unwrap().unwrap();
+            let entry = fetch_full_entry(&conn, event_id, &utc()).unwrap().unwrap();
 
             assert_eq!(entry.level, "Info");
             assert_eq!(entry.message, "the message");
@@ -2577,6 +2658,36 @@ mod tests {
             assert_eq!(entry.fields, serde_json::json!({}));
             assert_eq!(entry.tags, vec!["app_launch", "wifi_status"]);
             assert!(entry.to_text().contains("the raw record"));
+        }
+
+        #[test]
+        fn fetch_full_entry_keeps_timestamp_utc_literal_while_timestamp_display_follows_the_configured_zone()
+         {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "text_config");
+            let event_id = EventId {
+                source_file_id,
+                sequence_number: SequenceCounter::new().next_sequence_number(),
+            };
+            insert_entry_at(
+                &conn,
+                event_id,
+                chrono::NaiveDate::from_ymd_opt(2026, 7, 28)
+                    .unwrap()
+                    .and_hms_opt(12, 0, 0)
+                    .unwrap(),
+                "noon in utc",
+            );
+
+            let entry = fetch_full_entry(&conn, event_id, &TimezoneSpec::parse("+02:00").unwrap())
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(entry.timestamp_utc, "2026-07-28 12:00:00.000");
+            assert_eq!(entry.timestamp_display, "2026-07-28 14:00:00.000 +02:00");
+            assert!(entry.to_text().contains("2026-07-28 14:00:00.000 +02:00"));
+            assert!(!entry.to_text().contains("12:00:00.000\n"));
         }
 
         #[test]
@@ -2601,7 +2712,7 @@ mod tests {
             )
             .unwrap();
 
-            let entry = fetch_full_entry(&conn, event_id).unwrap().unwrap();
+            let entry = fetch_full_entry(&conn, event_id, &utc()).unwrap().unwrap();
 
             assert_eq!(entry.raw, "the literal original line");
             assert_eq!(entry.fields, serde_json::json!({"ip": "10.0.0.1"}));
@@ -2618,7 +2729,7 @@ mod tests {
                 sequence_number: SequenceCounter::new().next_sequence_number(),
             };
 
-            assert!(fetch_full_entry(&conn, event_id).unwrap().is_none());
+            assert!(fetch_full_entry(&conn, event_id, &utc()).unwrap().is_none());
         }
     }
 }

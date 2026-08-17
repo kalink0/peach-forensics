@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::config::{self, Settings};
+use crate::model::timezone_spec::TimezoneSpec;
 use crate::session::persist;
 use crate::tagging::rule_file;
 use crate::ui::dialog_window::show_dialog_window;
@@ -20,23 +21,46 @@ pub enum SettingsOutcome {
 
 pub enum SettingsDialog {
     Closed,
-    Open {
-        /// Editable copy — discarded on Cancel, only becomes the real
-        /// settings on Save.
-        draft: Settings,
-        /// What `sessions_dir`/`rules_dir` resolve to when left unset —
-        /// resolved once when the dialog opens (not every frame: it can't
-        /// change while the dialog is open, and resolving it creates the
-        /// directory as a side effect via `default_sessions_dir`/
-        /// `default_user_rules_dir`, not something worth repeating 60
-        /// times a second). Empty on the rare platform where `ProjectDirs`
-        /// can't determine a per-user data directory at all — the same
-        /// failure `Settings::sessions_dir`/`rules_dir` would themselves
-        /// hit, surfaced here as a blank path rather than a dialog that
-        /// can't open.
-        default_sessions_dir: PathBuf,
-        default_rules_dir: PathBuf,
-    },
+    // Boxed: `Closed` carries nothing, so an unboxed `OpenSettingsDialog`
+    // here would make every `SettingsDialog` value, including the
+    // near-always-current `Closed` one, as large as the biggest variant —
+    // same reasoning as `RawFieldsDialog`/`FormatDialog`.
+    Open(Box<OpenSettingsDialog>),
+}
+
+pub struct OpenSettingsDialog {
+    /// Editable copy — discarded on Cancel, only becomes the real
+    /// settings on Save.
+    draft: Settings,
+    /// What `sessions_dir`/`rules_dir` resolve to when left unset —
+    /// resolved once when the dialog opens (not every frame: it can't
+    /// change while the dialog is open, and resolving it creates the
+    /// directory as a side effect via `default_sessions_dir`/
+    /// `default_user_rules_dir`, not something worth repeating 60
+    /// times a second). Empty on the rare platform where `ProjectDirs`
+    /// can't determine a per-user data directory at all — the same
+    /// failure `Settings::sessions_dir`/`rules_dir` would themselves
+    /// hit, surfaced here as a blank path rather than a dialog that
+    /// can't open.
+    default_sessions_dir: PathBuf,
+    default_rules_dir: PathBuf,
+    /// Free-typed text for `draft.default_source_timezone` — kept as a
+    /// separate edit buffer rather than binding `egui::TextEdit`
+    /// straight to the `Option<String>` field, since a `String` widget
+    /// needs a `&mut String` to type into, and `Option<String>` can't
+    /// tell "not set" apart from "currently empty while typing"; only
+    /// converted back to `Option<String>` (empty means `None`) on Save,
+    /// after [`parse_timezone_field`] confirms it's either blank or a
+    /// valid `TimezoneSpec`. `display_timezone` has no equivalent field
+    /// here — it's only editable from View > Display timezone now, not
+    /// Settings (see `ui::display_timezone_dialog`'s doc comment for why
+    /// that one field ended up single-location while this one didn't: the
+    /// load controls' own copy of this field is only visible while `Text
+    /// (config-based)` is the selected sourcetype, so Settings stays as
+    /// the one place it's reachable regardless of what's currently
+    /// selected — View is always reachable, so Display timezone doesn't
+    /// need that same second door).
+    default_source_timezone_input: String,
 }
 
 impl SettingsDialog {
@@ -45,23 +69,27 @@ impl SettingsDialog {
     }
 
     pub fn open(current: Settings) -> Self {
-        Self::Open {
+        let default_source_timezone_input =
+            current.default_source_timezone.clone().unwrap_or_default();
+        Self::Open(Box::new(OpenSettingsDialog {
             draft: current,
             default_sessions_dir: persist::default_sessions_dir().unwrap_or_default(),
             default_rules_dir: rule_file::default_user_rules_dir().unwrap_or_default(),
-        }
+            default_source_timezone_input,
+        }))
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) -> Option<SettingsOutcome> {
         let mut outcome = None;
         let mut close = false;
 
-        if let Self::Open {
-            draft,
-            default_sessions_dir,
-            default_rules_dir,
-        } = self
-        {
+        if let Self::Open(state) = self {
+            let OpenSettingsDialog {
+                draft,
+                default_sessions_dir,
+                default_rules_dir,
+                default_source_timezone_input,
+            } = state.as_mut();
             close = show_dialog_window(
                 ctx,
                 "peach_settings_dialog",
@@ -69,27 +97,27 @@ impl SettingsDialog {
                 [520.0, 420.0],
                 true,
                 |ui, close| {
-                    ui.label("Sessions directory:");
+                    help_row(
+                        ui,
+                        "Sessions directory:",
+                        "New sessions only — the current session stays put.",
+                    );
                     directory_row(ui, &mut draft.sessions_dir, default_sessions_dir);
-                    ui.label(
-                        "Applies to new sessions from now on — the session currently open, \
-                         and sessions already saved elsewhere, stay where they are.",
-                    );
 
                     ui.separator();
-                    ui.label("Rules directory:");
+                    help_row(
+                        ui,
+                        "Rules directory:",
+                        "Where new rules get saved, and auto-loaded from on startup.",
+                    );
                     directory_row(ui, &mut draft.rules_dir, default_rules_dir);
-                    ui.label(
-                        "Where \"Tag all matching (advanced)...\" saves new rules — point this \
-                         at your own folder (e.g. one you keep under your own git repo) to build \
-                         up a personal rule collection outside Peach's built-in packs. Every \
-                         *.toml file directly in this folder loads automatically on startup, \
-                         same as the built-in rule packs — saving here takes effect immediately, \
-                         replacing whatever's currently selected via \"Choose tagging rules...\".",
-                    );
 
                     ui.separator();
-                    ui.label("Parse threads for folder loads:");
+                    help_row(
+                        ui,
+                        "Parse threads for folder loads:",
+                        "Only matters for multi-file EVTX/journald/Text loads.",
+                    );
                     ui.horizontal(|ui| {
                         let mut automatic = draft.load_threads.is_none();
                         if ui.checkbox(&mut automatic, "Automatic").changed() {
@@ -109,15 +137,33 @@ impl SettingsDialog {
                             ));
                         }
                     });
-                    ui.label(
-                        "Only used when a folder load resolves to more than one file \
-                         (EVTX/journald/Text). AUL and single-file loads always run on \
-                         one thread — there's nothing to parallelize.",
-                    );
 
                     ui.separator();
+                    help_row(
+                        ui,
+                        "Assume timezone for logs with no timezone of their own:",
+                        "Fallback when a text source's own \"Assume offset\" isn't set.",
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(default_source_timezone_input)
+                            .hint_text("+0100, +02:00, UTC, or Europe/Berlin — blank to disable"),
+                    );
+                    let default_source_timezone_error =
+                        parse_timezone_field(default_source_timezone_input).err();
+                    if let Some(err) = &default_source_timezone_error {
+                        ui.colored_label(ui.visuals().error_fg_color, err);
+                    }
+
+                    ui.separator();
+                    let can_save = default_source_timezone_error.is_none();
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
+                        if ui
+                            .add_enabled(can_save, egui::Button::new("Save"))
+                            .clicked()
+                        {
+                            draft.default_source_timezone =
+                                parse_timezone_field(default_source_timezone_input)
+                                    .unwrap_or_default();
                             outcome = Some(SettingsOutcome::Save(draft.clone()));
                             *close = true;
                         }
@@ -133,6 +179,51 @@ impl SettingsDialog {
             *self = Self::Closed;
         }
         outcome
+    }
+}
+
+/// Validates one of the two timezone text fields — blank (after trimming)
+/// means "no override" (`Ok(None)`), anything else must parse as a
+/// [`TimezoneSpec`] or the field shows an error and Save is disabled.
+/// Pure/no `egui` dependency so it's directly unit-testable, same reasoning
+/// `filter_bar`'s parsing helpers are kept pure. `pub(crate)` — `app.rs`
+/// reuses this for the same two fields' quick-access copies in the load
+/// controls (`default_source_timezone`) and View menu (`display_timezone`),
+/// so both places validate identically rather than each growing a
+/// slightly-different copy.
+pub(crate) fn parse_timezone_field(input: &str) -> Result<Option<String>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    TimezoneSpec::parse(trimmed)
+        .map(|_| Some(trimmed.to_string()))
+        .map_err(|err| format!("{err:#}"))
+}
+
+/// A setting's label plus a small "?" button that reveals `text` — either
+/// on hover (a tooltip, for anyone who discovers that) or, more reliably,
+/// by clicking it: click toggles a persistent expanded/collapsed state
+/// (`egui::Context::data`, keyed off `label` so each row remembers its own
+/// state independently) and the full explanation renders as its own line
+/// right below when expanded. Click, not just hover, because a fleeting
+/// tooltip on a tiny single-character button is easy to miss entirely —
+/// requires holding the pointer still and waiting out egui's tooltip
+/// delay, over a small target; a click is unambiguous and the result stays
+/// on screen until clicked again, not just for as long as the pointer
+/// happens to stay put.
+fn help_row(ui: &mut egui::Ui, label: &str, text: &str) {
+    let id = ui.make_persistent_id(("peach_settings_help_expanded", label));
+    let mut expanded = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui.small_button("?").on_hover_text(text).clicked() {
+            expanded = !expanded;
+            ui.data_mut(|d| d.insert_temp(id, expanded));
+        }
+    });
+    if expanded {
+        ui.weak(text);
     }
 }
 
@@ -173,4 +264,58 @@ fn directory_row(ui: &mut egui::Ui, override_dir: &mut Option<PathBuf>, default_
             let _ = reveal::open_folder(&effective);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_timezone_field_blank_or_whitespace_only_means_no_override() {
+        assert_eq!(parse_timezone_field(""), Ok(None));
+        assert_eq!(parse_timezone_field("   "), Ok(None));
+    }
+
+    #[test]
+    fn parse_timezone_field_accepts_a_fixed_offset_and_trims_it() {
+        assert_eq!(
+            parse_timezone_field("  +02:00  "),
+            Ok(Some("+02:00".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_timezone_field_accepts_an_iana_zone_name() {
+        assert_eq!(
+            parse_timezone_field("Europe/Berlin"),
+            Ok(Some("Europe/Berlin".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_timezone_field_rejects_garbage_with_an_error_not_a_panic() {
+        assert!(parse_timezone_field("not a timezone").is_err());
+    }
+
+    #[test]
+    fn open_seeds_the_input_buffer_from_the_current_settings() {
+        let settings = Settings {
+            default_source_timezone: Some("Europe/Berlin".to_string()),
+            ..Settings::default()
+        };
+        let dialog = SettingsDialog::open(settings);
+        let SettingsDialog::Open(state) = &dialog else {
+            panic!("expected Open");
+        };
+        assert_eq!(state.default_source_timezone_input, "Europe/Berlin");
+    }
+
+    #[test]
+    fn open_seeds_an_empty_input_buffer_when_no_override_is_set() {
+        let dialog = SettingsDialog::open(Settings::default());
+        let SettingsDialog::Open(state) = &dialog else {
+            panic!("expected Open");
+        };
+        assert_eq!(state.default_source_timezone_input, "");
+    }
 }

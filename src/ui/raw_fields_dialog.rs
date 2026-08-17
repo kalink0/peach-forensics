@@ -72,7 +72,7 @@ impl RawFieldsDialog {
             |ui, close| {
                 ui.label(format!(
                     "{} — {}",
-                    entry.timestamp_utc,
+                    entry.timestamp_display,
                     if entry.message.is_empty() {
                         "(no message)"
                     } else {

@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, anyhow, bail};
-use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use regex::Regex;
 
 use crate::model::log_entry::ParsedRecord;
+use crate::model::timezone_spec::TimezoneSpec;
 use crate::parsers::{LogParser, ParserConfig};
 
 /// `pub(crate)` — also deserialized directly by
@@ -17,13 +18,23 @@ pub(crate) struct PatternConfig {
     pub(crate) regex: String,
     pub(crate) timestamp_format: String,
     pub(crate) multiline_start_pattern: Option<String>,
-    /// Fixed UTC offset (e.g. `"+02:00"`, `"UTC"`) applied when
-    /// `timestamp_format` doesn't carry its own timezone. Set explicitly per
-    /// source — takes precedence over any future session-level default,
-    /// since a per-source override reflects the analyst's specific
-    /// knowledge about that source and shouldn't be silently overruled by a
-    /// broader setting.
+    /// Fixed offset (`"+02:00"`, `"UTC"`) or IANA zone name
+    /// (`"Europe/Berlin"`) applied when `timestamp_format` doesn't carry
+    /// its own timezone — see [`TimezoneSpec`]. Set explicitly per source —
+    /// takes precedence over `Settings::default_source_timezone`
+    /// (`TextConfigParser::default_assume_offset`), since a per-source
+    /// override reflects the analyst's specific knowledge about that one
+    /// source and shouldn't be silently overruled by a broader setting.
     pub(crate) assume_offset: Option<String>,
+    /// Year applied when `timestamp_format` doesn't carry one — some very
+    /// common real-world formats genuinely never do (syslog RFC 3164,
+    /// Android logcat's brief format), and there's no way to infer the
+    /// right year from the log line itself. Same reasoning as
+    /// `assume_offset`: an explicit, per-source, analyst-supplied value
+    /// rather than a silent guess (e.g. "today's year", which would be
+    /// flatly wrong for the historical log files forensic work usually
+    /// deals with).
+    pub(crate) assume_year: Option<i32>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -41,7 +52,16 @@ pub(crate) struct TextParserFields {
 /// [`ParserConfig`] passed to [`LogParser::parse`], not on this type, so
 /// [`LogParser::sourcetype`] returns a fixed generic marker rather than a
 /// real sourcetype name.
-pub struct TextConfigParser;
+#[derive(Debug, Clone, Default)]
+pub struct TextConfigParser {
+    /// `Settings::default_source_timezone` — the session-wide fallback
+    /// used when a source's own `pattern.assume_offset` isn't set.
+    /// Resolved once by the caller (`app::run_load`) from `Settings`, not
+    /// read from `Settings` here: this module stays settings-agnostic,
+    /// same as every other parser — it only ever sees an already-resolved
+    /// value, never reaches into app-level config itself.
+    pub default_assume_offset: Option<String>,
+}
 
 impl LogParser for TextConfigParser {
     fn sourcetype(&self) -> &str {
@@ -85,9 +105,12 @@ impl LogParser for TextConfigParser {
         let assume_offset = fields_config
             .pattern
             .assume_offset
+            .clone()
+            .or_else(|| self.default_assume_offset.clone())
             .as_deref()
-            .map(parse_fixed_offset)
+            .map(TimezoneSpec::parse)
             .transpose()?;
+        let assume_year = fields_config.pattern.assume_year;
 
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {} as UTF-8 text", path.display()))?;
@@ -103,6 +126,7 @@ impl LogParser for TextConfigParser {
                     &main_regex,
                     &fields_config.pattern.timestamp_format,
                     assume_offset,
+                    assume_year,
                     &fields_config.field_mapping,
                 )
             })
@@ -144,7 +168,8 @@ pub(crate) fn parse_block(
     block_lines: &[&str],
     main_regex: &Regex,
     timestamp_format: &str,
-    assume_offset: Option<FixedOffset>,
+    assume_offset: Option<TimezoneSpec>,
+    assume_year: Option<i32>,
     field_mapping: &HashMap<String, String>,
 ) -> anyhow::Result<ParsedRecord> {
     let raw = block_lines.join("\n");
@@ -157,10 +182,11 @@ pub(crate) fn parse_block(
         .name("timestamp")
         .ok_or_else(|| anyhow!("line {start_line}: 'timestamp' capture group did not match"))?
         .as_str();
-    let timestamp_utc = parse_timestamp(timestamp_text, timestamp_format, assume_offset)
-        .with_context(|| {
-            format!("line {start_line}: failed to parse timestamp '{timestamp_text}'")
-        })?;
+    let timestamp_utc =
+        parse_timestamp(timestamp_text, timestamp_format, assume_offset, assume_year)
+            .with_context(|| {
+                format!("line {start_line}: failed to parse timestamp '{timestamp_text}'")
+            })?;
 
     let mut fields = serde_json::Map::new();
     for name in main_regex.capture_names().flatten() {
@@ -189,56 +215,55 @@ pub(crate) fn parse_block(
     })
 }
 
+/// Parses via `chrono::format`'s lower-level `Parsed` rather than the
+/// `DateTime`/`NaiveDateTime::parse_from_str` convenience functions this
+/// used before `assume_year` existed: those require every field the format
+/// string doesn't itself supply (year included) to already be present in
+/// `text`, with no way to fill one in afterwards. `Parsed` parses
+/// leniently into whatever fields `text`/`format` actually provide, so a
+/// missing year (never present in some very common real-world formats —
+/// syslog RFC 3164, Android logcat's brief format) can be filled in from
+/// `assume_year` before the date is finalized, the same way `assume_offset`
+/// already fills in a missing timezone below.
 fn parse_timestamp(
     text: &str,
     format: &str,
-    assume_offset: Option<FixedOffset>,
+    assume_offset: Option<TimezoneSpec>,
+    assume_year: Option<i32>,
 ) -> anyhow::Result<DateTime<Utc>> {
-    if let Ok(offset_aware) = DateTime::parse_from_str(text, format) {
+    use chrono::format::{Parsed, StrftimeItems, parse};
+
+    let mut parsed = Parsed::new();
+    parse(&mut parsed, text, StrftimeItems::new(format))
+        .with_context(|| format!("does not match timestamp_format '{format}'"))?;
+
+    if parsed.year.is_none() {
+        let year = assume_year.ok_or_else(|| {
+            anyhow!(
+                "timestamp has no year and no pattern.assume_year is configured for this source"
+            )
+        })?;
+        parsed
+            .set_year(i64::from(year))
+            .with_context(|| format!("invalid pattern.assume_year {year}"))?;
+    }
+
+    if let Ok(offset_aware) = parsed.to_datetime() {
         return Ok(offset_aware.with_timezone(&Utc));
     }
 
-    let naive = NaiveDateTime::parse_from_str(text, format)
-        .with_context(|| format!("does not match timestamp_format '{format}'"))?;
+    let naive = parsed.to_naive_datetime_with_offset(0).with_context(|| {
+        format!("timestamp '{text}' does not match timestamp_format '{format}'")
+    })?;
 
-    let offset = assume_offset.ok_or_else(|| {
+    let spec = assume_offset.ok_or_else(|| {
         anyhow!(
             "timestamp has no timezone and no pattern.assume_offset is configured for this source"
         )
     })?;
 
-    use chrono::TimeZone;
-    offset
-        .from_local_datetime(&naive)
-        .single()
-        .map(|dt| dt.with_timezone(&Utc))
-        .ok_or_else(|| anyhow!("timestamp '{text}' is ambiguous under offset {offset}"))
-}
-
-/// `pub(crate)` — reused by [`crate::parsers::text_config_file`] to
-/// validate a draft's `assume_offset` field the same way a real load would.
-pub(crate) fn parse_fixed_offset(s: &str) -> anyhow::Result<FixedOffset> {
-    let trimmed = s.trim();
-    if trimmed.eq_ignore_ascii_case("utc") || trimmed == "Z" || trimmed == "z" {
-        return Ok(FixedOffset::east_opt(0).unwrap());
-    }
-
-    let invalid = || anyhow!("invalid assume_offset '{s}': expected '+HH:MM', '-HH:MM', or 'UTC'");
-
-    let (sign, rest) = match trimmed.as_bytes().first() {
-        Some(b'+') => (1, &trimmed[1..]),
-        Some(b'-') => (-1, &trimmed[1..]),
-        _ => return Err(invalid()),
-    };
-    let digits: String = rest.chars().filter(|c| *c != ':').collect();
-    if digits.len() != 4 || !digits.chars().all(|c| c.is_ascii_digit()) {
-        return Err(invalid());
-    }
-    let hours: i32 = digits[0..2].parse().map_err(|_| invalid())?;
-    let minutes: i32 = digits[2..4].parse().map_err(|_| invalid())?;
-    let total_seconds = sign * (hours * 3600 + minutes * 60);
-
-    FixedOffset::east_opt(total_seconds).ok_or_else(invalid)
+    spec.resolve_local(naive)
+        .ok_or_else(|| anyhow!("timestamp '{text}' is ambiguous or nonexistent under {spec:?}"))
 }
 
 #[cfg(test)]
@@ -283,7 +308,7 @@ message = "msg"
 "#,
         );
 
-        let records = TextConfigParser.parse(&path, &cfg).unwrap();
+        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
 
         assert_eq!(records.len(), 1);
         let record = &records[0];
@@ -323,7 +348,7 @@ message = "msg"
 "#,
         );
 
-        let records = TextConfigParser.parse(&path, &cfg).unwrap();
+        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
 
         assert_eq!(records.len(), 1);
         let record = &records[0];
@@ -343,6 +368,66 @@ message = "msg"
     }
 
     #[test]
+    fn default_assume_offset_is_used_when_the_source_config_sets_none() {
+        let path = write_temp_file("d", "2026-07-28 12:00:00 ERROR something broke\n");
+        let cfg = config(
+            r#"
+[parser.pattern]
+regex = '^(?P<timestamp>\S+ \S+) (?P<level_raw>\w+) (?P<msg>.*)$'
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+"#,
+        );
+
+        let parser = TextConfigParser {
+            default_assume_offset: Some("Europe/Berlin".to_string()),
+        };
+        let records = parser.parse(&path, &cfg).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].timestamp_utc,
+            DateTime::parse_from_rfc3339("2026-07-28T10:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_source_configs_own_assume_offset_takes_precedence_over_the_session_default() {
+        let path = write_temp_file("e", "2026-07-28 12:00:00 ERROR something broke\n");
+        let cfg = config(
+            r#"
+[parser.pattern]
+regex = '^(?P<timestamp>\S+ \S+) (?P<level_raw>\w+) (?P<msg>.*)$'
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+assume_offset = "+05:00"
+
+[parser.field_mapping]
+level = "level_raw"
+message = "msg"
+"#,
+        );
+
+        // Session default disagrees with the source's own setting — the
+        // source's own `assume_offset` must win, same precedence
+        // `PatternConfig.assume_offset`'s doc comment documents.
+        let parser = TextConfigParser {
+            default_assume_offset: Some("Europe/Berlin".to_string()),
+        };
+        let records = parser.parse(&path, &cfg).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].timestamp_utc,
+            DateTime::parse_from_rfc3339("2026-07-28T07:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn naive_timestamp_without_assume_offset_is_an_error() {
         let path = write_temp_file("c", "2026-07-28 12:00:00 ERROR something broke\n");
         let cfg = config(
@@ -353,9 +438,220 @@ timestamp_format = "%Y-%m-%d %H:%M:%S"
 "#,
         );
 
-        let result = TextConfigParser.parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg);
 
         assert!(result.is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Regression coverage for the reason `assume_year` exists at all:
+    /// syslog RFC 3164's `Mon DD HH:MM:SS` has no year in it whatsoever —
+    /// confirmed directly against `chrono` before this feature was built,
+    /// `NaiveDateTime::parse_from_str` errors "input is not enough for
+    /// unique date and time" on a year-less format with no way to supply
+    /// one after the fact, which is exactly why `parse_timestamp` was
+    /// rewritten on `chrono::format::Parsed` instead.
+    #[test]
+    fn yearless_timestamp_without_assume_year_is_an_error() {
+        let path = write_temp_file(
+            "year-missing",
+            "Jul 28 12:00:00 host proc: something broke\n",
+        );
+        let cfg = config(
+            r#"
+[parser.pattern]
+regex = '^(?P<timestamp>\w+ +\d+ \d{2}:\d{2}:\d{2}) \S+ (?P<msg>.*)$'
+timestamp_format = "%b %e %H:%M:%S"
+assume_offset = "UTC"
+
+[parser.field_mapping]
+message = "msg"
+"#,
+        );
+
+        let result = TextConfigParser::default().parse(&path, &cfg);
+
+        assert!(result.is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn yearless_timestamp_with_assume_year_is_parsed() {
+        let path = write_temp_file("year-set", "Jul 28 12:00:00 host proc: something broke\n");
+        let cfg = config(
+            r#"
+[parser.pattern]
+regex = '^(?P<timestamp>\w+ +\d+ \d{2}:\d{2}:\d{2}) \S+ (?P<msg>.*)$'
+timestamp_format = "%b %e %H:%M:%S"
+assume_offset = "UTC"
+assume_year = 2026
+
+[parser.field_mapping]
+message = "msg"
+"#,
+        );
+
+        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].timestamp_utc,
+            DateTime::parse_from_rfc3339("2026-07-28T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A format string that *does* carry a year must keep working exactly
+    /// as before — `assume_year` only fills in when the year is genuinely
+    /// absent, never overrides one that was actually parsed.
+    #[test]
+    fn assume_year_is_ignored_when_the_format_already_has_a_year() {
+        let path = write_temp_file("year-present", "2020-01-01 00:00:00 something broke\n");
+        let cfg = config(
+            r#"
+[parser.pattern]
+regex = '^(?P<timestamp>\S+ \S+) (?P<msg>.*)$'
+timestamp_format = "%Y-%m-%d %H:%M:%S"
+assume_offset = "UTC"
+assume_year = 1999
+
+[parser.field_mapping]
+message = "msg"
+"#,
+        );
+
+        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+
+        assert_eq!(
+            records[0].timestamp_utc,
+            DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Fetches the real embedded TOML for a built-in format
+    /// (`parsers/examples/*.toml`) by its `sourcetype`, with `assume_offset`/
+    /// `assume_year` spliced in — exactly the two per-source fields the
+    /// built-in deliberately leaves blank for the analyst to fill in via
+    /// "Define format...". Testing against this instead of a hand-copied
+    /// duplicate of the regex/timestamp_format means these tests can't
+    /// silently drift from what's actually shipped.
+    fn builtin_config_with_source_details(sourcetype: &str) -> ParserConfig {
+        use crate::parsers::builtin_text_formats::builtin_text_formats;
+        let format = builtin_text_formats()
+            .into_iter()
+            .find(|f| f.sourcetype == sourcetype)
+            .unwrap_or_else(|| panic!("no built-in format with sourcetype '{sourcetype}'"));
+        let with_details = format.toml.replacen(
+            "[parser.pattern]",
+            "[parser.pattern]\nassume_offset = \"UTC\"\nassume_year = 2026",
+            1,
+        );
+        ParserConfig::from_toml_str(&with_details).unwrap()
+    }
+
+    #[test]
+    fn builtin_generic_timestamp_format_parses_a_realistic_line() {
+        let path = write_temp_file(
+            "builtin-generic",
+            "2026-08-17 14:23:01.500 something happened\n  continuation line\n",
+        );
+        let cfg = builtin_config_with_source_details("text_generic");
+
+        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].timestamp_utc,
+            DateTime::parse_from_rfc3339("2026-08-17T14:23:01.5Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(
+            records[0].message.as_deref(),
+            Some("something happened\n  continuation line")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn builtin_syslog_rfc3164_format_parses_a_realistic_line() {
+        let path = write_temp_file(
+            "builtin-syslog",
+            "Jan  1 00:00:00 myhost sshd[1234]: Accepted password for alice\n",
+        );
+        let cfg = builtin_config_with_source_details("syslog");
+
+        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].timestamp_utc,
+            DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(
+            records[0].message.as_deref(),
+            Some("Accepted password for alice")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn builtin_logcat_brief_format_parses_a_realistic_line() {
+        let path = write_temp_file(
+            "builtin-logcat",
+            "08-17 14:23:01.123  1234  1234 E ActivityManager: something crashed\n",
+        );
+        let cfg = builtin_config_with_source_details("logcat");
+
+        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].timestamp_utc,
+            DateTime::parse_from_rfc3339("2026-08-17T14:23:01.123Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(records[0].level.as_deref(), Some("E"));
+        assert_eq!(records[0].message.as_deref(), Some("something crashed"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Line taken directly from a real `/var/log/pacman.log`, not
+    /// hand-constructed — same "test against real representative data"
+    /// approach as the other built-in formats.
+    #[test]
+    fn builtin_pacman_log_format_parses_a_realistic_line() {
+        let path = write_temp_file(
+            "builtin-pacman",
+            "[2026-08-15T17:50:10+0200] [ALPM] upgraded brave-browser (1.93.134-1 -> 1.93.136-1)\n",
+        );
+        let cfg = builtin_config_with_source_details("pacman");
+
+        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].timestamp_utc,
+            DateTime::parse_from_rfc3339("2026-08-15T15:50:10Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(
+            records[0].message.as_deref(),
+            Some("upgraded brave-browser (1.93.134-1 -> 1.93.136-1)")
+        );
+        assert_eq!(
+            records[0].fields.get("category").and_then(|v| v.as_str()),
+            Some("ALPM")
+        );
         std::fs::remove_file(path).unwrap();
     }
 
@@ -370,7 +666,7 @@ timestamp_format = "%Y-%m-%d %H:%M:%S"
 "#,
         );
 
-        let result = TextConfigParser.parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg);
 
         assert!(result.is_err());
         std::fs::remove_file(path).unwrap();
@@ -388,7 +684,7 @@ assume_offset = "UTC"
 "#,
         );
 
-        let result = TextConfigParser.parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg);
 
         let err = result.unwrap_err();
         assert!(err.to_string().contains("line 1"));
@@ -409,7 +705,7 @@ sourcehost = "msg"
 "#,
         );
 
-        let result = TextConfigParser.parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg);
 
         assert!(result.is_err());
         std::fs::remove_file(path).unwrap();
@@ -429,7 +725,7 @@ message = "does_not_exist"
 "#,
         );
 
-        let result = TextConfigParser.parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg);
 
         assert!(result.is_err());
         std::fs::remove_file(path).unwrap();
@@ -446,7 +742,7 @@ timestamp_format = "%Y-%m-%dT%H:%M:%S%z"
 "#,
         );
 
-        let result = TextConfigParser.parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg);
 
         assert!(result.is_err());
         std::fs::remove_file(path).unwrap();
@@ -470,7 +766,7 @@ message = "msg"
 "#,
         );
 
-        let entries = parse_source(&TextConfigParser, &path, &cfg).unwrap();
+        let entries = parse_source(&TextConfigParser::default(), &path, &cfg).unwrap();
 
         assert_eq!(entries.len(), 2);
         assert_eq!(

@@ -1,0 +1,27 @@
+# Built-in starter format: Arch/Manjaro/EndeavourOS pacman package manager
+# log (`/var/log/pacman.log`) — "[ISO8601 timestamp] [CATEGORY] message".
+# Format confirmed directly against a real `/var/log/pacman.log` and against
+# libalpm's own log line format (`log.c`'s `"[%s] [%s] %s\n"`, date via
+# `strftime(..., "%FT%T%z", ...)`, i.e. `%Y-%m-%dT%H:%M:%S%z`) — the
+# timestamp always carries its own offset, unlike syslog/logcat, so
+# `assume_offset`/`assume_year` are never needed for this format.
+#
+# `category` (ALPM/ALPM-SCRIPTLET/PACMAN/PAMAC — the pacman/pamac
+# subsystem that logged the line) is its own searchable field
+# (`category=ALPM`) even though it isn't mapped to Peach's normalized
+# `level`: pacman.log has no severity concept, just a source-of-the-line
+# tag. Forensically relevant on its own for package install/removal
+# timelines (supply-chain investigations, what got installed/upgraded/
+# removed and when) — transaction lines read e.g. "installed foo (1.2-1)",
+# "upgraded foo (1.2-1 -> 1.3-1)", "removed foo (1.2-1)".
+
+[parser]
+name = "Pacman log (Arch/Manjaro)"
+sourcetype = "pacman"
+
+[parser.pattern]
+regex = '^\[(?P<timestamp>[^\]]+)\] \[(?P<category>[^\]]+)\] (?P<message>.*)$'
+timestamp_format = "%Y-%m-%dT%H:%M:%S%z"
+
+[parser.field_mapping]
+message = "message"

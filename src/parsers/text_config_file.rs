@@ -80,6 +80,12 @@ pub struct TextFormatDraft {
     pub timestamp_format: String,
     pub multiline_start_pattern: String,
     pub assume_offset: String,
+    /// Same "empty string means not set" convention as `assume_offset`,
+    /// parsed as a plain `i32` on save/preview — see
+    /// `text_config::PatternConfig::assume_year`'s doc comment for why this
+    /// exists (some very common real-world formats, e.g. syslog RFC 3164,
+    /// never carry a year at all).
+    pub assume_year: String,
     pub level_group: String,
     pub message_group: String,
 }
@@ -91,16 +97,27 @@ impl TextFormatDraft {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let config = ParserConfig::from_toml_str(&text)
-            .with_context(|| format!("failed to parse {} as a parser config", path.display()))?;
+        Self::from_toml_str(&text)
+            .with_context(|| format!("{} is not a valid text parser config", path.display()))
+    }
+
+    /// Same as [`Self::from_file`], but from an already-in-memory TOML
+    /// string — what the built-in format library (`ui::builtin_formats`)
+    /// uses, since those are embedded `&'static str`s baked in at compile
+    /// time (see `build.rs`), not files that exist on disk in a release
+    /// build.
+    pub fn from_toml_str(text: &str) -> anyhow::Result<Self> {
+        let config =
+            ParserConfig::from_toml_str(text).context("failed to parse as a parser config")?;
         let fields: TextParserFields = toml::Value::Table(config.parser.extra)
             .try_into()
-            .with_context(|| format!("{} is not a valid text parser config", path.display()))?;
+            .context("not a valid text parser config")?;
         let PatternConfig {
             regex,
             timestamp_format,
             multiline_start_pattern,
             assume_offset,
+            assume_year,
         } = fields.pattern;
         Ok(Self {
             name: config.parser.name,
@@ -109,6 +126,7 @@ impl TextFormatDraft {
             timestamp_format,
             multiline_start_pattern: multiline_start_pattern.unwrap_or_default(),
             assume_offset: assume_offset.unwrap_or_default(),
+            assume_year: assume_year.map(|y| y.to_string()).unwrap_or_default(),
             level_group: fields
                 .field_mapping
                 .get("level")
@@ -163,6 +181,9 @@ impl TextFormatDraft {
                 "assume_offset = \"{}\"\n",
                 escape(self.assume_offset.trim())
             ));
+        }
+        if let Ok(year) = self.assume_year.trim().parse::<i32>() {
+            out.push_str(&format!("assume_year = {year}\n"));
         }
         if !self.level_group.trim().is_empty() || !self.message_group.trim().is_empty() {
             out.push_str("\n[parser.field_mapping]\n");
@@ -236,6 +257,7 @@ mod tests {
             timestamp_format: "%Y-%m-%dT%H:%M:%S%z".to_string(),
             multiline_start_pattern: String::new(),
             assume_offset: String::new(),
+            assume_year: String::new(),
             level_group: "level_raw".to_string(),
             message_group: "msg".to_string(),
         }
@@ -269,6 +291,27 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// `from_file` is `from_toml_str` plus a disk read — this is the path
+    /// `ui::builtin_formats` actually uses (embedded `&'static str`s, never
+    /// files on disk in a release build), so it needs its own direct
+    /// coverage, not just indirect coverage via `from_file`.
+    #[test]
+    fn from_toml_str_reads_a_config_without_touching_disk() {
+        let draft = TextFormatDraft::from_toml_str(
+            "[parser]\nname = \"Test\"\nsourcetype = \"test\"\n\n[parser.pattern]\n\
+             regex = '^(?P<timestamp>\\S+) (?P<msg>.*)$'\n\
+             timestamp_format = \"%Y-%m-%d\"\n\
+             assume_year = 2026\n\n\
+             [parser.field_mapping]\nmessage = \"msg\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(draft.name, "Test");
+        assert_eq!(draft.sourcetype, "test");
+        assert_eq!(draft.assume_year, "2026");
+        assert_eq!(draft.message_group, "msg");
+    }
+
     #[test]
     fn round_trip_preserves_optional_fields_when_set() {
         let dir = temp_dir("optional-fields");
@@ -276,6 +319,7 @@ mod tests {
         let mut draft = sample_draft();
         draft.multiline_start_pattern = r"^\d{4}-\d{2}-\d{2}".to_string();
         draft.assume_offset = "+02:00".to_string();
+        draft.assume_year = "2026".to_string();
         let path = save(&dir, &draft).unwrap();
         let loaded = TextFormatDraft::from_file(&path).unwrap();
         assert_eq!(loaded, draft);
@@ -335,5 +379,26 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Every shipped `parsers/examples/*.toml` must parse as a valid
+    /// [`TextFormatDraft`] — same "catch a broken built-in before an
+    /// analyst ever hits it" reasoning as
+    /// `tagging::rule::tests::every_shipped_rule_file_parses`.
+    #[test]
+    fn every_shipped_builtin_format_parses() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("parsers/examples");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let draft = TextFormatDraft::from_file(&path)
+                .unwrap_or_else(|err| panic!("{}: {err:#}", path.display()));
+            assert!(draft.is_saveable(), "{}: not saveable", path.display());
+            checked += 1;
+        }
+        assert!(checked > 0, "no format files found in {}", dir.display());
     }
 }

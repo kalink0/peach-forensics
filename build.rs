@@ -71,6 +71,13 @@ fn main() {
         "JOURNALD_RULE_TOMLS",
         "journald_builtin_rules.rs",
     );
+    embed_toml_dir(
+        &manifest_dir,
+        "parsers/examples",
+        "",
+        "TEXT_PARSER_TOMLS",
+        "builtin_text_parsers.rs",
+    );
 
     #[cfg(windows)]
     embed_windows_icon();

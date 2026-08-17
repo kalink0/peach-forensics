@@ -89,7 +89,8 @@ no durable unencrypted session copy should be left behind.
 - [docs/supported-sources.md](docs/supported-sources.md) — supported/planned source
   types
 - [docs/rules-reference.md](docs/rules-reference.md) — every built-in tagging rule
-  (AUL/EVTX/journald), generated from the actual shipped rule files
+  (AUL/EVTX/journald), generated from the actual shipped rule files; also
+  available fully offline in-app via **Help → Rules reference...**
 - [CHANGELOG.md](CHANGELOG.md) — what changed in each release
 
 ## Acknowledgements

@@ -1,0 +1,34 @@
+# Built-in starter format: a log where every event starts with a plain,
+# human-readable "YYYY-MM-DD HH:MM:SS" timestamp (optionally with
+# fractional seconds, dot-separated) followed by the rest of the line —
+# the single most common shape for hand-rolled application logs (Python's
+# default `logging` format, many custom loggers, etc.). Continuation lines
+# with no timestamp prefix (stack traces and similar) are folded into the
+# previous event via `multiline_start_pattern`.
+#
+# Not a universal auto-detector — this is a *starting point* loaded into
+# "Define format...", not a silent guess: `assume_offset` is deliberately
+# left unset (no timezone appears in this shape at all), so the live
+# preview will show every line failing until you fill it in with the
+# correct offset for this specific source. If your log uses a "T"
+# separator (ISO 8601) or comma-decimal fractional seconds (e.g. Log4j's
+# default), adjust the regex/timestamp_format after loading this — both
+# are one-character tweaks.
+#
+# `(?s)` at the front of the regex: without it, `.` never matches `\n`, so
+# `message` would silently stop at the *first* line of a multi-line event
+# instead of covering the continuation lines `multiline_start_pattern`
+# folds in — the block still lands in `raw` either way, but `message`
+# would quietly be missing everything after the first line.
+
+[parser]
+name = "Generic timestamp (YYYY-MM-DD HH:MM:SS)"
+sourcetype = "text_generic"
+
+[parser.pattern]
+regex = '(?s)^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?P<message>.*)$'
+timestamp_format = "%Y-%m-%d %H:%M:%S%.f"
+multiline_start_pattern = '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
+
+[parser.field_mapping]
+message = "message"

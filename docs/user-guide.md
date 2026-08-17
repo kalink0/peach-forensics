@@ -71,6 +71,7 @@ regex = '^(?P<timestamp>\S+) (?P<level_raw>\w+) (?P<msg>.*)$'
 timestamp_format = "%Y-%m-%dT%H:%M:%S%z"
 # multiline_start_pattern = '^\d{4}-\d{2}-\d{2}'   # optional, for multi-line events
 # assume_offset = "+02:00"                          # only if timestamp_format has no timezone
+# assume_year = 2026                                # only if timestamp_format has no year
 
 [parser.field_mapping]
 level = "level_raw"
@@ -79,7 +80,15 @@ message = "msg"
 
 - `timestamp_format` **must** resolve to an absolute time. If it doesn't carry its
   own timezone (no `%z`), set `assume_offset` explicitly (`"+02:00"`, `"UTC"`, …) —
-  Peach refuses to guess a timezone.
+  Peach refuses to guess a timezone. Some very common formats (classic BSD
+  syslog, Android logcat) don't carry a year either; set `assume_year` the
+  same way for those — Peach refuses to guess that too (silently assuming
+  "this year" would be flatly wrong for the historical log files forensic
+  work usually deals with). If a source's own config leaves `assume_offset`
+  unset, Peach falls back to **"Assume timezone for logs with no timezone
+  of their own"** — visible and directly editable right in the load
+  controls once **Text (config-based)** is selected (also in [Settings](#settings),
+  same field either way).
 - `multiline_start_pattern` groups continuation lines (e.g. stack traces) into the
   event whose first line matched the pattern; without it, every line is its own
   event.
@@ -100,6 +109,22 @@ config to a per-user library (without touching whatever's currently selected
 for the pending load); **Save & Use** does the same and also makes it the
 active parser config, closing the dialog. **Load** next to the saved-configs
 dropdown pulls an existing config's fields back in for editing/reuse.
+
+**Built-in formats** (next to the saved-configs dropdown) has the same
+**Load** flow, but for a small built-in starter library instead of your own
+saved configs — Generic timestamp (`YYYY-MM-DD HH:MM:SS`, the shape most
+hand-rolled application logs use), Syslog (RFC 3164), Android Logcat (brief
+format), and Pacman log (`/var/log/pacman.log` on Arch/Manjaro/
+EndeavourOS — package install/upgrade/removal history, forensically
+relevant for a supply-chain or "what got installed and when" timeline).
+These are starting points, not an auto-detector: loading one fills in the
+fields for you to check against the live preview, not something that
+applies itself blindly — a real log's exact shape varies too much for
+that, and two of the four (syslog, logcat) genuinely have no year or
+timezone in them at all, so `assume_offset`/`assume_year` almost always
+need filling in afterward for those two specifically (pacman's own
+timestamp already carries both, so neither is needed there). See
+[parsers/examples/](../parsers/examples/) for the actual shipped files.
 
 ## Tagging
 
@@ -453,6 +478,35 @@ load parallelizes:
   multi-file folder load (EVTX/journald/Text) in parallel; automatic by
   default. Irrelevant for AUL or a single-file load — both are always
   exactly one parse unit, nothing to spread across threads.
+- **Assume timezone for logs with no timezone of their own** — a session-wide
+  fallback for a text source's own `assume_offset` (see
+  [Text parser configs](#text-parser-configs) above), used whenever that
+  source's own config doesn't set one. Accepts a fixed offset (`+0100`,
+  `+02:00`, `UTC` — colon optional) or a real IANA zone name
+  (`Europe/Berlin`) — a named zone resolves DST correctly across the whole
+  timeline, unlike a fixed offset, which would silently apply the wrong
+  number to half a case that spans a DST transition. Blank (the default)
+  means every text source still needs its own `assume_offset`; never
+  applies to AUL/EVTX/journald, whose own timestamps are already absolute.
+  A source's own `assume_offset` always wins if it sets one. Also directly
+  editable in the load controls once **Text (config-based)** is selected
+  (same field, applies and saves immediately either place) — kept in
+  Settings too, unlike Display timezone below, since the load-controls
+  copy is only visible while Text is the selected sourcetype.
+
+**Display timezone** — what the timeline table and CSV/JSON export render
+timestamps in — isn't in this dialog: it's set from **View > Display
+timezone...** instead (see [View and Help menus](#view-and-help-menus)),
+since that's reachable regardless of what's currently loaded or selected,
+so there was no reason to also duplicate it here.
+
+The timezone field above is validated as you type — an invalid value shows
+an error underneath and (in Settings specifically) disables **Save** until
+it's fixed or cleared.
+
+Every setting's label has a small **?** button next to it — click to
+show/hide the full explanation as its own line underneath (also shows on
+hover), instead of it always taking up space as its own paragraph.
 
 Both directory settings always show the effective path — prefixed with
 "(default)" when no override is set — plus **Choose...** to pick a folder,
@@ -519,17 +573,34 @@ not included** — export is a filtered, normalized view for sharing or
 reporting, not a substitute for the original evidence file, which stays
 wherever it was loaded from.
 
+The exported `timestamp` column follows the
+[Display timezone](#view-and-help-menus) setting, same as the timeline
+table — not necessarily UTC. It always
+carries its own offset (e.g. `2026-07-28 14:00:00.000 +02:00`), so the
+exported value stays unambiguous on its own even without knowing what
+Peach was configured to at export time.
+
 ## View and Help menus
 
 **View > Theme** switches the window chrome: System default (follows the
 OS light/dark setting), Light, Dark, Geek (a phosphor-green terminal look),
 or Rainbow (continuously hue-cycling, animated). Persisted across restarts.
-**View > Activity Log...** is covered above.
+**View > Display timezone...** opens a small window with a single field —
+what the timeline table and CSV/JSON export render timestamps in. Accepts
+a fixed offset (`+0100`, `+02:00`, `UTC`) or a real IANA zone name
+(`Europe/Berlin`); blank means UTC. Applies and saves immediately as you
+type, no separate **Save** click. Display-only: what's stored on disk
+stays UTC regardless, and every rendered/exported value always carries its
+own offset (e.g. `2026-07-28 14:00:00.000 +02:00`), so it stays
+unambiguous even if this setting changes later. **View > Activity Log...**
+is covered above.
 
-**Help > Rules reference...** opens
-[docs/rules-reference.md](rules-reference.md) on GitHub in your browser —
-the same generated, per-rule table described under [Tagging](#tagging)
-above, one click away instead of needing a local checkout of the repo.
+**Help > Rules reference...** opens the same [rules-reference.md](rules-reference.md)
+table described under [Tagging](#tagging) above in its own window — embedded
+in the binary, so it works fully offline (no browser, no network, nothing
+extra to carry to an airgapped analysis machine). Has its own filter field
+for jumping to a rule/tag by name instead of scrolling, plus an **Open on
+GitHub...** button for the nicely-rendered table if you do have internet.
 **Help > About Peach...** covers version info, licenses, and the research
 sources behind the built-in rule packs.
 
