@@ -2,6 +2,15 @@
 
 ![peach](.github/peach_readme_banner.svg)
 
+[![CI](https://github.com/kalink0/peach-forensics/actions/workflows/ci.yml/badge.svg)](https://github.com/kalink0/peach-forensics/actions/workflows/ci.yml)
+[![Nightly](https://github.com/kalink0/peach-forensics/actions/workflows/nightly.yml/badge.svg)](https://github.com/kalink0/peach-forensics/actions/workflows/nightly.yml)
+![Linux](https://img.shields.io/badge/linux-supported-success)
+![Windows](https://img.shields.io/badge/windows-supported-success)
+![macOS](https://img.shields.io/badge/macOS-supported-success)
+[![Release](https://img.shields.io/github/v/release/kalink0/peach-forensics?display_name=tag)](https://github.com/kalink0/peach-forensics/releases)
+[![License](https://img.shields.io/github/license/kalink0/peach-forensics)](https://github.com/kalink0/peach-forensics/blob/main/LICENSE)
+![Rust](https://img.shields.io/badge/rust-edition%202024-orange)
+
 A lean, local-first forensic log viewer for DFIR work. Parses log sources into a
 normalized, taggable timeline stored in DuckDB, with a Splunk-inspired search syntax
 and a SQLite session layer for analyst tags. Rust + egui, no server, no cloud.

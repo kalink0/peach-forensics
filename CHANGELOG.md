@@ -43,6 +43,7 @@ All notable changes to Peach will be documented in this file.
 - About dialog's Acknowledgements tab: added the EVTX message-template/rule-pack citation (Microsoft's official Security Auditing event reference), the journald rule pack's (OpenSSH/sudo/shadow-utils), and the newer Thesis Friday-sourced AUL predicates, alongside the existing iLEAPP one; reworded "AUL pattern-of-life rule pack" to just "AUL rule pack", matching the terminology cleanup in the built-in rules picker. README's own Acknowledgements section, which had drifted to only mention the AUL/iLEAPP source, now lists all four the same way.
 - Removed the "Finding-Nemo ecosystem" wording from the README and About dialog — avoids invoking Disney/Pixar's trademark for a name that was never itself published anywhere.
 - `docs/user-guide.md`: filled in previously-undocumented sections for existing (pre-`v0.1.0`) features — **Export** (current-filter CSV/JSON export, chunked with progress, what's and isn't included), **View > Theme** (System/Light/Dark/Geek/Rainbow), and the **Columns** picker (which columns are always shown vs. toggleable, drag-to-reorder).
+- README: added a badge row (CI/Nightly status, Linux/Windows/macOS supported, Release, License, Rust edition) — same set crush's own README already has, all backed by infrastructure that already existed (`ci.yml`/`nightly.yml`/`release.yml`, Apache-2.0 `LICENSE`).
 
 ## v0.1.0 - 2026-08-14
 
