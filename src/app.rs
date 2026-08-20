@@ -577,6 +577,50 @@ impl PeachApp {
         }
     }
 
+    /// Starts a brand-new, empty session — same shape as the one `new()`
+    /// creates at startup (fresh `new_session_id()`, no `.duckdb` until
+    /// data is loaded into it), but reachable mid-run from the File menu
+    /// instead of only via a restart. Doesn't touch the session being left
+    /// behind: if it's still empty, the next `sweep_empty_sessions` (at the
+    /// next startup) or `on_exit` cleans it up same as any other abandoned
+    /// empty session.
+    fn new_session(&mut self) {
+        let sessions_dir = match &self.ephemeral_session_dir {
+            Some(dir) => dir.clone(),
+            None => self
+                .settings
+                .sessions_dir()
+                .unwrap_or_else(|_| std::env::temp_dir()),
+        };
+        let session_paths = SessionPaths::new_in(&sessions_dir, persist::new_session_id());
+        // Best-effort, same reasoning as `new()`: a failure here just means
+        // this session doesn't persist, not a crash.
+        let _ = session_paths.ensure_dir();
+        let _ = persist::open_session_db(&session_paths.sqlite_path);
+
+        self.db_path = session_paths.duckdb_path.clone();
+        self.timeline = TimelineView::new(self.db_path.clone(), session_paths.sqlite_path.clone());
+        if let Ok(display_tz) = self.settings.display_timezone_spec() {
+            self.timeline.set_display_timezone(display_tz);
+        }
+        if !self.visited_sessions.contains(&session_paths.sqlite_path) {
+            self.visited_sessions
+                .push(session_paths.sqlite_path.clone());
+        }
+        self.session_paths = session_paths;
+        // A session `new_session_id()` just minted has no `session_state`
+        // row yet — nothing to load, same as `new()`.
+        self.session_display_name = None;
+        self.loaded_sources = Vec::new();
+        self.available_levels = Vec::new();
+        self.available_tags = Vec::new();
+        self.level_counts = HashMap::new();
+        self.tag_counts = HashMap::new();
+        self.source_counts = HashMap::new();
+        self.filter_bar = FilterBar::new();
+        self.timeline.set_query(Query::default());
+    }
+
     /// Switches to a previously saved session — points at its `.duckdb`
     /// (already-parsed, no re-parsing) and restores the loaded-source list
     /// and search query from its `.sqlite` `session_state`.
@@ -1567,6 +1611,18 @@ impl eframe::App for PeachApp {
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui
+                        .add_enabled(can_switch_session, egui::Button::new("New session"))
+                        .on_hover_text(
+                            "Starts a fresh, empty session — the one you're leaving stays on \
+                             disk (via Manage sessions...) as long as it has data loaded into \
+                             it.",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        self.new_session();
+                    }
                     if ui
                         .add_enabled(can_switch_session, egui::Button::new("Manage sessions..."))
                         .clicked()
@@ -3492,6 +3548,46 @@ mod tests {
             !ephemeral_dir.exists(),
             "--ephemeral-session must leave no session copy behind on exit"
         );
+    }
+
+    /// "New session" (File menu) must produce a genuinely fresh session —
+    /// a different id/files on disk from the one it replaces — and reset
+    /// every piece of per-session UI state (loaded sources, filter text,
+    /// level counts, ...) rather than leaving stale state from the session
+    /// it left behind visible against an empty timeline.
+    #[test]
+    fn new_session_starts_a_fresh_session_and_resets_ui_state() {
+        let mut app = PeachApp::new(Vec::new(), Vec::new(), true);
+        let old_session_id = app.session_paths.id.clone();
+        let old_sqlite_path = app.session_paths.sqlite_path.clone();
+
+        app.loaded_sources.push(loaded_source("evtx"));
+        app.session_display_name = Some("Suspect laptop".to_string());
+        app.filter_bar.set_text("level=ERROR".to_string());
+        app.available_levels
+            .push(("ERROR".to_string(), "ERROR".to_string()));
+        app.level_counts.insert("ERROR".to_string(), 1);
+
+        // `new_session_id()` has one-second resolution — without this, a
+        // test run fast enough to call it twice within the same wall-clock
+        // second would get the *same* id back, defeating the whole point
+        // of this assertion.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        app.new_session();
+
+        assert_ne!(app.session_paths.id, old_session_id);
+        assert!(app.session_paths.sqlite_path.exists());
+        assert!(app.visited_sessions.contains(&old_sqlite_path));
+        assert!(
+            app.visited_sessions
+                .contains(&app.session_paths.sqlite_path)
+        );
+        assert!(app.loaded_sources.is_empty());
+        assert_eq!(app.session_display_name, None);
+        assert_eq!(app.filter_bar.text(), "");
+        assert!(app.available_levels.is_empty());
+        assert!(app.level_counts.is_empty());
+        assert_eq!(app.timeline.query(), &Query::default());
     }
 
     #[test]

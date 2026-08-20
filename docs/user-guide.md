@@ -526,6 +526,14 @@ panel — same dialog either way) and **Open** one to switch to it — this read
 the already-parsed `.duckdb` directly, so it works even if the original
 evidence file is no longer reachable, and nothing gets re-parsed.
 
+**File → New session** starts a fresh, empty session without restarting
+Peach — same as what happens automatically at startup, but reachable
+mid-run. Loaded sources, search/filter state, and the timeline itself all
+reset to empty; the session you were on isn't deleted, and stays listed in
+**Manage sessions...** as long as it has data in it (an empty one left
+behind gets swept up automatically, same as one abandoned by switching
+sessions or just closing Peach without loading anything).
+
 Session files live in the OS-standard per-user data directory (not yet
 user-configurable): `~/.local/share/peach/sessions/` on Linux, similar
 platform-appropriate locations on macOS/Windows.
