@@ -1,0 +1,32 @@
+# Built-in starter format: Apache HTTP Server's Common Log Format (CLF) —
+# "%h %l %u %t \"%r\" %>s %b", e.g.
+# `127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /index.html HTTP/1.0" 200 2326`.
+# Still the default `CustomLog` format on some distros/configs and the
+# baseline most other web-server logs (nginx included) were modeled on.
+#
+# The bracketed timestamp always carries its own explicit offset
+# (`%t`'s own `strftime` format ends in the numeric zone) — unlike
+# syslog/logcat, `assume_offset`/`assume_year` are never needed for this
+# format.
+#
+# `status` is mapped to `level` as the raw 3-digit HTTP status code
+# (searchable as `level=404`/`level~^5` — not bucketed into INFO/WARN/ERROR,
+# same "map the raw value, don't invent a severity that isn't in the log"
+# approach the Logcat/Pacman starters already use). `request` (the full
+# quoted request line, method+path+protocol together) is mapped to
+# `message`. Every other named group (`ip`, `ident`, `user`, `bytes`) still
+# lands in the per-event `fields` JSON and is visible via "View raw/fields"
+# and free-text search over `raw`, even though the v1 search grammar has no
+# dedicated `ip=`/`user=` term for them yet.
+
+[parser]
+name = "Apache Common Log Format"
+sourcetype = "apache_common"
+
+[parser.pattern]
+regex = '^(?P<ip>\S+) (?P<ident>\S+) (?P<user>\S+) \[(?P<timestamp>[^\]]+)\] "(?P<request>[^"]*)" (?P<status>\d{3}) (?P<bytes>\S+)$'
+timestamp_format = "%d/%b/%Y:%H:%M:%S %z"
+
+[parser.field_mapping]
+level = "status"
+message = "request"

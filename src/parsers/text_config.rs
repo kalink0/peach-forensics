@@ -656,6 +656,91 @@ message = "msg"
     }
 
     #[test]
+    fn builtin_apache_common_format_parses_a_realistic_line() {
+        let path = write_temp_file(
+            "builtin-apache-common",
+            "127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] \"GET /index.html HTTP/1.0\" 200 2326\n",
+        );
+        let cfg = builtin_config_with_source_details("apache_common");
+
+        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].timestamp_utc,
+            DateTime::parse_from_rfc3339("2000-10-10T20:55:36Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(records[0].level.as_deref(), Some("200"));
+        assert_eq!(
+            records[0].message.as_deref(),
+            Some("GET /index.html HTTP/1.0")
+        );
+        assert_eq!(
+            records[0].fields.get("ip").and_then(|v| v.as_str()),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            records[0].fields.get("bytes").and_then(|v| v.as_str()),
+            Some("2326")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn builtin_apache_combined_format_parses_a_realistic_line() {
+        let path = write_temp_file(
+            "builtin-apache-combined",
+            "127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] \"GET /index.html HTTP/1.0\" 200 2326 \"http://example.com/\" \"Mozilla/5.0\"\n",
+        );
+        let cfg = builtin_config_with_source_details("apache_combined");
+
+        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level.as_deref(), Some("200"));
+        assert_eq!(
+            records[0].message.as_deref(),
+            Some("GET /index.html HTTP/1.0")
+        );
+        assert_eq!(
+            records[0].fields.get("referer").and_then(|v| v.as_str()),
+            Some("http://example.com/")
+        );
+        assert_eq!(
+            records[0].fields.get("agent").and_then(|v| v.as_str()),
+            Some("Mozilla/5.0")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn builtin_nginx_access_format_parses_a_realistic_line() {
+        let path = write_temp_file(
+            "builtin-nginx-access",
+            "192.168.1.10 - - [10/Oct/2023:13:55:36 +0000] \"GET /index.html HTTP/1.1\" 404 612 \"-\" \"Mozilla/5.0\"\n",
+        );
+        let cfg = builtin_config_with_source_details("nginx_access");
+
+        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].timestamp_utc,
+            DateTime::parse_from_rfc3339("2023-10-10T13:55:36Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(records[0].level.as_deref(), Some("404"));
+        assert_eq!(
+            records[0].message.as_deref(),
+            Some("GET /index.html HTTP/1.1")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn malformed_regex_in_config_is_an_error() {
         let path = write_temp_file("d", "irrelevant\n");
         let cfg = config(

@@ -114,9 +114,15 @@ dropdown pulls an existing config's fields back in for editing/reuse.
 **Load** flow, but for a small built-in starter library instead of your own
 saved configs — Generic timestamp (`YYYY-MM-DD HH:MM:SS`, the shape most
 hand-rolled application logs use), Syslog (RFC 3164), Android Logcat (brief
-format), and Pacman log (`/var/log/pacman.log` on Arch/Manjaro/
+format), Pacman log (`/var/log/pacman.log` on Arch/Manjaro/
 EndeavourOS — package install/upgrade/removal history, forensically
-relevant for a supply-chain or "what got installed and when" timeline).
+relevant for a supply-chain or "what got installed and when" timeline),
+Apache Common/Combined Log Format, and Nginx Access Log (combined) — the
+three web-server formats all map the HTTP status code to `level` (so
+`level=404`/`level~^5` filters work) and the full request line to
+`message`, with `ip`/`user`/`referer`/`user-agent`/`bytes` still visible per
+event via "View raw/fields" even though the search grammar has no dedicated
+term for them yet.
 These are starting points, not an auto-detector: loading one fills in the
 fields for you to check against the live preview, not something that
 applies itself blindly — a real log's exact shape varies too much for

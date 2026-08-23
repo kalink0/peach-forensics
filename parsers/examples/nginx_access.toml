@@ -1,0 +1,26 @@
+# Built-in starter format: nginx's default `combined` access-log format
+# (`log_format combined` in a stock `nginx.conf`, what every nginx install
+# emits unless the config overrides `access_log`'s format) —
+# "$remote_addr - $remote_user [$time_local] \"$request\" $status
+# $body_bytes_sent \"$http_referer\" \"$http_user_agent\"", e.g.
+# `192.168.1.10 - - [10/Oct/2023:13:55:36 +0000] "GET /index.html HTTP/1.1"
+# 200 612 "-" "Mozilla/5.0 ..."`. Same field shape as Apache's Combined Log
+# Format (nginx's default was modeled on Apache's) — see
+# `apache_combined.toml`'s comment for the reasoning this shares: no
+# `assume_offset`/`assume_year` needed (`$time_local` always carries its
+# own explicit offset), `status` maps to `level` as the raw HTTP status
+# code, `request` maps to `message`, everything else (`ip`, the literal
+# `-` `ident` field nginx always emits, `user`, `bytes`, `referer`,
+# `agent`) lands in the per-event `fields` JSON.
+
+[parser]
+name = "Nginx Access Log (combined)"
+sourcetype = "nginx_access"
+
+[parser.pattern]
+regex = '^(?P<ip>\S+) (?P<ident>\S+) (?P<user>\S+) \[(?P<timestamp>[^\]]+)\] "(?P<request>[^"]*)" (?P<status>\d{3}) (?P<bytes>\S+) "(?P<referer>[^"]*)" "(?P<agent>[^"]*)"$'
+timestamp_format = "%d/%b/%Y:%H:%M:%S %z"
+
+[parser.field_mapping]
+level = "status"
+message = "request"

@@ -1,0 +1,24 @@
+# Built-in starter format: Apache HTTP Server's Combined Log Format —
+# Common Log Format (see `apache_common.toml`) plus `Referer` and
+# `User-Agent`: "%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\"",
+# e.g. `127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /index.html
+# HTTP/1.0" 200 2326 "http://example.com/" "Mozilla/5.0 ..."`. Apache's own
+# default `CustomLog` format in most current distro configs.
+#
+# Same offset/level/message reasoning as `apache_common.toml`: the
+# timestamp always carries its own explicit offset (no `assume_offset`/
+# `assume_year` needed), `status` maps to `level` as the raw HTTP status
+# code, `request` maps to `message`. `referer`/`agent` (plus `ip`/`ident`/
+# `user`/`bytes`) land in the per-event `fields` JSON, same as those two.
+
+[parser]
+name = "Apache Combined Log Format"
+sourcetype = "apache_combined"
+
+[parser.pattern]
+regex = '^(?P<ip>\S+) (?P<ident>\S+) (?P<user>\S+) \[(?P<timestamp>[^\]]+)\] "(?P<request>[^"]*)" (?P<status>\d{3}) (?P<bytes>\S+) "(?P<referer>[^"]*)" "(?P<agent>[^"]*)"$'
+timestamp_format = "%d/%b/%Y:%H:%M:%S %z"
+
+[parser.field_mapping]
+level = "status"
+message = "request"
