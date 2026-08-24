@@ -120,16 +120,16 @@ jobs:
       - name: Build (release)
         run: cargo build --release --all-features --verbose
 
-      - name: Package (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
         run: tar -C target/release -czf "${{ matrix.artifact_name }}-${{ env.BUILD_ID }}.tar.gz" peach
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: Compress-Archive -Path target\release\peach.exe -DestinationPath "${{ matrix.artifact_name }}-${{ env.BUILD_ID }}.zip"
 
-      - name: Upload artifact (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Upload artifact (Linux)
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
@@ -144,8 +144,59 @@ jobs:
           path: ${{ matrix.artifact_name }}-${{ env.BUILD_ID }}.zip
           retention-days: 1
 
-  release:
+      # Same reasoning as release.yml: macOS stays native per-architecture
+      # here too, but only the raw binary is uploaded — macos-universal
+      # below combines both into one lipo binary instead of a nightly
+      # shipping two separate macOS assets.
+      - name: Upload raw binary (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-binary
+          path: target/release/peach
+          retention-days: 1
+
+  macos-universal:
     needs: [check, build]
+    if: github.event_name == 'workflow_dispatch' || needs.check.outputs.should_run == 'true'
+    runs-on: macos-latest
+    steps:
+      - name: Set build identifier
+        run: |
+          BUILD_ID="$(date -u +%Y%m%d)-nightly-${GITHUB_SHA::7}"
+          echo "BUILD_ID=$BUILD_ID" >> "$GITHUB_ENV"
+
+      - name: Download arm64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: peach-macos-arm-binary
+          path: arm
+
+      - name: Download x86_64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: peach-macos-intel-binary
+          path: intel
+
+      - name: Combine into a universal binary
+        run: |
+          chmod +x arm/peach intel/peach
+          lipo -create -output peach arm/peach intel/peach
+          lipo -info peach
+          chmod +x peach
+
+      - name: Package
+        run: tar -czf "peach-macos-${{ env.BUILD_ID }}.tar.gz" peach
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: peach-macos
+          path: peach-macos-${{ env.BUILD_ID }}.tar.gz
+          retention-days: 1
+
+  release:
+    needs: [check, build, macos-universal]
     if: github.event_name == 'workflow_dispatch' || needs.check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
 
@@ -158,12 +209,7 @@ jobs:
       - name: Download macOS artifact
         uses: actions/download-artifact@v4
         with:
-          name: peach-macos-arm
-
-      - name: Download macOS Intel artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: peach-macos-intel
+          name: peach-macos
 
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
@@ -187,6 +233,5 @@ jobs:
             --notes "Automated nightly build from \`main\`. Not a stable release." \
             --prerelease \
             peach-linux-*.tar.gz \
-            peach-macos-arm-*.tar.gz \
-            peach-macos-intel-*.tar.gz \
+            peach-macos-*.tar.gz \
             peach-windows-*.zip

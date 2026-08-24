@@ -39,16 +39,16 @@ jobs:
       - name: Build (release)
         run: cargo build --release --all-features --verbose
 
-      - name: Package (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
         run: tar -C target/release -czf "${{ matrix.artifact_name }}-${{ github.ref_name }}.tar.gz" peach
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: Compress-Archive -Path target\release\peach.exe -DestinationPath "${{ matrix.artifact_name }}-${{ github.ref_name }}.zip"
 
-      - name: Upload release asset (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Upload release asset (Linux)
+        if: runner.os == 'Linux'
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.artifact_name }}-${{ github.ref_name }}.tar.gz
@@ -58,3 +58,46 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.artifact_name }}-${{ github.ref_name }}.zip
+
+      # macOS builds stay native per-architecture (no cross-compiling the
+      # bundled DuckDB/SQLite C/C++ builds) but aren't packaged/uploaded
+      # here — the macos-universal job below combines both into one lipo
+      # binary instead of shipping two separate release assets.
+      - name: Upload raw binary (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-binary
+          path: target/release/peach
+          retention-days: 1
+
+  macos-universal:
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - name: Download arm64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: peach-macos-arm-binary
+          path: arm
+
+      - name: Download x86_64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: peach-macos-intel-binary
+          path: intel
+
+      - name: Combine into a universal binary
+        run: |
+          chmod +x arm/peach intel/peach
+          lipo -create -output peach arm/peach intel/peach
+          lipo -info peach
+          chmod +x peach
+
+      - name: Package
+        run: tar -czf "peach-macos-${{ github.ref_name }}.tar.gz" peach
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: peach-macos-${{ github.ref_name }}.tar.gz

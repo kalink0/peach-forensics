@@ -28,7 +28,7 @@ authoritative, up-to-date list of what actually works today.
 
 ## Download
 
-Prebuilt binaries for Linux, Windows, macOS (Apple Silicon and Intel) are attached to
+Prebuilt binaries for Linux, Windows, and macOS (universal — Apple Silicon and Intel in one binary) are attached to
 every [GitHub release](https://github.com/kalink0/peach-forensics/releases) — no Rust
 toolchain or build step needed. A [nightly build](https://github.com/kalink0/peach-forensics/releases/tag/nightly)
 tracks `main` and is rebuilt automatically whenever new commits land.

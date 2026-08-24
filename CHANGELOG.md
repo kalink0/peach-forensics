@@ -2,7 +2,11 @@
 
 All notable changes to Peach will be documented in this file.
 
-## Unreleased
+## v0.2.1 - 2026-08-24
+
+### Documentation
+
+- macOS release/nightly builds are now a single universal (arm64+x86_64) binary via `lipo`, instead of two separate architecture-specific downloads — each architecture still builds natively (no cross-compiling the bundled DuckDB/SQLite), only the final packaging step changed.
 
 ## v0.2.0 - 2026-08-24
 
