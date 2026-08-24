@@ -5,13 +5,14 @@ supported, see [supported-sources.md](supported-sources.md) — this guide assum
 you already know which sourcetype you're loading.
 
 Every dialog (About, Settings, Notes, Tag this event/Advanced tagging,
-View raw/fields, Define format, Manage sessions, Time range) opens as its
-own real, independent window — draggable anywhere on the desktop,
-including off the main window entirely or onto a second monitor, not
-confined to staying inside the main window the way a typical in-app popup
-would be. Closing one works the normal way for a window on your OS (the
-title bar's close button) as well as via any in-dialog Cancel/Close
-button.
+View raw/fields, Define format, Manage sessions, Time range) opens as a
+window confined to the main Peach window — draggable within it, but not
+off it or onto a second monitor. (An earlier version of this behavior used
+egui's multi-viewport support to make dialogs fully independent OS
+windows; that was reverted before v0.2.0 after it turned out to hang the
+whole app on at least one real Wayland desktop, opening even the simplest
+dialog. See the v0.2.0 changelog entry for details.) Close a dialog via its
+own Cancel/Close/OK button, or the small **✕** in its title bar.
 
 ## Loading a source
 
