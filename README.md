@@ -39,6 +39,7 @@ tracks `main` and is rebuilt automatically whenever new commits land.
 **macOS (Homebrew)**
 ```bash
 brew tap kalink0/forensics
+brew trust kalink0/forensics
 brew install peach-forensics
 ```
 
