@@ -632,6 +632,7 @@ pub fn import_portable_case(
     persist::insert_activity_log_entry(
         &conn,
         NewActivityLogEntry {
+            skip_bad_records_enabled: false,
             operation: "import".to_string(),
             started_at: now,
             finished_at: now,

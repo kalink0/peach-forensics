@@ -7,7 +7,7 @@ use regex::Regex;
 
 use crate::model::log_entry::ParsedRecord;
 use crate::model::timezone_spec::TimezoneSpec;
-use crate::parsers::{LogParser, ParserConfig};
+use crate::parsers::{LogParser, ParserConfig, SkippedRecord};
 
 /// `pub(crate)` — also deserialized directly by
 /// [`crate::parsers::text_config_file`] to load an existing config file
@@ -68,7 +68,12 @@ impl LogParser for TextConfigParser {
         "text_config"
     }
 
-    fn parse(&self, path: &Path, config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>> {
+    fn parse(
+        &self,
+        path: &Path,
+        config: &ParserConfig,
+        skip_bad_records: bool,
+    ) -> anyhow::Result<(Vec<ParsedRecord>, Vec<SkippedRecord>)> {
         let fields_config: TextParserFields = toml::Value::Table(config.parser.extra.clone())
             .try_into()
             .context("invalid text parser config")?;
@@ -117,20 +122,34 @@ impl LogParser for TextConfigParser {
         let lines: Vec<&str> = content.lines().collect();
         let blocks = group_lines(&lines, multiline_start_regex.as_ref());
 
-        blocks
-            .into_iter()
-            .map(|(start_line, block_lines)| {
-                parse_block(
-                    start_line,
-                    &block_lines,
-                    &main_regex,
-                    &fields_config.pattern.timestamp_format,
-                    assume_offset,
-                    assume_year,
-                    &fields_config.field_mapping,
-                )
-            })
-            .collect()
+        // A manual loop instead of `.collect::<Result<Vec<_>, _>>()`: block
+        // boundaries are already fixed by `group_lines` before any content
+        // parsing happens, so a bad block never prevents finding the next
+        // one — always resyncable, unlike journald's structural corruption.
+        // `skip_bad_records` decides only what happens to a bad block's own
+        // error (record it and continue, vs. abort the whole file exactly
+        // as before this parameter existed).
+        let mut records = Vec::with_capacity(blocks.len());
+        let mut skipped = Vec::new();
+        for (start_line, block_lines) in blocks {
+            match parse_block(
+                start_line,
+                &block_lines,
+                &main_regex,
+                &fields_config.pattern.timestamp_format,
+                assume_offset,
+                assume_year,
+                &fields_config.field_mapping,
+            ) {
+                Ok(record) => records.push(record),
+                Err(err) if skip_bad_records => skipped.push(SkippedRecord {
+                    location: format!("line {start_line}"),
+                    reason: format!("{err:#}"),
+                }),
+                Err(err) => return Err(err),
+            }
+        }
+        Ok((records, skipped))
     }
 }
 
@@ -308,7 +327,9 @@ message = "msg"
 "#,
         );
 
-        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+        let (records, _skipped) = TextConfigParser::default()
+            .parse(&path, &cfg, false)
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         let record = &records[0];
@@ -348,7 +369,9 @@ message = "msg"
 "#,
         );
 
-        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+        let (records, _skipped) = TextConfigParser::default()
+            .parse(&path, &cfg, false)
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         let record = &records[0];
@@ -381,7 +404,7 @@ timestamp_format = "%Y-%m-%d %H:%M:%S"
         let parser = TextConfigParser {
             default_assume_offset: Some("Europe/Berlin".to_string()),
         };
-        let records = parser.parse(&path, &cfg).unwrap();
+        let (records, _skipped) = parser.parse(&path, &cfg, false).unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(
@@ -415,7 +438,7 @@ message = "msg"
         let parser = TextConfigParser {
             default_assume_offset: Some("Europe/Berlin".to_string()),
         };
-        let records = parser.parse(&path, &cfg).unwrap();
+        let (records, _skipped) = parser.parse(&path, &cfg, false).unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(
@@ -438,7 +461,7 @@ timestamp_format = "%Y-%m-%d %H:%M:%S"
 "#,
         );
 
-        let result = TextConfigParser::default().parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg, false);
 
         assert!(result.is_err());
         std::fs::remove_file(path).unwrap();
@@ -469,7 +492,7 @@ message = "msg"
 "#,
         );
 
-        let result = TextConfigParser::default().parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg, false);
 
         assert!(result.is_err());
         std::fs::remove_file(path).unwrap();
@@ -491,7 +514,9 @@ message = "msg"
 "#,
         );
 
-        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+        let (records, _skipped) = TextConfigParser::default()
+            .parse(&path, &cfg, false)
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(
@@ -522,7 +547,9 @@ message = "msg"
 "#,
         );
 
-        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+        let (records, _skipped) = TextConfigParser::default()
+            .parse(&path, &cfg, false)
+            .unwrap();
 
         assert_eq!(
             records[0].timestamp_utc,
@@ -562,7 +589,9 @@ message = "msg"
         );
         let cfg = builtin_config_with_source_details("text_generic");
 
-        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+        let (records, _skipped) = TextConfigParser::default()
+            .parse(&path, &cfg, false)
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(
@@ -586,7 +615,9 @@ message = "msg"
         );
         let cfg = builtin_config_with_source_details("syslog");
 
-        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+        let (records, _skipped) = TextConfigParser::default()
+            .parse(&path, &cfg, false)
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(
@@ -610,7 +641,9 @@ message = "msg"
         );
         let cfg = builtin_config_with_source_details("logcat");
 
-        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+        let (records, _skipped) = TextConfigParser::default()
+            .parse(&path, &cfg, false)
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(
@@ -635,7 +668,9 @@ message = "msg"
         );
         let cfg = builtin_config_with_source_details("pacman");
 
-        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+        let (records, _skipped) = TextConfigParser::default()
+            .parse(&path, &cfg, false)
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(
@@ -663,7 +698,9 @@ message = "msg"
         );
         let cfg = builtin_config_with_source_details("apache_common");
 
-        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+        let (records, _skipped) = TextConfigParser::default()
+            .parse(&path, &cfg, false)
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(
@@ -696,7 +733,9 @@ message = "msg"
         );
         let cfg = builtin_config_with_source_details("apache_combined");
 
-        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+        let (records, _skipped) = TextConfigParser::default()
+            .parse(&path, &cfg, false)
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].level.as_deref(), Some("200"));
@@ -723,7 +762,9 @@ message = "msg"
         );
         let cfg = builtin_config_with_source_details("nginx_access");
 
-        let records = TextConfigParser::default().parse(&path, &cfg).unwrap();
+        let (records, _skipped) = TextConfigParser::default()
+            .parse(&path, &cfg, false)
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(
@@ -751,7 +792,7 @@ timestamp_format = "%Y-%m-%d %H:%M:%S"
 "#,
         );
 
-        let result = TextConfigParser::default().parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg, false);
 
         assert!(result.is_err());
         std::fs::remove_file(path).unwrap();
@@ -769,7 +810,7 @@ assume_offset = "UTC"
 "#,
         );
 
-        let result = TextConfigParser::default().parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg, false);
 
         let err = result.unwrap_err();
         assert!(err.to_string().contains("line 1"));
@@ -790,7 +831,7 @@ sourcehost = "msg"
 "#,
         );
 
-        let result = TextConfigParser::default().parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg, false);
 
         assert!(result.is_err());
         std::fs::remove_file(path).unwrap();
@@ -810,7 +851,7 @@ message = "does_not_exist"
 "#,
         );
 
-        let result = TextConfigParser::default().parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg, false);
 
         assert!(result.is_err());
         std::fs::remove_file(path).unwrap();
@@ -827,7 +868,7 @@ timestamp_format = "%Y-%m-%dT%H:%M:%S%z"
 "#,
         );
 
-        let result = TextConfigParser::default().parse(&path, &cfg);
+        let result = TextConfigParser::default().parse(&path, &cfg, false);
 
         assert!(result.is_err());
         std::fs::remove_file(path).unwrap();
@@ -851,8 +892,10 @@ message = "msg"
 "#,
         );
 
-        let entries = parse_source(&TextConfigParser::default(), &path, &cfg).unwrap();
+        let (entries, skipped) =
+            parse_source(&TextConfigParser::default(), &path, &cfg, false).unwrap();
 
+        assert!(skipped.is_empty());
         assert_eq!(entries.len(), 2);
         assert_eq!(
             entries[0].event_id.source_file_id,
@@ -862,6 +905,56 @@ message = "msg"
         assert_eq!(entries[1].event_id.sequence_number.value(), 1);
         assert_eq!(entries[0].message.as_deref(), Some("first"));
         assert_eq!(entries[1].message.as_deref(), Some("second"));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn skip_test_config() -> ParserConfig {
+        config(
+            r#"
+[parser.pattern]
+regex = '^(?P<timestamp>\S+) (?P<msg>.*)$'
+timestamp_format = "%Y-%m-%dT%H:%M:%S%z"
+"#,
+        )
+    }
+
+    /// Regression test for the "skip bad records" invariant: `false` (the
+    /// default) must behave exactly as it always has — the first
+    /// unmatchable line still aborts the whole file, nothing partial
+    /// survives.
+    #[test]
+    fn skip_bad_records_false_still_hard_fails_on_the_first_bad_line() {
+        let path = write_temp_file(
+            "skip-off",
+            "2026-07-28T12:00:00+0200 good line\nthis line matches nothing\n",
+        );
+
+        let result = TextConfigParser::default().parse(&path, &skip_test_config(), false);
+
+        assert!(result.is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn skip_bad_records_true_keeps_good_lines_and_records_the_bad_one() {
+        let path = write_temp_file(
+            "skip-on",
+            "2026-07-28T12:00:00+0200 first good\n\
+             this line matches nothing\n\
+             2026-07-28T12:00:02+0200 second good\n",
+        );
+
+        let (records, skipped) = TextConfigParser::default()
+            .parse(&path, &skip_test_config(), true)
+            .unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].raw, "2026-07-28T12:00:00+0200 first good");
+        assert_eq!(records[1].raw, "2026-07-28T12:00:02+0200 second good");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].location, "line 2");
+        assert!(skipped[0].reason.contains("does not match"));
 
         std::fs::remove_file(path).unwrap();
     }

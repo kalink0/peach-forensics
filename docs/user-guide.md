@@ -56,6 +56,21 @@ never logged anything) shows up as **"N file(s) skipped"** next to the load
 result, rather than silently vanishing from the count. Hover it for the
 exact path and reason per file.
 
+**Skip bad records instead of failing** (checkbox next to **Load**, off by
+default) changes what happens when a *single* line/record inside an
+otherwise-good file can't be parsed. Normally that aborts the whole file —
+nothing from it loads, and it shows up in the skipped-files list above.
+With this checked, the bad record is skipped and counted instead, and the
+rest of the file still loads normally. How many records were skipped (and
+why) shows up both in the load result and, per file, in the
+[Activity Log](#activity-log) — along with whether skip mode was even used
+for that load, since tolerating corruption is itself worth knowing about
+later. For journald specifically, a corrupted individual entry is always
+skippable this way, but a corrupted *structural* header (rare) isn't — there's
+no safe way to find the next record without guessing at the file's layout,
+so parsing stops there; everything read up to that point still loads
+normally, with a note explaining where and why it stopped.
+
 ### Text parser configs
 
 A text source needs a TOML file describing how to parse it: a regex with named
@@ -575,7 +590,10 @@ both success *and* failure: a failed load shows up here with its error, not
 just as a transient message that's gone once you dismiss it. Persisted in
 the session's `.sqlite` (same file as tags/notes), so it survives closing
 and reopening Peach — the point is a durable record of what actually
-happened to the evidence, not a live status readout.
+happened to the evidence, not a live status readout. A load run with
+**Skip bad records instead of failing** on is marked as such, and shows,
+per file, how many records were skipped alongside how many entries were
+inserted.
 
 ## Export
 

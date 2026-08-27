@@ -4,7 +4,7 @@ use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Utc};
 
 use crate::model::log_entry::ParsedRecord;
-use crate::parsers::{LogParser, ParserConfig};
+use crate::parsers::{LogParser, ParserConfig, SkippedRecord};
 
 /// Hand-rolled reader for the systemd journal binary file format.
 ///
@@ -63,10 +63,19 @@ use crate::parsers::{LogParser, ParserConfig};
 /// - Only little-endian journal files are supported (universal on modern
 ///   Linux since systemd unified the on-disk format around v246; older
 ///   big-endian archives are out of scope).
-/// - A single corrupt/truncated object aborts the whole parse, consistent
-///   with the EVTX parser — an opt-in "skip and log bad records" mode would
-///   need a `LogParser`-wide change, not a one-off here, so it isn't done
-///   yet.
+/// - A single corrupt/truncated object aborts the whole parse by default.
+///   `skip_bad_records` distinguishes two cases: a corrupt *entry* (its
+///   object header parsed fine, so its size — and therefore the next
+///   object's offset — is known) is skippable and parsing continues past
+///   it. A corrupt object *header* is not: its size is exactly what failed
+///   to parse, so there is no safe way to know where the next object starts
+///   without guessing — this crosses the line from "one bad record" into
+///   "the file's structure is no longer trustworthy from here on", which
+///   would mean fabricating a resync point rather than reading one. In that
+///   case skip mode keeps every entry parsed before the corruption as a
+///   normal, successful (partial) result, plus one final [`SkippedRecord`]
+///   noting where and why it stopped — it does not scan forward hunting for
+///   the next plausible object.
 ///
 /// No config-driven field-mapping, like EVTX/AUL — `ParserConfig.extra` is
 /// unused.
@@ -77,10 +86,15 @@ impl LogParser for JournaldFileParser {
         "journald"
     }
 
-    fn parse(&self, path: &Path, _config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>> {
+    fn parse(
+        &self,
+        path: &Path,
+        _config: &ParserConfig,
+        skip_bad_records: bool,
+    ) -> anyhow::Result<(Vec<ParsedRecord>, Vec<SkippedRecord>)> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("failed to read journal file {}", path.display()))?;
-        parse_bytes(&bytes)
+        parse_bytes(&bytes, skip_bad_records)
     }
 }
 
@@ -209,27 +223,58 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
-fn parse_bytes(bytes: &[u8]) -> anyhow::Result<Vec<ParsedRecord>> {
+fn parse_bytes(
+    bytes: &[u8],
+    skip_bad_records: bool,
+) -> anyhow::Result<(Vec<ParsedRecord>, Vec<SkippedRecord>)> {
     let header = parse_header(bytes)?;
     let mut records = Vec::new();
+    let mut skipped = Vec::new();
 
     if header.tail_object_offset == 0 {
-        return Ok(records);
+        return Ok((records, skipped));
     }
 
     let mut offset = align8(header.header_size);
     while offset <= header.tail_object_offset {
-        let object = read_object_header(bytes, offset)
-            .with_context(|| format!("failed to read object at offset {offset}"))?;
+        let object = match read_object_header(bytes, offset)
+            .with_context(|| format!("failed to read object at offset {offset}"))
+        {
+            Ok(object) => object,
+            // Unrecoverable under skip mode too: the object's size is
+            // exactly what failed to read, so there's no safe next offset
+            // to resync to without guessing. Keep everything parsed so far
+            // as a normal partial result instead of discarding it.
+            Err(err) if skip_bad_records => {
+                skipped.push(SkippedRecord {
+                    location: format!("offset {offset:#x}"),
+                    reason: format!(
+                        "{err:#} — journal structure unreadable from this point; \
+                         {} entr{} recovered before it, remainder of the file skipped",
+                        records.len(),
+                        if records.len() == 1 { "y" } else { "ies" },
+                    ),
+                });
+                break;
+            }
+            Err(err) => return Err(err),
+        };
         if object.object_type == OBJECT_TYPE_ENTRY {
-            let record = parse_entry_object(bytes, offset, object.size, header.compact)
-                .with_context(|| format!("failed to parse ENTRY object at offset {offset}"))?;
-            records.push(record);
+            match parse_entry_object(bytes, offset, object.size, header.compact)
+                .with_context(|| format!("failed to parse ENTRY object at offset {offset}"))
+            {
+                Ok(record) => records.push(record),
+                Err(err) if skip_bad_records => skipped.push(SkippedRecord {
+                    location: format!("entry at offset {offset:#x}"),
+                    reason: format!("{err:#}"),
+                }),
+                Err(err) => return Err(err),
+            }
         }
         offset = align8(offset + object.size);
     }
 
-    Ok(records)
+    Ok((records, skipped))
 }
 
 fn parse_entry_object(
@@ -515,6 +560,22 @@ mod tests {
             }
         }
 
+        /// Appends a malformed object header — a declared size smaller than
+        /// `OBJECT_HEADER_SIZE`, which `read_object_header` rejects as
+        /// impossible — and points `tail_object_offset` at it. Simulates
+        /// the one corruption case `parse_bytes` cannot resync past even
+        /// under skip mode (the object's own size, needed to find the next
+        /// object, is what failed to read).
+        fn push_corrupt_object_header(&mut self) -> u64 {
+            let offset = self.bytes.len() as u64;
+            self.bytes.push(OBJECT_TYPE_ENTRY);
+            self.bytes.push(0);
+            self.bytes.extend_from_slice(&[0u8; 6]);
+            self.bytes.extend_from_slice(&3u64.to_le_bytes());
+            self.bytes[136..144].copy_from_slice(&offset.to_le_bytes());
+            offset
+        }
+
         fn finish(self) -> Vec<u8> {
             self.bytes
         }
@@ -529,7 +590,7 @@ mod tests {
         builder.push_entry_object(1, 1_704_067_200_000_000, &[message_offset, priority_offset]);
         let bytes = builder.finish();
 
-        let records = parse_bytes(&bytes).unwrap();
+        let (records, _skipped) = parse_bytes(&bytes, false).unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].message.as_deref(), Some("hello world"));
@@ -554,7 +615,7 @@ mod tests {
         builder.push_entry_object(1, 0, &[message_offset]);
         let bytes = builder.finish();
 
-        let records = parse_bytes(&bytes).unwrap();
+        let (records, _skipped) = parse_bytes(&bytes, false).unwrap();
 
         assert_eq!(
             records[0].message.as_deref(),
@@ -569,7 +630,7 @@ mod tests {
         builder.push_entry_object(1, 0, &[data_offset]);
         let bytes = builder.finish();
 
-        let records = parse_bytes(&bytes).unwrap();
+        let (records, _skipped) = parse_bytes(&bytes, false).unwrap();
 
         let fields = records[0].fields.as_object().unwrap();
         let (key, value) = fields
@@ -589,7 +650,7 @@ mod tests {
         builder.push_entry_object(1, 1_704_067_200_000_000, &[message_offset, priority_offset]);
         let bytes = builder.finish();
 
-        let records = parse_bytes(&bytes).unwrap();
+        let (records, _skipped) = parse_bytes(&bytes, false).unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].message.as_deref(), Some("hello compact world"));
@@ -611,7 +672,7 @@ mod tests {
         builder.push_entry_object(1, 0, &[message_offset]);
         let bytes = builder.finish();
 
-        let records = parse_bytes(&bytes).unwrap();
+        let (records, _skipped) = parse_bytes(&bytes, false).unwrap();
 
         assert_eq!(
             records[0].message.as_deref(),
@@ -629,7 +690,7 @@ mod tests {
         builder.push_entry_object(2, 200, &[second_offset]);
         let bytes = builder.finish();
 
-        let records = parse_bytes(&bytes).unwrap();
+        let (records, _skipped) = parse_bytes(&bytes, false).unwrap();
 
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].message.as_deref(), Some("first"));
@@ -642,7 +703,7 @@ mod tests {
         builder.set_incompatible_flags(1 << 30);
         let bytes = builder.finish();
 
-        let result = parse_bytes(&bytes);
+        let result = parse_bytes(&bytes, false);
 
         assert!(result.is_err());
     }
@@ -651,7 +712,7 @@ mod tests {
     fn bad_signature_is_rejected() {
         let bytes = vec![0u8; 208];
 
-        let result = parse_bytes(&bytes);
+        let result = parse_bytes(&bytes, false);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("signature"));
@@ -661,7 +722,7 @@ mod tests {
     fn truncated_file_is_rejected_not_panicking() {
         let bytes = vec![0u8; 10];
 
-        let result = parse_bytes(&bytes);
+        let result = parse_bytes(&bytes, false);
 
         assert!(result.is_err());
     }
@@ -671,7 +732,7 @@ mod tests {
         let builder = FakeJournalBuilder::new();
         let bytes = builder.finish();
 
-        let records = parse_bytes(&bytes).unwrap();
+        let (records, _skipped) = parse_bytes(&bytes, false).unwrap();
 
         assert!(records.is_empty());
     }
@@ -688,7 +749,7 @@ mod tests {
         builder.bytes[136..144].copy_from_slice(&offset.to_le_bytes());
         let bytes = builder.finish();
 
-        let result = parse_bytes(&bytes);
+        let result = parse_bytes(&bytes, false);
 
         assert!(result.is_err());
     }
@@ -702,7 +763,7 @@ mod tests {
         builder.push_entry_object(2, 200, &[second_offset]);
         let bytes = builder.finish();
 
-        let records = parse_bytes(&bytes).unwrap();
+        let (records, _skipped) = parse_bytes(&bytes, false).unwrap();
 
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].message.as_deref(), Some("first"));
@@ -715,8 +776,86 @@ mod tests {
             "[parser]\nname = \"journald\"\nsourcetype = \"journald\"\n",
         )
         .unwrap();
-        let result = JournaldFileParser.parse(Path::new("/nonexistent/path.journal"), &config);
+        let result =
+            JournaldFileParser.parse(Path::new("/nonexistent/path.journal"), &config, false);
 
         assert!(result.is_err());
+    }
+
+    /// Regression test for the "skip bad records" invariant: `false` must
+    /// still hard-fail on a corrupt entry exactly as before this parameter
+    /// existed.
+    #[test]
+    fn skip_bad_records_false_still_hard_fails_on_a_corrupt_entry() {
+        let mut builder = FakeJournalBuilder::new();
+        let good_offset = builder.push_data_object("MESSAGE=first");
+        builder.push_entry_object(1, 100, &[good_offset]);
+        // References a wildly out-of-bounds DATA object offset — the ENTRY
+        // object's own header is fine, only its item resolution fails.
+        builder.push_entry_object(2, 200, &[999_999]);
+        let bytes = builder.finish();
+
+        let result = parse_bytes(&bytes, false);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn skip_bad_records_true_skips_a_corrupt_entry_and_keeps_the_rest() {
+        let mut builder = FakeJournalBuilder::new();
+        let first_offset = builder.push_data_object("MESSAGE=first");
+        builder.push_entry_object(1, 100, &[first_offset]);
+        builder.push_entry_object(2, 200, &[999_999]);
+        let third_offset = builder.push_data_object("MESSAGE=third");
+        builder.push_entry_object(3, 300, &[third_offset]);
+        let bytes = builder.finish();
+
+        let (records, skipped) = parse_bytes(&bytes, true).unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].message.as_deref(), Some("first"));
+        assert_eq!(records[1].message.as_deref(), Some("third"));
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].location.contains("entry at offset"));
+    }
+
+    /// The one corruption case skip mode can't recover from: a malformed
+    /// *object header* (not just a malformed entry) leaves no safe way to
+    /// find the next object. `false` must still hard-fail on it exactly as
+    /// before.
+    #[test]
+    fn skip_bad_records_false_still_hard_fails_on_a_corrupt_object_header() {
+        let mut builder = FakeJournalBuilder::new();
+        let good_offset = builder.push_data_object("MESSAGE=first");
+        builder.push_entry_object(1, 100, &[good_offset]);
+        builder.push_corrupt_object_header();
+        let bytes = builder.finish();
+
+        let result = parse_bytes(&bytes, false);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn skip_bad_records_true_keeps_entries_recovered_before_a_corrupt_header() {
+        let mut builder = FakeJournalBuilder::new();
+        let first_offset = builder.push_data_object("MESSAGE=first");
+        builder.push_entry_object(1, 100, &[first_offset]);
+        let second_offset = builder.push_data_object("MESSAGE=second");
+        builder.push_entry_object(2, 200, &[second_offset]);
+        builder.push_corrupt_object_header();
+        let bytes = builder.finish();
+
+        let (records, skipped) = parse_bytes(&bytes, true).unwrap();
+
+        assert_eq!(
+            records.len(),
+            2,
+            "both entries before the corruption survive"
+        );
+        assert_eq!(records[0].message.as_deref(), Some("first"));
+        assert_eq!(records[1].message.as_deref(), Some("second"));
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].reason.contains("2 entries recovered"));
     }
 }

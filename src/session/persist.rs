@@ -496,6 +496,13 @@ pub struct ActivitySkippedFile {
 pub struct ActivityFileCount {
     pub path: String,
     pub inserted: usize,
+    /// How many records from this file were skipped instead of aborting
+    /// the whole file, under "skip bad records" mode — see
+    /// `parsers::SkippedRecord`. `#[serde(default)]` so a `per_file` JSON
+    /// blob written before this field existed still deserializes (as `0`,
+    /// same as if skip mode had never been used).
+    #[serde(default)]
+    pub records_skipped: usize,
 }
 
 /// One rule's contribution to a load or re-tag's tagging pass, as recorded
@@ -528,6 +535,12 @@ pub struct ActivityLogEntry {
     pub skipped: Vec<ActivitySkippedFile>,
     pub per_file: Vec<ActivityFileCount>,
     pub tags_by_rule: Vec<ActivityRuleCount>,
+    /// Whether this load ran with "skip bad records instead of failing"
+    /// turned on — the analyst's choice to tolerate corruption is itself
+    /// forensically relevant and must stay visible, not just the resulting
+    /// skip counts. Always `false` for a `"retag"` operation (the toggle
+    /// only ever applies to loads).
+    pub skip_bad_records_enabled: bool,
 }
 
 /// What [`insert_activity_log_entry`] writes — every field owned rather than
@@ -548,6 +561,7 @@ pub struct NewActivityLogEntry {
     pub skipped: Vec<ActivitySkippedFile>,
     pub per_file: Vec<ActivityFileCount>,
     pub tags_by_rule: Vec<ActivityRuleCount>,
+    pub skip_bad_records_enabled: bool,
 }
 
 /// Records one completed or failed load/re-tag operation — the durable
@@ -569,8 +583,8 @@ pub fn insert_activity_log_entry(
         "INSERT INTO activity_log
             (operation, started_at, finished_at, source_path, sourcetype,
              status, error, entries_inserted, tags_applied, skipped,
-             per_file, tags_by_rule)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             per_file, tags_by_rule, skip_bad_records_enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             entry.operation,
             entry.started_at,
@@ -584,6 +598,7 @@ pub fn insert_activity_log_entry(
             skipped_json,
             per_file_json,
             tags_by_rule_json,
+            entry.skip_bad_records_enabled,
         ],
     )?;
     Ok(())
@@ -597,7 +612,7 @@ pub fn all_activity_log_entries(conn: &Connection) -> anyhow::Result<Vec<Activit
     let mut stmt = conn.prepare(
         "SELECT id, operation, started_at, finished_at, source_path, sourcetype,
                 status, error, entries_inserted, tags_applied, skipped,
-                per_file, tags_by_rule
+                per_file, tags_by_rule, skip_bad_records_enabled
          FROM activity_log ORDER BY id DESC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -619,6 +634,7 @@ pub fn all_activity_log_entries(conn: &Connection) -> anyhow::Result<Vec<Activit
                 skipped: Vec::new(),
                 per_file: Vec::new(),
                 tags_by_rule: Vec::new(),
+                skip_bad_records_enabled: row.get(13)?,
             },
             skipped_json,
             per_file_json,
@@ -1097,11 +1113,13 @@ mod tests {
             per_file: vec![ActivityFileCount {
                 path: source_path.to_string(),
                 inserted: 1000,
+                records_skipped: 3,
             }],
             tags_by_rule: vec![ActivityRuleCount {
                 rule_name: "evtx_logon_success".to_string(),
                 count: 12,
             }],
+            skip_bad_records_enabled: true,
         }
     }
 
@@ -1136,6 +1154,7 @@ mod tests {
             vec![ActivityFileCount {
                 path: "/evidence/system.evtx".to_string(),
                 inserted: 1000,
+                records_skipped: 3,
             }]
         );
         assert_eq!(
@@ -1145,6 +1164,7 @@ mod tests {
                 count: 12,
             }]
         );
+        assert!(entry.skip_bad_records_enabled);
     }
 
     #[test]
@@ -1226,6 +1246,7 @@ mod tests {
                     rule_name: "generic_error".to_string(),
                     count: 42,
                 }],
+                skip_bad_records_enabled: false,
             },
         )
         .unwrap();

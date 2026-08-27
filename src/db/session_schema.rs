@@ -64,10 +64,23 @@ pub fn setup_session_schema(conn: &Connection) -> Result<()> {
             tags_applied      INTEGER,
             skipped           TEXT NOT NULL,
             per_file          TEXT NOT NULL,
-            tags_by_rule      TEXT NOT NULL
+            tags_by_rule      TEXT NOT NULL,
+            skip_bad_records_enabled INTEGER NOT NULL DEFAULT 0
         );
         ",
-    )
+    )?;
+
+    // Migration for session files created before `skip_bad_records_enabled`
+    // existed: SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so
+    // this tolerates the "duplicate column name" error a brand-new table
+    // (which already has the column via the `CREATE TABLE` above) produces
+    // — the same idempotency `CREATE TABLE IF NOT EXISTS` gives every other
+    // column, just done by hand for a column added after the fact.
+    let _ = conn.execute(
+        "ALTER TABLE activity_log ADD COLUMN skip_bad_records_enabled INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -89,6 +102,53 @@ mod tests {
     fn schema_setup_is_idempotent() {
         let conn = open_test_db();
         setup_session_schema(&conn).unwrap();
+    }
+
+    /// Regression test for the `skip_bad_records_enabled` migration: a
+    /// session file created before that column existed (simulated here by
+    /// creating `activity_log` by hand, without it) must still work once
+    /// `setup_session_schema` runs again — the `ALTER TABLE` migration path
+    /// must actually add the column, not just silently swallow the error on
+    /// a table that never gets it.
+    #[test]
+    fn schema_setup_migrates_an_activity_log_table_missing_skip_bad_records_enabled() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE activity_log (
+                id                INTEGER PRIMARY KEY,
+                operation         TEXT NOT NULL,
+                started_at        INTEGER NOT NULL,
+                finished_at       INTEGER NOT NULL,
+                source_path       TEXT,
+                sourcetype        TEXT,
+                status            TEXT NOT NULL,
+                error             TEXT,
+                entries_inserted  INTEGER,
+                tags_applied      INTEGER,
+                skipped           TEXT NOT NULL,
+                per_file          TEXT NOT NULL,
+                tags_by_rule      TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+
+        setup_session_schema(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO activity_log
+                (operation, started_at, finished_at, status, skipped, per_file, tags_by_rule)
+             VALUES ('load', 0, 0, 'ok', '[]', '[]', '[]')",
+            [],
+        )
+        .unwrap();
+        let enabled: bool = conn
+            .query_row(
+                "SELECT skip_bad_records_enabled FROM activity_log",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!enabled, "migrated column must default to false");
     }
 
     #[test]

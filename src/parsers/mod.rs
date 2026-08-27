@@ -64,6 +64,22 @@ pub struct StreamingProgress<'a> {
     pub on_total_known: &'a mut dyn FnMut(usize),
 }
 
+/// One record a parser couldn't make sense of, kept rather than silently
+/// dropped when `skip_bad_records` is enabled (see [`LogParser::parse`]) —
+/// CLAUDE.md's "no silent data manipulation" principle applies just as much
+/// to what a lenient parse leaves out as to what it keeps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkippedRecord {
+    /// A parser-specific description of where the skip happened: a line
+    /// number (text_config), a record index (evtx), an entry index or
+    /// `.tracev3` filename (aul), or a byte offset (journald). Free text,
+    /// not a structured position — the four parsers have genuinely
+    /// different natural units, and forcing one shared shape on all of them
+    /// would either lose precision or invent a unit some parsers don't have.
+    pub location: String,
+    pub reason: String,
+}
+
 /// Implemented by every concrete parser (text-config, EVTX, AUL, journald).
 ///
 /// `parse` returns [`ParsedRecord`]s rather than [`LogEntry`]s on purpose:
@@ -74,9 +90,26 @@ pub struct StreamingProgress<'a> {
 /// `: Sync` so a `&dyn LogParser` can be shared with the parser worker
 /// threads `app.rs::run_load` spawns for a multi-file folder load — every
 /// implementor here is a stateless unit struct, so this costs nothing.
+///
+/// `skip_bad_records`: `false` (the default a fresh load always starts
+/// from) must behave exactly as if this parameter didn't exist — the first
+/// bad record still aborts the whole file with an `Err`, byte-for-byte the
+/// same as before this parameter was added. `true` is the opt-in, per-load
+/// analyst choice (`app.rs`'s "Skip bad records instead of failing"
+/// checkbox): a bad record is recorded as a [`SkippedRecord`] instead of
+/// aborting, and parsing continues with whatever comes next. Every
+/// implementor must actually honor this, not just accept and ignore the
+/// parameter — the whole point is that a corrupted-but-mostly-good file
+/// still yields its good entries instead of nothing at all, while the skip
+/// itself stays fully visible (count and reason) rather than a silent drop.
 pub trait LogParser: Sync {
     fn sourcetype(&self) -> &str;
-    fn parse(&self, path: &Path, config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>>;
+    fn parse(
+        &self,
+        path: &Path,
+        config: &ParserConfig,
+        skip_bad_records: bool,
+    ) -> anyhow::Result<(Vec<ParsedRecord>, Vec<SkippedRecord>)>;
 
     /// Streams parsed records to `sink` one at a time instead of collecting
     /// them all into memory first. The default implementation just calls
@@ -102,17 +135,22 @@ pub trait LogParser: Sync {
     /// the one point where AUL's total *is* already known, a side effect
     /// of resolving everything before the first row reaches `sink` (see
     /// above).
+    ///
+    /// Returns whatever [`SkippedRecord`]s accumulated during this parse —
+    /// always empty when `skip_bad_records` is `false`.
     fn parse_streaming(
         &self,
         path: &Path,
         config: &ParserConfig,
         sink: &mut dyn FnMut(ParsedRecord) -> anyhow::Result<()>,
         _progress: &mut StreamingProgress,
-    ) -> anyhow::Result<()> {
-        for record in self.parse(path, config)? {
+        skip_bad_records: bool,
+    ) -> anyhow::Result<Vec<SkippedRecord>> {
+        let (records, skipped) = self.parse(path, config, skip_bad_records)?;
+        for record in records {
             sink(record)?;
         }
-        Ok(())
+        Ok(skipped)
     }
 }
 
@@ -125,12 +163,13 @@ pub fn parse_source(
     parser: &dyn LogParser,
     path: &Path,
     config: &ParserConfig,
-) -> anyhow::Result<Vec<LogEntry>> {
+    skip_bad_records: bool,
+) -> anyhow::Result<(Vec<LogEntry>, Vec<SkippedRecord>)> {
     let source_file_id = SourceFileId::new_random();
-    let records = parser.parse(path, config)?;
+    let (records, skipped) = parser.parse(path, config, skip_bad_records)?;
 
     let mut sequence_counter = SequenceCounter::new();
-    Ok(records
+    let entries = records
         .into_iter()
         .map(|record| LogEntry {
             event_id: EventId {
@@ -143,26 +182,29 @@ pub fn parse_source(
             raw: record.raw,
             fields: record.fields,
         })
-        .collect())
+        .collect();
+    Ok((entries, skipped))
 }
 
 /// Streaming counterpart to [`parse_source`]: hands each [`LogEntry`] to
 /// `sink` as soon as its [`EventId`] is assigned, rather than collecting a
 /// `Vec<LogEntry>` first. Returns the [`SourceFileId`] assigned for this
 /// parse run (generated up front, independent of how many records — if
-/// any — `sink` ends up seeing), so callers can still record a `sources`
-/// row without needing to hold onto a first entry.
+/// any — `sink` ends up seeing) plus whatever [`SkippedRecord`]s
+/// accumulated, so callers can still record a `sources` row and a skip
+/// count without needing to hold onto a first entry.
 pub fn parse_source_streaming(
     parser: &dyn LogParser,
     path: &Path,
     config: &ParserConfig,
     mut sink: impl FnMut(LogEntry) -> anyhow::Result<()>,
     progress: &mut StreamingProgress,
-) -> anyhow::Result<SourceFileId> {
+    skip_bad_records: bool,
+) -> anyhow::Result<(SourceFileId, Vec<SkippedRecord>)> {
     let source_file_id = SourceFileId::new_random();
     let mut sequence_counter = SequenceCounter::new();
 
-    parser.parse_streaming(
+    let skipped = parser.parse_streaming(
         path,
         config,
         &mut |record| {
@@ -179,9 +221,10 @@ pub fn parse_source_streaming(
             })
         },
         progress,
+        skip_bad_records,
     )?;
 
-    Ok(source_file_id)
+    Ok((source_file_id, skipped))
 }
 
 #[cfg(test)]
@@ -200,8 +243,13 @@ mod tests {
             "dummy"
         }
 
-        fn parse(&self, _path: &Path, _config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>> {
-            Ok((0..self.record_count)
+        fn parse(
+            &self,
+            _path: &Path,
+            _config: &ParserConfig,
+            _skip_bad_records: bool,
+        ) -> anyhow::Result<(Vec<ParsedRecord>, Vec<SkippedRecord>)> {
+            let records = (0..self.record_count)
                 .map(|i| ParsedRecord {
                     timestamp_utc: Utc::now(),
                     level: None,
@@ -209,7 +257,8 @@ mod tests {
                     raw: format!("raw entry {i}"),
                     fields: serde_json::Value::Null,
                 })
-                .collect())
+                .collect();
+            Ok((records, Vec::new()))
         }
     }
 
@@ -220,8 +269,13 @@ mod tests {
             "progress-dummy"
         }
 
-        fn parse(&self, _path: &Path, _config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>> {
-            Ok(Vec::new())
+        fn parse(
+            &self,
+            _path: &Path,
+            _config: &ParserConfig,
+            _skip_bad_records: bool,
+        ) -> anyhow::Result<(Vec<ParsedRecord>, Vec<SkippedRecord>)> {
+            Ok((Vec::new(), Vec::new()))
         }
 
         fn parse_streaming(
@@ -230,7 +284,8 @@ mod tests {
             _config: &ParserConfig,
             sink: &mut dyn FnMut(ParsedRecord) -> anyhow::Result<()>,
             progress: &mut StreamingProgress,
-        ) -> anyhow::Result<()> {
+            _skip_bad_records: bool,
+        ) -> anyhow::Result<Vec<SkippedRecord>> {
             (progress.on_bytes)(10);
             (progress.on_total_known)(1);
             sink(ParsedRecord {
@@ -241,7 +296,7 @@ mod tests {
                 fields: serde_json::Value::Null,
             })?;
             (progress.on_bytes)(20);
-            Ok(())
+            Ok(Vec::new())
         }
     }
 
@@ -261,6 +316,7 @@ mod tests {
                 on_bytes: &mut |delta| bytes_calls.push(delta),
                 on_total_known: &mut |total| total_calls.push(total),
             },
+            false,
         )
         .unwrap();
 
@@ -294,8 +350,9 @@ mod tests {
         let parser = DummyParser { record_count: 3 };
         let config = dummy_config();
 
-        let entries = parse_source(&parser, &path, &config).unwrap();
+        let (entries, skipped) = parse_source(&parser, &path, &config, false).unwrap();
 
+        assert!(skipped.is_empty());
         assert_eq!(entries.len(), 3);
         let source_file_id = entries[0].event_id.source_file_id;
         for entry in &entries {
@@ -315,7 +372,7 @@ mod tests {
         let config = dummy_config();
 
         let mut streamed = Vec::new();
-        let source_file_id = parse_source_streaming(
+        let (source_file_id, skipped) = parse_source_streaming(
             &parser,
             &path,
             &config,
@@ -327,9 +384,11 @@ mod tests {
                 on_bytes: &mut |_| {},
                 on_total_known: &mut |_| {},
             },
+            false,
         )
         .unwrap();
 
+        assert!(skipped.is_empty());
         assert_eq!(streamed.len(), 3);
         for entry in &streamed {
             assert_eq!(entry.event_id.source_file_id, source_file_id);
@@ -348,7 +407,7 @@ mod tests {
         let config = dummy_config();
 
         let mut seen = Vec::new();
-        parser
+        let skipped = parser
             .parse_streaming(
                 &path,
                 &config,
@@ -360,9 +419,11 @@ mod tests {
                     on_bytes: &mut |_| {},
                     on_total_known: &mut |_| {},
                 },
+                false,
             )
             .unwrap();
 
+        assert!(skipped.is_empty());
         assert_eq!(
             seen,
             vec![

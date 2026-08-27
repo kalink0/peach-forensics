@@ -6,7 +6,7 @@ use evtx::{EvtxParser as EvtxCrateParser, ParserSettings, SerializedEvtxRecord};
 
 use crate::model::log_entry::ParsedRecord;
 use crate::parsers::evtx_templates;
-use crate::parsers::{LogParser, ParserConfig};
+use crate::parsers::{LogParser, ParserConfig, SkippedRecord};
 
 /// Wraps the `evtx` crate to parse Windows Event Log (`.evtx`) files.
 ///
@@ -53,19 +53,25 @@ use crate::parsers::{LogParser, ParserConfig};
 /// `_attributes` sibling key, just addressed differently; see
 /// `extracted_field_sql`'s doc comment for the exact paths this affects.
 ///
-/// A single unparseable record aborts the whole parse with context (which
-/// record index), consistent with the text and AUL parsers — the crate's
-/// per-record `Result` carries no partial data on error (not even a
-/// timestamp), so there's nothing to represent as a visible-but-broken
-/// timeline entry the way AUL's oversize-string failures can be. A
-/// per-source opt-in "skip and log bad records" mode would need a shared
-/// change to `LogParser::parse`'s return shape, not a one-off here, so it
-/// isn't built yet.
+/// A single unparseable record aborts the whole parse by default —
+/// `skip_bad_records` opts into recording it as a [`SkippedRecord`] (by
+/// record index; the crate's per-record `Result` carries no partial data on
+/// error, not even a timestamp, so there's nothing more specific to point
+/// at) and continuing instead. Safe to do unconditionally: the `evtx`
+/// crate's own iterator already advances past a record regardless of
+/// whether converting it here succeeds, so there's no resync concern the
+/// way there is for journald's structural corruption.
 ///
 /// Testing note: like `aul.rs`, this module's tests exercise the
 /// mapping/conversion logic against hand-built records, not a real
 /// `.evtx` file — the binary chunk/record parsing itself is already
-/// covered by the `evtx` crate's own test suite.
+/// covered by the `evtx` crate's own test suite. For the same reason, the
+/// `skip_bad_records` loop in [`LogParser::parse`] below isn't separately
+/// fixture-tested here either — there's no real `.evtx` file in this
+/// repo's test fixtures to make one record in it fail on purpose, and the
+/// loop's shape (catch a per-record error, record a [`SkippedRecord`],
+/// continue) is identical to the already-tested pattern in
+/// `text_config.rs` and journald.rs's per-entry case.
 pub struct EvtxFileParser;
 
 impl LogParser for EvtxFileParser {
@@ -73,19 +79,32 @@ impl LogParser for EvtxFileParser {
         "evtx"
     }
 
-    fn parse(&self, path: &Path, _config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>> {
+    fn parse(
+        &self,
+        path: &Path,
+        _config: &ParserConfig,
+        skip_bad_records: bool,
+    ) -> anyhow::Result<(Vec<ParsedRecord>, Vec<SkippedRecord>)> {
         let mut parser = EvtxCrateParser::from_path(path)
             .with_context(|| format!("failed to open EVTX file {}", path.display()))?
             .with_configuration(ParserSettings::new().separate_json_attributes(true));
 
-        parser
-            .records_json_value()
-            .enumerate()
-            .map(|(index, record)| {
-                let record = record.with_context(|| format!("record {index}: failed to parse"))?;
-                to_parsed_record(record)
-            })
-            .collect()
+        let mut records = Vec::new();
+        let mut skipped = Vec::new();
+        for (index, record) in parser.records_json_value().enumerate() {
+            let parsed = record
+                .with_context(|| format!("record {index}: failed to parse"))
+                .and_then(to_parsed_record);
+            match parsed {
+                Ok(record) => records.push(record),
+                Err(err) if skip_bad_records => skipped.push(SkippedRecord {
+                    location: format!("record {index}"),
+                    reason: format!("{err:#}"),
+                }),
+                Err(err) => return Err(err),
+            }
+        }
+        Ok((records, skipped))
     }
 }
 

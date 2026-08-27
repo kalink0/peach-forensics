@@ -188,6 +188,14 @@ struct LoadSummary {
     /// files chosen at once). Filled in by `run_sequential`/`run_parallel`
     /// as each file finishes; `run_load` doesn't need to touch it.
     per_file_inserted: std::collections::BTreeMap<String, usize>,
+    /// How many records were skipped (under "skip bad records" mode)
+    /// per successfully-loaded file — mirrors `per_file_inserted`'s own
+    /// path-keyed shape, filled in the same way. A file absent here (but
+    /// present in `per_file_inserted`) skipped nothing.
+    per_file_records_skipped: std::collections::BTreeMap<String, usize>,
+    /// Sum of `per_file_records_skipped`'s values — this load's total
+    /// records skipped, across every file.
+    records_skipped: usize,
     /// `import_tags` counts for *this load's* files only, grouped by
     /// `rule_name` — filled in by `run_load` itself (a single follow-up
     /// query after `run_sequential`/`run_parallel` returns, scoped to
@@ -245,6 +253,10 @@ enum LoadState {
         /// Files `collect_source_files` found but that produced no
         /// entries — empty for the common single-good-file case.
         skipped: Vec<SkippedFile>,
+        /// Records skipped instead of aborting their file, under "skip bad
+        /// records" mode — `0` when that checkbox was off (the common
+        /// case), regardless of whether anything would have been skippable.
+        records_skipped: usize,
         /// Set when the analyst clicked "Abort" mid-load — `inserted`/
         /// `tags_applied`/`skipped` above are still exactly what actually
         /// happened, just less of it than a full run would have produced.
@@ -316,6 +328,11 @@ pub struct PeachApp {
     source_kind: SourceKind,
     source_path: Option<PathBuf>,
     parser_config_path: Option<PathBuf>,
+    /// "Skip bad records instead of failing" — per-load, off by default
+    /// (see `LoadSettings::skip_bad_records`'s doc comment). A plain
+    /// checkbox next to "Load", not persisted across loads or sessions:
+    /// each load is its own explicit choice.
+    skip_bad_records: bool,
     rule_paths: Vec<PathBuf>,
     /// Which built-in rules (from either the AUL or EVTX pack, keyed by
     /// `rule.name`) are applied alongside `rule_paths` on every load/re-tag
@@ -560,6 +577,7 @@ impl PeachApp {
             source_kind,
             source_path,
             parser_config_path: None,
+            skip_bad_records: false,
             // Every `*.toml` already sitting in the configured rules
             // directory applies from the start, same as the built-in packs
             // — a rule created via "Tag all matching (advanced)..." in a
@@ -866,6 +884,7 @@ impl PeachApp {
         let load_threads = self.settings.effective_load_threads();
         let default_source_timezone = self.settings.default_source_timezone.clone();
         let session_sqlite_path = self.session_paths.sqlite_path.clone();
+        let skip_bad_records = self.skip_bad_records;
 
         std::thread::spawn(move || {
             let progress_tx = tx.clone();
@@ -883,6 +902,7 @@ impl PeachApp {
                 LoadSettings {
                     thread_count: load_threads,
                     default_source_timezone,
+                    skip_bad_records,
                 },
                 LoadControl {
                     progress_tx: &progress_tx,
@@ -895,6 +915,7 @@ impl PeachApp {
                 started_at,
                 chrono::Utc::now().timestamp(),
                 &load_result,
+                skip_bad_records,
             );
             let result = load_result
                 .map(|summary| (summary, start.elapsed()))
@@ -1692,6 +1713,7 @@ impl eframe::App for PeachApp {
                                     tags_applied: summary.tags_applied,
                                     elapsed,
                                     skipped: summary.skipped,
+                                    records_skipped: summary.records_skipped,
                                     cancelled,
                                 };
                                 // Releases the multi-GB DuckDB Appender
@@ -2490,6 +2512,20 @@ impl eframe::App for PeachApp {
                 && self.source_path.is_some()
                 && (self.source_kind != SourceKind::Text || self.parser_config_path.is_some());
 
+            ui.add_enabled(
+                !matches!(self.load_state, LoadState::Loading { .. }),
+                egui::Checkbox::new(
+                    &mut self.skip_bad_records,
+                    "Skip bad records instead of failing",
+                ),
+            )
+            .on_hover_text(
+                "If a line/record can't be parsed, skip it and keep going instead of aborting \
+                 the whole file. Off by default — a bad record normally stops the file's load \
+                 entirely, so nothing is ever silently incomplete. When on, how many records \
+                 were skipped (and why) is recorded in the Activity Log, per file.",
+            );
+
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(can_load, egui::Button::new("Load"))
@@ -2567,6 +2603,7 @@ impl eframe::App for PeachApp {
                         tags_applied,
                         elapsed,
                         skipped,
+                        records_skipped,
                         cancelled,
                     } => {
                         ui.label(format!(
@@ -2575,6 +2612,17 @@ impl eframe::App for PeachApp {
                         ));
                         if *cancelled {
                             ui.colored_label(egui::Color32::from_rgb(230, 160, 0), "Aborted");
+                        }
+                        if *records_skipped > 0 {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(230, 160, 0),
+                                format!(
+                                    "{records_skipped} record(s) skipped (skip bad records was on)"
+                                ),
+                            )
+                            .on_hover_text(
+                                "See Activity Log for the per-file breakdown and reasons.",
+                            );
                         }
                         if !skipped.is_empty() {
                             ui.colored_label(
@@ -2793,6 +2841,11 @@ struct LoadSettings {
     /// `parsers::text_config`'s own doc comment on why only text sources
     /// ever need this at all.
     default_source_timezone: Option<String>,
+    /// "Skip bad records instead of failing" — the analyst's per-load,
+    /// off-by-default choice (see `PeachApp::skip_bad_records`). `false`
+    /// preserves every parser's original behavior exactly: the first bad
+    /// record still aborts the whole file.
+    skip_bad_records: bool,
 }
 
 fn run_load(
@@ -2864,6 +2917,7 @@ fn run_load(
         rules: &rules,
         parser_config_path,
         cancel: Arc::clone(&control.cancel),
+        skip_bad_records: settings.skip_bad_records,
     };
 
     let mut summary = if files.len() <= 1 {
@@ -2913,6 +2967,8 @@ struct LoadContext<'a> {
     /// (not a plain `bool`) because it has to be visible from both this
     /// background load thread and the UI thread's click handler at once.
     cancel: Arc<AtomicBool>,
+    /// See [`LoadSettings::skip_bad_records`].
+    skip_bad_records: bool,
 }
 
 /// The single-parse-unit path — always used for AUL (its `.logarchive` is
@@ -2934,6 +2990,8 @@ fn run_sequential(
         loaded_sources: Vec::new(),
         skipped: Vec::new(),
         per_file_inserted: std::collections::BTreeMap::new(),
+        per_file_records_skipped: std::collections::BTreeMap::new(),
+        records_skipped: 0,
         tags_by_rule: HashMap::new(),
         cancelled: false,
     };
@@ -2957,11 +3015,22 @@ fn run_sequential(
             bytes_total,
             progress_tx,
         ) {
-            Ok(Some((tags_applied, loaded_source, inserted_this_file))) => {
+            Ok(Some((
+                tags_applied,
+                loaded_source,
+                inserted_this_file,
+                records_skipped_this_file,
+            ))) => {
                 summary.tags_applied += tags_applied;
+                summary.records_skipped += records_skipped_this_file;
                 summary
                     .per_file_inserted
                     .insert(loaded_source.path.clone(), inserted_this_file);
+                if records_skipped_this_file > 0 {
+                    summary
+                        .per_file_records_skipped
+                        .insert(loaded_source.path.clone(), records_skipped_this_file);
+                }
                 summary.loaded_sources.push(loaded_source);
             }
             Ok(None) => summary.skipped.push(SkippedFile {
@@ -3014,7 +3083,9 @@ fn run_sequential(
 /// zero entries: still worth a note in the skip report ([`run_load`]), but
 /// not a parse failure, so it's kept distinct from `Err`. On `Ok(Some(...))`,
 /// the third element is this file's own insert count (not the running
-/// `total_inserted`) — [`LoadSummary::per_file_inserted`]'s source.
+/// `total_inserted`) — [`LoadSummary::per_file_inserted`]'s source — and the
+/// fourth is how many records `ctx.skip_bad_records` let it skip instead of
+/// aborting — [`LoadSummary::per_file_records_skipped`]'s source.
 ///
 /// A mid-file [`LoadCancelled`] (the "Abort" button, `ctx.cancel`) also
 /// surfaces here as `Ok(Some(...))`/`Ok(None)` rather than `Err` — whatever
@@ -3030,7 +3101,7 @@ fn load_one_file(
     bytes_done_before: u64,
     bytes_total: u64,
     progress_tx: &mpsc::Sender<LoadOutcome>,
-) -> anyhow::Result<Option<(usize, LoadedSource, usize)>> {
+) -> anyhow::Result<Option<(usize, LoadedSource, usize, usize)>> {
     let mut batch: Vec<LogEntry> = Vec::with_capacity(LOAD_BATCH_SIZE);
     let mut inserted_this_file = 0usize;
     let mut tags_applied = 0usize;
@@ -3100,16 +3171,21 @@ fn load_one_file(
                 send_progress(inserted_cell.get(), bytes_done_cell.get(), Some(total));
             },
         },
+        ctx.skip_bad_records,
     );
     *total_inserted = inserted_cell.get();
 
     // A batch already flushed above (right before the cancel check that
     // fired) leaves nothing in `batch` — this only ever has something to do
     // for a normal end-of-file remainder under `LOAD_BATCH_SIZE`.
-    let source_file_id = match stream_result {
-        Ok(id) => id,
+    // A cancelled stream reports no `SkippedRecord`s of its own (the `Err`
+    // path carries none) — an aborted load's skip accounting just stays at
+    // 0, a minor gap next to the much bigger fact that the file itself was
+    // cut short.
+    let (source_file_id, records_skipped) = match stream_result {
+        Ok((id, skipped)) => (id, skipped.len()),
         Err(err) if err.is::<LoadCancelled>() => match captured_source_file_id.get() {
-            Some(id) if inserted_this_file > 0 => id,
+            Some(id) if inserted_this_file > 0 => (id, 0),
             _ => return Ok(None),
         },
         Err(err) => return Err(err),
@@ -3127,7 +3203,12 @@ fn load_one_file(
         parser_config_path: ctx.parser_config_path.map(|p| p.display().to_string()),
         source_file_id: source_file_id.to_string(),
     };
-    Ok(Some((tags_applied, loaded_source, inserted_this_file)))
+    Ok(Some((
+        tags_applied,
+        loaded_source,
+        inserted_this_file,
+        records_skipped,
+    )))
 }
 
 /// One worker's report back to [`run_parallel`]'s writer loop.
@@ -3146,6 +3227,9 @@ enum ParseEvent {
         file_path: PathBuf,
         bytes: u64,
         source_file_id: Option<SourceFileId>,
+        /// See `load_one_file`'s doc comment on its own fourth return
+        /// value — same "0 when `source_file_id` is `None`" scope.
+        records_skipped: usize,
     },
     FileFailed {
         file_path: PathBuf,
@@ -3198,6 +3282,8 @@ fn run_parallel(
         loaded_sources: Vec::new(),
         skipped: Vec::new(),
         per_file_inserted: std::collections::BTreeMap::new(),
+        per_file_records_skipped: std::collections::BTreeMap::new(),
+        records_skipped: 0,
         tags_by_rule: HashMap::new(),
         cancelled: false,
     };
@@ -3257,6 +3343,7 @@ fn run_parallel(
                     file_path,
                     bytes,
                     source_file_id,
+                    records_skipped,
                 } => {
                     bytes_done += bytes;
                     match source_file_id {
@@ -3271,6 +3358,12 @@ fn run_parallel(
                                 file_path.display().to_string(),
                                 inserted_by_source_id.get(&id).copied().unwrap_or(0),
                             );
+                            summary.records_skipped += records_skipped;
+                            if records_skipped > 0 {
+                                summary
+                                    .per_file_records_skipped
+                                    .insert(file_path.display().to_string(), records_skipped);
+                            }
                             summary.loaded_sources.push(LoadedSource {
                                 path: file_path.display().to_string(),
                                 sourcetype: ctx.sourcetype.to_string(),
@@ -3371,11 +3464,14 @@ fn parse_file_for_worker(ctx: &LoadContext, file_path: &Path, tx: &mpsc::SyncSen
             on_bytes: &mut |_| {},
             on_total_known: &mut |_| {},
         },
+        ctx.skip_bad_records,
     );
 
-    let source_file_id = match result {
-        Ok(id) => Some(id),
-        Err(err) if err.is::<LoadCancelled>() => captured_source_file_id.get(),
+    // A cancelled stream reports no `SkippedRecord`s of its own, same
+    // scope decision as `load_one_file`.
+    let (source_file_id, records_skipped) = match result {
+        Ok((id, skipped)) => (Some(id), skipped.len()),
+        Err(err) if err.is::<LoadCancelled>() => (captured_source_file_id.get(), 0),
         Err(err) => {
             let _ = tx.send(ParseEvent::FileFailed {
                 file_path: file_path.to_path_buf(),
@@ -3390,10 +3486,23 @@ fn parse_file_for_worker(ctx: &LoadContext, file_path: &Path, tx: &mpsc::SyncSen
         let _ = tx.send(ParseEvent::Batch { entries: batch });
     }
     let source_file_id = source_file_id.filter(|_| inserted > 0);
+    // A file that produced zero entries reports no records-skipped count
+    // either, even under skip mode — it already surfaces via the existing
+    // "no matching entries" `SkippedFile` reason instead (see
+    // `run_parallel`'s `ParseEvent::FileDone` handling); a sub-count on top
+    // of that would need `load_one_file`'s zero-entry path reworked too,
+    // which isn't worth it for what both cases already boil down to
+    // "nothing usable came out of this file."
+    let records_skipped = if source_file_id.is_some() {
+        records_skipped
+    } else {
+        0
+    };
     let _ = tx.send(ParseEvent::FileDone {
         file_path: file_path.to_path_buf(),
         bytes,
         source_file_id,
+        records_skipped,
     });
 }
 
@@ -3458,6 +3567,7 @@ fn record_load_activity_entry(
     started_at: i64,
     finished_at: i64,
     result: &anyhow::Result<LoadSummary>,
+    skip_bad_records_enabled: bool,
 ) {
     let Ok(conn) = persist::open_session_db(sqlite_path) else {
         eprintln!("peach: failed to open session DB to record activity log entry");
@@ -3495,9 +3605,15 @@ fn record_load_activity_entry(
                 .map(|(path, inserted)| persist::ActivityFileCount {
                     path: path.clone(),
                     inserted: *inserted,
+                    records_skipped: summary
+                        .per_file_records_skipped
+                        .get(path)
+                        .copied()
+                        .unwrap_or(0),
                 })
                 .collect(),
             tags_by_rule: rule_counts_to_activity_counts(&summary.tags_by_rule),
+            skip_bad_records_enabled,
         },
         Err(err) => persist::NewActivityLogEntry {
             operation: "load".to_string(),
@@ -3512,6 +3628,7 @@ fn record_load_activity_entry(
             skipped: Vec::new(),
             per_file: Vec::new(),
             tags_by_rule: Vec::new(),
+            skip_bad_records_enabled,
         },
     };
     if let Err(err) = persist::insert_activity_log_entry(&conn, entry) {
@@ -3565,6 +3682,7 @@ fn record_retag_activity_entry(
             skipped: Vec::new(),
             per_file: Vec::new(),
             tags_by_rule: rule_counts_to_activity_counts(&summary.tags_by_rule),
+            skip_bad_records_enabled: false,
         },
         Err(err) => persist::NewActivityLogEntry {
             operation: "retag".to_string(),
@@ -3579,6 +3697,7 @@ fn record_retag_activity_entry(
             skipped: Vec::new(),
             per_file: Vec::new(),
             tags_by_rule: Vec::new(),
+            skip_bad_records_enabled: false,
         },
     };
     if let Err(err) = persist::insert_activity_log_entry(&conn, entry) {
@@ -3714,6 +3833,7 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::model::log_entry::ParsedRecord;
+    use crate::parsers::SkippedRecord;
     use chrono::Utc;
 
     /// Catches exactly the failure mode the embedded icon asset is prone
@@ -4257,6 +4377,7 @@ mod tests {
             LoadSettings {
                 thread_count: 2, // 3 files > 1, so this exercises run_parallel
                 default_source_timezone: None,
+                skip_bad_records: false,
             },
             LoadControl {
                 progress_tx: &tx,
@@ -4286,6 +4407,107 @@ mod tests {
         assert_eq!(summary.per_file_inserted.get(&b_log_path), Some(&2));
 
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// End-to-end regression test for "skip bad records" through the real
+    /// multi-file (`run_parallel`) path: a file with one bad line among
+    /// good ones must keep its good entries and land in
+    /// `records_skipped`/`per_file_records_skipped` instead of `skipped`
+    /// (which stays empty — no *whole file* failed).
+    #[test]
+    fn run_load_with_skip_bad_records_keeps_good_lines_and_tallies_skipped_records() {
+        let base = temp_test_dir("run-load-skip-bad-records");
+        let logs_dir = base.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(
+            logs_dir.join("a.log"),
+            "2026-07-28T12:00:00+0200 ERROR first\n\
+             this line matches nothing\n\
+             2026-07-28T12:00:02+0200 ERROR second\n",
+        )
+        .unwrap();
+        std::fs::write(
+            logs_dir.join("b.log"),
+            "2026-07-28T12:05:00+0200 INFO all fine\n",
+        )
+        .unwrap();
+
+        let config_path = base.join("config.toml");
+        std::fs::write(&config_path, text_parser_config()).unwrap();
+
+        let db_path = base.join("test.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        let (tx, _rx) = mpsc::channel();
+
+        let summary = run_load(
+            SourceKind::Text,
+            &logs_dir,
+            Some(&config_path),
+            RuleSelection {
+                paths: &[],
+                enabled_builtin_rules: &no_builtin_rules(),
+            },
+            conn,
+            LoadSettings {
+                thread_count: 2, // 2 files > 1, so this exercises run_parallel
+                default_source_timezone: None,
+                skip_bad_records: true,
+            },
+            LoadControl {
+                progress_tx: &tx,
+                cancel: no_cancel(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.inserted, 3); // 2 good from a.log + 1 from b.log
+        assert!(
+            summary.skipped.is_empty(),
+            "no whole file should be marked skipped — a.log still loaded most of itself"
+        );
+        assert_eq!(summary.records_skipped, 1);
+        let a_log_path = logs_dir.join("a.log").display().to_string();
+        assert_eq!(summary.per_file_records_skipped.get(&a_log_path), Some(&1));
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// `record_load_activity_entry` must persist both the per-file skip
+    /// counts and whether skip mode was even on for this load — the
+    /// analyst's choice to tolerate corruption is itself forensically
+    /// relevant, not just the resulting numbers.
+    #[test]
+    fn record_load_activity_entry_persists_skip_bad_records_details() {
+        let sqlite_path = temp_test_dir("record-load-activity-skip").join("session.sqlite");
+        let summary = LoadSummary {
+            inserted: 5,
+            tags_applied: 0,
+            loaded_sources: Vec::new(),
+            skipped: Vec::new(),
+            per_file_inserted: std::collections::BTreeMap::from([("a.log".to_string(), 5)]),
+            per_file_records_skipped: std::collections::BTreeMap::from([("a.log".to_string(), 2)]),
+            records_skipped: 2,
+            tags_by_rule: HashMap::new(),
+            cancelled: false,
+        };
+
+        record_load_activity_entry(
+            &sqlite_path,
+            Path::new("/evidence/a.log"),
+            1_753_704_000,
+            1_753_704_010,
+            &Ok(summary),
+            true,
+        );
+
+        let conn = persist::open_session_db(&sqlite_path).unwrap();
+        let entries = persist::all_activity_log_entries(&conn).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].skip_bad_records_enabled);
+        assert_eq!(entries[0].per_file.len(), 1);
+        assert_eq!(entries[0].per_file[0].records_skipped, 2);
+
+        std::fs::remove_dir_all(sqlite_path.parent().unwrap()).unwrap();
     }
 
     /// `LoadSummary::tags_by_rule` is computed by `run_load` itself (a
@@ -4327,6 +4549,7 @@ mod tests {
             LoadSettings {
                 thread_count: 1,
                 default_source_timezone: None,
+                skip_bad_records: false,
             },
             LoadControl {
                 progress_tx: &tx,
@@ -4384,6 +4607,7 @@ mod tests {
             LoadSettings {
                 thread_count: 4, // irrelevant with a single file — must still behave correctly
                 default_source_timezone: None,
+                skip_bad_records: false,
             },
             LoadControl {
                 progress_tx: &tx,
@@ -4430,6 +4654,7 @@ mod tests {
             LoadSettings {
                 thread_count: 1,
                 default_source_timezone: None,
+                skip_bad_records: false,
             },
             LoadControl {
                 progress_tx: &tx,
@@ -4470,6 +4695,7 @@ mod tests {
             LoadSettings {
                 thread_count: 2, // 2 files > 1, exercises run_parallel
                 default_source_timezone: None,
+                skip_bad_records: false,
             },
             LoadControl {
                 progress_tx: &tx,
@@ -4530,6 +4756,7 @@ mod tests {
             LoadSettings {
                 thread_count: 1,
                 default_source_timezone: None,
+                skip_bad_records: false,
             },
             LoadControl {
                 progress_tx: &tx,
@@ -4563,8 +4790,13 @@ mod tests {
             "test-total-known"
         }
 
-        fn parse(&self, _path: &Path, _config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>> {
-            Ok(Vec::new())
+        fn parse(
+            &self,
+            _path: &Path,
+            _config: &ParserConfig,
+            _skip_bad_records: bool,
+        ) -> anyhow::Result<(Vec<ParsedRecord>, Vec<SkippedRecord>)> {
+            Ok((Vec::new(), Vec::new()))
         }
 
         fn parse_streaming(
@@ -4573,7 +4805,8 @@ mod tests {
             _config: &ParserConfig,
             sink: &mut dyn FnMut(ParsedRecord) -> anyhow::Result<()>,
             progress: &mut StreamingProgress,
-        ) -> anyhow::Result<()> {
+            _skip_bad_records: bool,
+        ) -> anyhow::Result<Vec<SkippedRecord>> {
             (progress.on_total_known)(2);
             for message in ["first", "second"] {
                 sink(ParsedRecord {
@@ -4584,7 +4817,7 @@ mod tests {
                     fields: serde_json::Value::Null,
                 })?;
             }
-            Ok(())
+            Ok(Vec::new())
         }
     }
 
@@ -4611,6 +4844,7 @@ mod tests {
             rules: &[],
             parser_config_path: None,
             cancel: no_cancel(),
+            skip_bad_records: false,
         };
         let file_path = base.join("fake-source");
         std::fs::write(&file_path, b"unused").unwrap();
@@ -4677,6 +4911,7 @@ mod tests {
                 LoadSettings {
                     thread_count,
                     default_source_timezone: None,
+                    skip_bad_records: false,
                 },
                 LoadControl {
                     progress_tx: &tx,

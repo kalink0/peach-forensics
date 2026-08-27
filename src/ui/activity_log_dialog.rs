@@ -123,6 +123,9 @@ fn render_entry(ui: &mut egui::Ui, entry: &ActivityLogEntry) {
             format_utc(entry.started_at),
             format_utc(entry.finished_at)
         ));
+        if entry.skip_bad_records_enabled {
+            ui.weak("(skip bad records was on)");
+        }
     });
 
     if let Some(source_path) = &entry.source_path {
@@ -169,13 +172,30 @@ fn render_entry(ui: &mut egui::Ui, entry: &ActivityLogEntry) {
         }
     }
 
+    let total_records_skipped: usize = entry.per_file.iter().map(|f| f.records_skipped).sum();
+    if total_records_skipped > 0 {
+        ui.colored_label(
+            egui::Color32::from_rgb(230, 160, 0),
+            format!("{total_records_skipped} record(s) skipped instead of failing their file"),
+        );
+    }
+
     // Only worth a separate breakdown for a multi-file load — a single
     // file's count already duplicates the summary line above and the
-    // source path line, so showing it again here would be noise.
-    if entry.per_file.len() > 1 {
+    // source path line, so showing it again here would be noise. A skipped-
+    // records count is the exception: worth showing even for one file,
+    // since it's not duplicated anywhere else.
+    if entry.per_file.len() > 1 || total_records_skipped > 0 {
         ui.label("Per file:");
         for file in &entry.per_file {
-            ui.label(format!("  {}: {} entries", file.path, file.inserted));
+            if file.records_skipped > 0 {
+                ui.label(format!(
+                    "  {}: {} entries, {} skipped",
+                    file.path, file.inserted, file.records_skipped
+                ));
+            } else {
+                ui.label(format!("  {}: {} entries", file.path, file.inserted));
+            }
         }
     }
 
@@ -211,11 +231,13 @@ mod tests {
             per_file: vec![ActivityFileCount {
                 path: "/evidence/system.evtx".to_string(),
                 inserted: 1000,
+                records_skipped: 0,
             }],
             tags_by_rule: vec![ActivityRuleCount {
                 rule_name: "evtx_logon_success".to_string(),
                 count: 12,
             }],
+            skip_bad_records_enabled: false,
         }
     }
 

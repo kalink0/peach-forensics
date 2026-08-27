@@ -8,7 +8,7 @@ use macos_unifiedlogs::traits::FileProvider;
 use macos_unifiedlogs::unified_log::LogData;
 
 use crate::model::log_entry::ParsedRecord;
-use crate::parsers::{LogParser, ParserConfig, StreamingProgress};
+use crate::parsers::{LogParser, ParserConfig, SkippedRecord, StreamingProgress};
 
 mod raw_extraction_provider;
 use raw_extraction_provider::RawExtractionProvider;
@@ -63,9 +63,14 @@ impl LogParser for AulParser {
         "aul"
     }
 
-    fn parse(&self, path: &Path, config: &ParserConfig) -> anyhow::Result<Vec<ParsedRecord>> {
+    fn parse(
+        &self,
+        path: &Path,
+        config: &ParserConfig,
+        skip_bad_records: bool,
+    ) -> anyhow::Result<(Vec<ParsedRecord>, Vec<SkippedRecord>)> {
         let mut records = Vec::new();
-        self.parse_streaming(
+        let skipped = self.parse_streaming(
             path,
             config,
             &mut |record| {
@@ -76,8 +81,9 @@ impl LogParser for AulParser {
                 on_bytes: &mut |_| {},
                 on_total_known: &mut |_| {},
             },
+            skip_bad_records,
         )?;
-        Ok(records)
+        Ok((records, skipped))
     }
 
     /// Calls `progress.on_bytes` once per `.tracev3` file finished, not
@@ -110,7 +116,8 @@ impl LogParser for AulParser {
         _config: &ParserConfig,
         sink: &mut dyn FnMut(ParsedRecord) -> anyhow::Result<()>,
         progress: &mut StreamingProgress,
-    ) -> anyhow::Result<()> {
+        skip_bad_records: bool,
+    ) -> anyhow::Result<Vec<SkippedRecord>> {
         if !path.is_dir() {
             bail!(
                 "AUL source {} is not a directory (expected a .logarchive bundle)",
@@ -128,10 +135,26 @@ impl LogParser for AulParser {
         }
 
         let mut collected: Vec<(f64, String, usize, LogData)> = Vec::new();
+        let mut skipped = Vec::new();
         for mut file in tracev3_files {
             let source_path = file.source_path().to_string();
-            let unified_log_data = parse_log(file.reader(), &source_path)
-                .with_context(|| format!("failed to parse tracev3 file {source_path}"))?;
+            // A malformed `.tracev3` file within the archive — every other
+            // file in the `.logarchive` is independently readable, so skip
+            // mode just moves on to the next one rather than losing
+            // everything in the whole directory over one bad sub-file.
+            let unified_log_data = match parse_log(file.reader(), &source_path)
+                .with_context(|| format!("failed to parse tracev3 file {source_path}"))
+            {
+                Ok(data) => data,
+                Err(err) if skip_bad_records => {
+                    skipped.push(SkippedRecord {
+                        location: source_path.clone(),
+                        reason: format!("{err:#}"),
+                    });
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
 
             let (log_data, _unresolved_oversize) = build_log(
                 &unified_log_data,
@@ -150,9 +173,24 @@ impl LogParser for AulParser {
 
         (progress.on_total_known)(collected.len());
         for entry in order_entries(collected) {
-            sink(to_parsed_record(entry)?)?;
+            // Each `entry` already came out of a successfully-parsed
+            // tracev3 file above — a failure here is `to_parsed_record`'s
+            // own JSON-serialization step on one already-resolved entry,
+            // fully independent of every other entry, so it's always safe
+            // to skip and continue (unlike journald's structural case).
+            // `entry.time` is captured before the entry is consumed, since
+            // `to_parsed_record` takes it by value.
+            let time = entry.time;
+            match to_parsed_record(entry) {
+                Ok(record) => sink(record)?,
+                Err(err) if skip_bad_records => skipped.push(SkippedRecord {
+                    location: format!("entry at raw timestamp {time}"),
+                    reason: format!("{err:#}"),
+                }),
+                Err(err) => return Err(err),
+            }
         }
-        Ok(())
+        Ok(skipped)
     }
 }
 
@@ -480,10 +518,61 @@ mod tests {
         let config =
             ParserConfig::from_toml_str("[parser]\nname = \"aul\"\nsourcetype = \"aul\"\n")
                 .unwrap();
-        let result = AulParser.parse(&path, &config);
+        let result = AulParser.parse(&path, &config, false);
 
         assert!(result.is_err());
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// Regression test for the "skip bad records" invariant: `false` must
+    /// still hard-fail when a `.tracev3` file can't be parsed, exactly as
+    /// before this parameter existed. Real tracev3 binary parsing itself
+    /// isn't hand-buildable in a unit test (same reasoning as this module's
+    /// other tests, see its "Testing note") — garbage bytes are enough to
+    /// exercise the failure path regardless of what's actually inside.
+    #[test]
+    fn skip_bad_records_false_still_hard_fails_on_a_malformed_tracev3_file() {
+        let root = temp_test_dir("malformed-tracev3-skip-off");
+        std::fs::create_dir_all(root.join("Persist")).unwrap();
+        std::fs::create_dir_all(root.join("dsc")).unwrap();
+        std::fs::create_dir_all(root.join("00")).unwrap();
+        std::fs::write(
+            root.join("Persist").join("0000001.tracev3"),
+            b"not a real tracev3",
+        )
+        .unwrap();
+
+        let config =
+            ParserConfig::from_toml_str("[parser]\nname = \"aul\"\nsourcetype = \"aul\"\n")
+                .unwrap();
+        let result = AulParser.parse(&root, &config, false);
+
+        assert!(result.is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skip_bad_records_true_skips_a_malformed_tracev3_file_instead_of_failing() {
+        let root = temp_test_dir("malformed-tracev3-skip-on");
+        std::fs::create_dir_all(root.join("Persist")).unwrap();
+        std::fs::create_dir_all(root.join("dsc")).unwrap();
+        std::fs::create_dir_all(root.join("00")).unwrap();
+        std::fs::write(
+            root.join("Persist").join("0000001.tracev3"),
+            b"not a real tracev3",
+        )
+        .unwrap();
+
+        let config =
+            ParserConfig::from_toml_str("[parser]\nname = \"aul\"\nsourcetype = \"aul\"\n")
+                .unwrap();
+        let (records, skipped) = AulParser.parse(&root, &config, true).unwrap();
+
+        assert!(records.is_empty(), "the only tracev3 file was malformed");
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].location.ends_with(".tracev3"));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn temp_test_dir(name: &str) -> PathBuf {
