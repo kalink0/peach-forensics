@@ -559,6 +559,13 @@ display name that stopped being a useful way to find one again — "Manage
 sessions..." is the only path now, so the friendly name is always what you
 see.
 
+A session that arrived via **File → Import portable case...** (see
+[Portable Case](#portable-case) below) shows up in **Manage sessions...**
+like any other — it's a real, independent session, not a special mode.
+Its Activity Log carries an "Import" entry recording which session it came
+from, when, and under what filter, so that provenance is never just
+implicit.
+
 ## Activity Log
 
 **View → Activity Log...** shows every load and re-tag this session has run —
@@ -594,6 +601,73 @@ table — not necessarily UTC. It always
 carries its own offset (e.g. `2026-07-28 14:00:00.000 +02:00`), so the
 exported value stays unambiguous on its own even without knowing what
 Peach was configured to at export time.
+
+## Case Summary
+
+**View > Case Summary...** shows an at-a-glance breakdown of the whole
+loaded session: total entries, how many sources and sourcetypes, entries
+per source and per sourcetype, a level breakdown, tag coverage (tagged vs.
+untagged), the covered time range, and a daily-activity histogram — each
+count-based section shown as a small bar chart, colored the same way the
+timeline's Level/Tags columns already are. A real gap day (no events at
+all) still shows up as a zero-height bar rather than being silently
+skipped — a gap in coverage can be as meaningful as the events themselves.
+Per-source counts beyond the top 15 are collapsed into a "+N more" line for
+readability; nothing is actually left out of the underlying numbers.
+
+This same view also appears in two other places: as a preview before
+[Export portable case...](#portable-case) actually runs (scoped to the
+active search filter, so it shows exactly what's about to be bundled, with
+Cancel/Export... buttons instead of Close), and automatically right after a
+successful [Import portable case...](#portable-case), so you see the
+result immediately without an extra click.
+
+## Portable Case
+
+**File > Export portable case...** and **File > Import portable case...**
+hand a whole session (or a filtered subset of one) to another analyst as a
+single `.peachcase` file — a different tool from **Export (current
+filter)...** above, not a replacement for it:
+
+| | Export (current filter)... | Export portable case... |
+|---|---|---|
+| Format | CSV or JSON | `.peachcase` (a ZIP bundle) |
+| Contains `raw`/`fields` | No | Yes |
+| Contains tags and notes | Joined into text columns | Full analyst tags, notes, and activity log |
+| Opens as | A spreadsheet/text file | A brand-new Peach session |
+| Use it for | Sharing/reporting a view | Handing off a case for full review in Peach |
+
+Clicking **Export portable case...** first shows a [Case Summary](#case-summary)
+preview of exactly what will be bundled — confirm with **Export...** to
+pick a destination, or **Cancel** to back out without writing anything.
+
+Exporting bundles exactly what the timeline is currently showing — same
+rule as the row export: clear the search box first to bundle the whole
+session, or leave a filter active to bundle just the matching subset. A
+filtered export still includes every analyst tag and note from the *whole*
+session, even ones on entries the filter hides — an annotation you wrote
+never silently disappears just because of the filter used at export time.
+Referenced text-parser configs (for `text_config` sources like syslog or
+Apache/Nginx) are bundled as reference copies too, so the recipient can see
+exactly how a source was parsed.
+
+**`raw` never leaves the bundle** — every entry's original record/line
+travels byte-for-byte, unlike the row export.
+
+Importing always opens the bundle as a **new, independent session** — it
+never touches or merges into the session you're currently in. Evidence file
+paths recorded in the bundle are shown for reference only; Peach never
+tries to re-locate the original evidence on the importing machine (loading
+more evidence into an imported session works exactly like any other
+session — point Peach at the files again if you have access to them). A
+[Case Summary](#case-summary) of the freshly-imported session opens
+automatically so you immediately see what you received.
+
+A `.peachcase` file carries an integrity check (computed at export, verified
+at import) — a bundle that was corrupted or modified in transit is refused
+with a clear error rather than imported anyway. A bundle exported by a
+newer version of Peach than the one importing it is refused the same way,
+rather than risking a partial or wrong import.
 
 ## View and Help menus
 
@@ -639,3 +713,10 @@ this when the source itself came from a temp extraction or a decrypted copy, so
 Peach doesn't leave a second, unencrypted copy of that data sitting around after
 you're done. The session won't show up in "Manage sessions..." either, since it
 never lived in the persistent sessions directory to begin with.
+
+Exporting a [Portable Case](#portable-case) still works normally from an
+ephemeral session — it's the sanctioned way to hand review results to
+another analyst from this kind of run: the exported bundle holds only
+Peach's derived data (parsed entries, tags, notes), never the original
+evidence, so it doesn't recreate the unencrypted-copy problem
+`--ephemeral-session` exists to avoid.

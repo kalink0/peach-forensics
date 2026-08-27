@@ -99,6 +99,7 @@ fn render_entry(ui: &mut egui::Ui, entry: &ActivityLogEntry) {
         let operation_label = match entry.operation.as_str() {
             "load" => "Load",
             "retag" => "Re-tag",
+            "import" => "Import",
             other => other,
         };
         ui.strong(operation_label);
@@ -125,8 +126,15 @@ fn render_entry(ui: &mut egui::Ui, entry: &ActivityLogEntry) {
     });
 
     if let Some(source_path) = &entry.source_path {
-        let sourcetype = entry.sourcetype.as_deref().unwrap_or("?");
-        ui.label(format!("{source_path} ({sourcetype})"));
+        if entry.operation == "import" {
+            // `source_path` holds the portable case's `original_session_id`
+            // for an import entry, not an evidence file path — see
+            // `session::portable_case::import_portable_case`.
+            ui.label(format!("Imported from {source_path}"));
+        } else {
+            let sourcetype = entry.sourcetype.as_deref().unwrap_or("?");
+            ui.label(format!("{source_path} ({sourcetype})"));
+        }
     }
 
     if let Some(err) = &entry.error {

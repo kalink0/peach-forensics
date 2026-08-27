@@ -52,6 +52,64 @@ pub fn new_session_id() -> String {
         .to_string()
 }
 
+/// Mints a fresh, collision-safe session directory for a `portable_case`
+/// import — never reuses the bundle's original session id (see
+/// `session::portable_case`'s design notes: a portable case must never be
+/// able to clobber an existing local session, even the same bundle imported
+/// twice back to back).
+///
+/// `new_session_id()` is only second-resolution and [`SessionPaths::ensure_dir`]
+/// is a silent no-op on an already-existing directory, so two imports within
+/// the same wall-clock second (a plausible fast double-click, or importing
+/// the same bundle twice back to back — the exact scenario a test drives
+/// deliberately) could otherwise land in the same directory undetected.
+/// This claims the directory with `fs::create_dir` (which fails with
+/// `AlreadyExists` unlike `create_dir_all`, which can't tell "created" from
+/// "already there") and retries with a freshly minted id on collision, using
+/// [`new_import_session_id`] (not plain [`new_session_id`]) so that retry
+/// has real teeth: a random suffix makes a same-second collision
+/// astronomically unlikely on the very first attempt, rather than the loop
+/// having to sit and wait out a wall-clock tick that may not even help
+/// (`new_session_id()` alone would return the exact same string every time
+/// within that second).
+pub fn new_session_dir_for_import(sessions_dir: &Path) -> anyhow::Result<SessionPaths> {
+    new_session_dir_with_id_fn(sessions_dir, new_import_session_id)
+}
+
+/// Id generator for [`new_session_dir_for_import`] — unlike
+/// [`new_session_id`] (second resolution, fine for a human clicking "New
+/// session" once at a time), a fast double-import of the same bundle can
+/// easily land in the same second, so this appends a short random suffix
+/// for practical uniqueness even then.
+fn new_import_session_id() -> String {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    format!("{}-{}", new_session_id(), &suffix[..8])
+}
+
+fn new_session_dir_with_id_fn(
+    sessions_dir: &Path,
+    mut next_id: impl FnMut() -> String,
+) -> anyhow::Result<SessionPaths> {
+    const MAX_ATTEMPTS: u32 = 20;
+    for _ in 0..MAX_ATTEMPTS {
+        let id = next_id();
+        let session_dir = sessions_dir.join(&id);
+        match std::fs::create_dir(&session_dir) {
+            Ok(()) => return Ok(SessionPaths::new_in(sessions_dir, id)),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to create session directory {}",
+                        session_dir.display()
+                    )
+                });
+            }
+        }
+    }
+    anyhow::bail!("could not allocate a unique session id after {MAX_ATTEMPTS} attempts")
+}
+
 /// A session is its own `<id>/` subdirectory of the sessions directory,
 /// holding an `<id>.duckdb` + `<id>.sqlite` pair (filenames still carry the
 /// timestamp-embedding id, not just the directory — self-describing even if
@@ -199,6 +257,35 @@ pub fn save_display_name(conn: &Connection, name: &str) -> anyhow::Result<()> {
 
 pub fn load_display_name(conn: &Connection) -> anyhow::Result<Option<String>> {
     get_session_state(conn, DISPLAY_NAME_KEY)
+}
+
+const IMPORTED_FROM_KEY: &str = "imported_from";
+
+/// Provenance record for a session that arrived via a `portable_case`
+/// import — written once at import time so an analyst can see where a
+/// session came from (which original session, when it was exported, by
+/// which Peach version, under what filter) without digging through
+/// `activity_log`, which also gets a matching `"import"` entry but is meant
+/// for the operation history, not a quick-glance provenance check.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ImportedFrom {
+    pub original_session_id: String,
+    pub exported_at: chrono::DateTime<chrono::Utc>,
+    pub exporting_peach_version: String,
+    /// The search query the export was filtered by, `""` if it was a whole,
+    /// unfiltered session export.
+    pub filter_query: String,
+}
+
+pub fn save_imported_from(conn: &Connection, info: &ImportedFrom) -> anyhow::Result<()> {
+    set_session_state(conn, IMPORTED_FROM_KEY, &serde_json::to_string(info)?)
+}
+
+pub fn load_imported_from(conn: &Connection) -> anyhow::Result<Option<ImportedFrom>> {
+    match get_session_state(conn, IMPORTED_FROM_KEY)? {
+        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+        None => Ok(None),
+    }
 }
 
 /// Records a manual, analyst-driven tag on one entry — a fourth tagging
@@ -749,6 +836,70 @@ mod tests {
             load_display_name(&conn).unwrap(),
             Some("renamed".to_string())
         );
+    }
+
+    #[test]
+    fn imported_from_round_trips_and_defaults_to_none() {
+        use chrono::TimeZone;
+
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+
+        assert_eq!(load_imported_from(&conn).unwrap(), None);
+
+        let info = ImportedFrom {
+            original_session_id: "session-20260801-120000".to_string(),
+            exported_at: chrono::Utc.with_ymd_and_hms(2026, 8, 26, 14, 0, 0).unwrap(),
+            exporting_peach_version: "0.2.1".to_string(),
+            filter_query: "level=ERROR".to_string(),
+        };
+        save_imported_from(&conn, &info).unwrap();
+
+        assert_eq!(load_imported_from(&conn).unwrap(), Some(info));
+    }
+
+    #[test]
+    fn new_session_dir_for_import_creates_the_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "peach-persist-test-import-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let paths = new_session_dir_for_import(&dir).unwrap();
+
+        assert!(paths.sqlite_path.parent().unwrap().is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Regression test for the collision described on
+    /// [`new_session_dir_for_import`]'s doc comment: two imports minting the
+    /// same id (plausible within the same wall-clock second) must not land
+    /// in the same directory — the second attempt must retry with a fresh
+    /// id instead of silently reusing the first one's directory.
+    #[test]
+    fn new_session_dir_with_id_fn_retries_past_a_colliding_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "peach-persist-test-import-collision-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir(dir.join("session-collide")).unwrap();
+
+        let mut ids = ["session-collide", "session-collide", "session-unique"].into_iter();
+        let paths = new_session_dir_with_id_fn(&dir, || ids.next().unwrap().to_string()).unwrap();
+
+        assert_eq!(paths.id, "session-unique");
+        assert!(dir.join("session-unique").is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     use crate::model::event_id::{SequenceCounter, SourceFileId};

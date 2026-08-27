@@ -1,6 +1,7 @@
 pub mod about_dialog;
 pub mod activity_log_dialog;
 pub mod builtin_rules_dialog;
+pub mod case_summary_dialog;
 pub mod colors;
 pub mod dialog_window;
 pub mod display_timezone_dialog;

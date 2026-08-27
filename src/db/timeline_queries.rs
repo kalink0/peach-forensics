@@ -690,6 +690,199 @@ pub fn rule_counts_for_sources(
         .map_err(Into::into)
 }
 
+/// Exposes `query`'s compiled `FROM ... [WHERE ...]` fragment and its bound
+/// parameters to callers outside this module that need to filter
+/// `log_entries` directly in SQL rather than through [`fetch_window`]/
+/// [`count_matching`] — currently only `session::portable_case`'s filtered
+/// export, which runs `INSERT INTO ... SELECT le.* FROM <this>` against a
+/// freshly attached database rather than pulling rows into Rust first.
+pub(crate) fn compile_from_where(query: &Query) -> (String, Vec<Value>) {
+    let compiled = query.compile();
+    let sql = match compiled.where_clause {
+        Some(w) => format!("{} WHERE {w}", compiled.from),
+        None => compiled.from,
+    };
+    (sql, compiled.params)
+}
+
+/// One row of [`CaseSummary::sources`] — one loaded source and how many of
+/// `query`'s matching entries came from it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseSummarySource {
+    pub source_file_id: String,
+    pub path: String,
+    pub sourcetype: String,
+    pub entry_count: usize,
+}
+
+/// Widest span [`case_summary`] will build a dense per-day
+/// [`CaseSummary::daily_histogram`] for (~10 years) — a guard against a
+/// single garbage/out-of-range timestamp (a known real hazard in log
+/// evidence) turning "earliest to latest" into an unbounded allocation. The
+/// plain `earliest_utc`/`latest_utc` range is still reported either way;
+/// only the day-by-day breakdown is skipped.
+const MAX_HISTOGRAM_DAYS: i64 = 3660;
+
+/// Coarse per-source/sourcetype/level/tag/time breakdown of everything
+/// `query` matches — the data behind `ui::case_summary_dialog`'s View-menu
+/// "whole session" view and the Portable Case export's filtered preview
+/// (same struct either way; only the `Query` passed to [`case_summary`]
+/// differs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseSummary {
+    pub total_entries: usize,
+    pub tagged_entries: usize,
+    /// Descending by `entry_count` — every source with at least one
+    /// matching entry, complete (a dialog rendering this may choose to
+    /// truncate the display, but the data here never does).
+    pub sources: Vec<CaseSummarySource>,
+    /// Summed from `sources` (not a separate query) — descending by count.
+    pub sourcetype_counts: Vec<(String, usize)>,
+    /// Descending by count. Entries with no `level` at all are excluded
+    /// (same convention as [`level_counts`]).
+    pub level_counts: Vec<(String, usize)>,
+    pub earliest_utc: Option<chrono::DateTime<chrono::Utc>>,
+    pub latest_utc: Option<chrono::DateTime<chrono::Utc>>,
+    /// Dense, gap-preserving per-UTC-day counts from `earliest_utc`'s day to
+    /// `latest_utc`'s day inclusive — a day with zero matching events still
+    /// gets an entry, since a real gap in coverage is itself a forensically
+    /// meaningful thing to show, not something to compress away. `None`
+    /// when nothing matched, or the span exceeds [`MAX_HISTOGRAM_DAYS`].
+    /// Bucketed in UTC regardless of display timezone — a documented
+    /// simplification, not a silent one (see `ui::case_summary_dialog`).
+    pub daily_histogram: Option<Vec<(chrono::NaiveDate, usize)>>,
+}
+
+/// Builds a [`CaseSummary`] for everything `query` matches — an empty/
+/// default `Query` naturally selects the whole session (via
+/// [`compile_from_where`]'s "no `WHERE` clause at all" degradation), so this
+/// one function serves both the plain whole-session summary and a filtered
+/// preview without a separate code path to keep in sync.
+///
+/// Every query below stays on narrow columns only
+/// (`event_id_source`/`event_id_seq`/`timestamp_utc`/`level`, plus
+/// `sources`' own small table) — never `message`/`raw`/`fields`, the wide
+/// columns `duckdb_memory_limit_investigation` traced the project's one
+/// real freeze/OOM incident to. Like [`tag_counts`]/[`level_counts`]/
+/// [`source_counts`], this is cheap enough to run synchronously on the
+/// calling thread — no background-thread treatment needed the way
+/// [`fetch_window`]/[`count_matching`] (whose cost scales with the filtered
+/// result across every column) do.
+///
+/// Four separate queries share one `WITH filtered AS (...)` CTE text (a CTE
+/// can't be shared across separate top-level statements, so each restates
+/// it) rather than one combined query — plainer SQL, and still four cheap
+/// narrow-column scans rather than one expensive wide one.
+pub fn case_summary(conn: &Connection, query: &Query) -> anyhow::Result<CaseSummary> {
+    let (from_where, params) = compile_from_where(query);
+    let cte = format!(
+        "WITH filtered AS (
+            SELECT le.event_id_source, le.event_id_seq, le.timestamp_utc, le.level,
+                   s.source_file_id AS src_id, s.path AS src_path, s.sourcetype AS src_sourcetype
+            FROM {from_where}
+        )"
+    );
+
+    let sources_sql = format!(
+        "{cte} SELECT src_id, src_path, src_sourcetype, COUNT(*) \
+         FROM filtered GROUP BY src_id, src_path, src_sourcetype ORDER BY 4 DESC"
+    );
+    let mut stmt = conn.prepare(&sources_sql)?;
+    let rows = stmt.query_map(duckdb::params_from_iter(&params), |row| {
+        Ok(CaseSummarySource {
+            source_file_id: row.get(0)?,
+            path: row.get(1)?,
+            sourcetype: row.get(2)?,
+            entry_count: row.get::<_, i64>(3)? as usize,
+        })
+    })?;
+    let sources: Vec<CaseSummarySource> = rows.collect::<Result<_, _>>()?;
+
+    let mut sourcetype_totals: HashMap<String, usize> = HashMap::new();
+    for source in &sources {
+        *sourcetype_totals
+            .entry(source.sourcetype.clone())
+            .or_default() += source.entry_count;
+    }
+    let mut sourcetype_counts: Vec<(String, usize)> = sourcetype_totals.into_iter().collect();
+    sourcetype_counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+
+    let level_sql = format!(
+        "{cte} SELECT level, COUNT(*) FROM filtered WHERE level IS NOT NULL \
+         GROUP BY level ORDER BY 2 DESC"
+    );
+    let mut stmt = conn.prepare(&level_sql)?;
+    let rows = stmt.query_map(duckdb::params_from_iter(&params), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+    })?;
+    let level_counts: Vec<(String, usize)> = rows.collect::<Result<_, _>>()?;
+
+    let totals_sql = format!(
+        "{cte} SELECT COUNT(*), \
+             COUNT(*) FILTER (WHERE EXISTS ( \
+                 SELECT 1 FROM import_tags it \
+                 WHERE it.event_id_source = filtered.event_id_source \
+                   AND it.event_id_seq = filtered.event_id_seq)), \
+             MIN(timestamp_utc), MAX(timestamp_utc) \
+         FROM filtered"
+    );
+    let (total_entries, tagged_entries, earliest_utc, latest_utc): (
+        i64,
+        i64,
+        Option<chrono::NaiveDateTime>,
+        Option<chrono::NaiveDateTime>,
+    ) = conn.query_row(&totals_sql, duckdb::params_from_iter(&params), |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })?;
+    let earliest_utc = earliest_utc.map(|dt| dt.and_utc());
+    let latest_utc = latest_utc.map(|dt| dt.and_utc());
+
+    let daily_histogram = match (earliest_utc, latest_utc) {
+        (Some(earliest), Some(latest)) => {
+            let earliest_day = earliest.date_naive();
+            let latest_day = latest.date_naive();
+            let span_days = (latest_day - earliest_day).num_days();
+            if span_days > MAX_HISTOGRAM_DAYS {
+                None
+            } else {
+                let histogram_sql = format!(
+                    "{cte} SELECT date_trunc('day', timestamp_utc), COUNT(*) \
+                     FROM filtered GROUP BY 1 ORDER BY 1"
+                );
+                let mut stmt = conn.prepare(&histogram_sql)?;
+                let rows = stmt.query_map(duckdb::params_from_iter(&params), |row| {
+                    let day: chrono::NaiveDateTime = row.get(0)?;
+                    Ok((day.date(), row.get::<_, i64>(1)? as usize))
+                })?;
+                let sparse: HashMap<chrono::NaiveDate, usize> = rows.collect::<Result<_, _>>()?;
+
+                let mut dense = Vec::with_capacity((span_days + 1) as usize);
+                let mut day = earliest_day;
+                loop {
+                    dense.push((day, sparse.get(&day).copied().unwrap_or(0)));
+                    if day == latest_day {
+                        break;
+                    }
+                    day = day + chrono::Days::new(1);
+                }
+                Some(dense)
+            }
+        }
+        _ => None,
+    };
+
+    Ok(CaseSummary {
+        total_entries: total_entries as usize,
+        tagged_entries: tagged_entries as usize,
+        sources,
+        sourcetype_counts,
+        level_counts,
+        earliest_utc,
+        latest_utc,
+        daily_histogram,
+    })
+}
+
 pub fn count_matching(conn: &Connection, query: &Query) -> anyhow::Result<usize> {
     let compiled = query.compile();
     let sql = match &compiled.where_clause {
@@ -2730,6 +2923,265 @@ mod tests {
             };
 
             assert!(fetch_full_entry(&conn, event_id, &utc()).unwrap().is_none());
+        }
+
+        #[test]
+        fn case_summary_of_an_empty_timeline_is_all_zero_or_none() {
+            let conn = open_test_db();
+
+            let summary = case_summary(&conn, &Query::default()).unwrap();
+
+            assert_eq!(summary.total_entries, 0);
+            assert_eq!(summary.tagged_entries, 0);
+            assert!(summary.sources.is_empty());
+            assert!(summary.sourcetype_counts.is_empty());
+            assert!(summary.level_counts.is_empty());
+            assert_eq!(summary.earliest_utc, None);
+            assert_eq!(summary.latest_utc, None);
+            assert_eq!(summary.daily_histogram, None);
+        }
+
+        #[test]
+        fn case_summary_counts_entries_per_source_and_sourcetype() {
+            let conn = open_test_db();
+            let evtx_source = SourceFileId::new_random();
+            let text_source = SourceFileId::new_random();
+            insert_source(&conn, evtx_source, "evtx");
+            insert_source(&conn, text_source, "text_config");
+            let mut counter = SequenceCounter::new();
+            for _ in 0..3 {
+                insert_entry(
+                    &conn,
+                    EventId {
+                        source_file_id: evtx_source,
+                        sequence_number: counter.next_sequence_number(),
+                    },
+                    "INFO",
+                    "evtx entry",
+                    "raw",
+                );
+            }
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id: text_source,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                "INFO",
+                "text entry",
+                "raw",
+            );
+
+            let summary = case_summary(&conn, &Query::default()).unwrap();
+
+            assert_eq!(summary.total_entries, 4);
+            assert_eq!(summary.sources.len(), 2);
+            // Descending by entry_count: the 3-entry evtx source comes first.
+            assert_eq!(summary.sources[0].source_file_id, evtx_source.to_string());
+            assert_eq!(summary.sources[0].entry_count, 3);
+            assert_eq!(summary.sources[1].entry_count, 1);
+            assert_eq!(
+                summary.sourcetype_counts,
+                vec![("evtx".to_string(), 3), ("text_config".to_string(), 1)]
+            );
+        }
+
+        #[test]
+        fn case_summary_reports_tag_coverage() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "text_config");
+            let mut counter = SequenceCounter::new();
+            let tagged = EventId {
+                source_file_id,
+                sequence_number: counter.next_sequence_number(),
+            };
+            let untagged_a = EventId {
+                source_file_id,
+                sequence_number: counter.next_sequence_number(),
+            };
+            let untagged_b = EventId {
+                source_file_id,
+                sequence_number: counter.next_sequence_number(),
+            };
+            insert_entry(&conn, tagged, "INFO", "a", "raw");
+            insert_entry(&conn, untagged_a, "INFO", "b", "raw");
+            insert_entry(&conn, untagged_b, "INFO", "c", "raw");
+            insert_tag(&conn, tagged, "reviewed");
+
+            let summary = case_summary(&conn, &Query::default()).unwrap();
+
+            assert_eq!(summary.total_entries, 3);
+            assert_eq!(summary.tagged_entries, 1);
+        }
+
+        #[test]
+        fn case_summary_level_counts_exclude_entries_with_no_level() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "text_config");
+            let mut counter = SequenceCounter::new();
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                "ERROR",
+                "a",
+                "raw",
+            );
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                "ERROR",
+                "b",
+                "raw",
+            );
+            // No level at all — via `insert_entry_at`, which always inserts
+            // a NULL level.
+            insert_entry_at(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                Utc::now().naive_utc(),
+                "c",
+            );
+
+            let summary = case_summary(&conn, &Query::default()).unwrap();
+
+            assert_eq!(
+                summary.total_entries, 3,
+                "the level-less entry still counts"
+            );
+            assert_eq!(summary.level_counts, vec![("ERROR".to_string(), 2)]);
+        }
+
+        #[test]
+        fn case_summary_respects_the_query_filter() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "text_config");
+            let mut counter = SequenceCounter::new();
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                "INFO",
+                "hello world",
+                "raw",
+            );
+            insert_entry(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                "INFO",
+                "goodbye world",
+                "raw",
+            );
+
+            let summary = case_summary(&conn, &Query::parse("hello")).unwrap();
+
+            assert_eq!(summary.total_entries, 1);
+            assert_eq!(summary.sources[0].entry_count, 1);
+        }
+
+        #[test]
+        fn case_summary_daily_histogram_preserves_a_gap_day() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "text_config");
+            let mut counter = SequenceCounter::new();
+            let day1 = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+                .unwrap()
+                .and_hms_opt(9, 0, 0)
+                .unwrap();
+            // 2026-01-02 deliberately has no entries at all.
+            let day3 = chrono::NaiveDate::from_ymd_opt(2026, 1, 3)
+                .unwrap()
+                .and_hms_opt(9, 0, 0)
+                .unwrap();
+            insert_entry_at(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                day1,
+                "first day",
+            );
+            insert_entry_at(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                day3,
+                "third day",
+            );
+
+            let summary = case_summary(&conn, &Query::default()).unwrap();
+
+            let histogram = summary.daily_histogram.unwrap();
+            assert_eq!(histogram.len(), 3, "day 1, the empty gap day, and day 3");
+            assert_eq!(histogram[0].1, 1);
+            assert_eq!(
+                histogram[1].1, 0,
+                "the gap day must be present, not skipped"
+            );
+            assert_eq!(histogram[2].1, 1);
+        }
+
+        #[test]
+        fn case_summary_histogram_is_none_when_the_span_exceeds_the_cap() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "text_config");
+            let mut counter = SequenceCounter::new();
+            let far_past = chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            let far_future = chrono::NaiveDate::from_ymd_opt(2011, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            insert_entry_at(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                far_past,
+                "old",
+            );
+            insert_entry_at(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                far_future,
+                "new",
+            );
+
+            let summary = case_summary(&conn, &Query::default()).unwrap();
+
+            assert!(summary.earliest_utc.is_some());
+            assert!(summary.latest_utc.is_some());
+            assert_eq!(
+                summary.daily_histogram, None,
+                "an 11-year span must not build a multi-thousand-entry dense vector"
+            );
         }
     }
 }

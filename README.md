@@ -22,8 +22,9 @@ independently (no IPC).
 ## Status
 
 Currently implemented: AUL (`.logarchive`), EVTX, journald, and TOML-configurable
-text log parsing, import-time and re-tag tagging, session persistence, and CLI
-source handoff. See [docs/supported-sources.md](docs/supported-sources.md) for the
+text log parsing, import-time and re-tag tagging, session persistence, portable
+case export/import for handing a case to another analyst, and CLI source
+handoff. See [docs/supported-sources.md](docs/supported-sources.md) for the
 authoritative, up-to-date list of what actually works today.
 
 ## Download

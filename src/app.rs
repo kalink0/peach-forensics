@@ -14,6 +14,7 @@ use crate::db::timeline_schema::setup_timeline_schema;
 use crate::export::{self, ExportOutcome};
 use crate::model::event_id::{EventId, SourceFileId};
 use crate::model::log_entry::LogEntry;
+use crate::model::timezone_spec::TimezoneSpec;
 use crate::parsers::aul::AulParser;
 use crate::parsers::evtx::EvtxFileParser;
 use crate::parsers::journald::JournaldFileParser;
@@ -21,12 +22,17 @@ use crate::parsers::text_config::TextConfigParser;
 use crate::parsers::text_config_file::{self, TextFormatDraft};
 use crate::parsers::{LogParser, ParserConfig, StreamingProgress, parse_source_streaming};
 use crate::session::persist::{self, LoadedSource, SessionPaths};
+use crate::session::portable_case::{
+    self, PortableCaseExportOutcome, PortableCaseExportStage, PortableCaseExportSummary,
+    PortableCaseImportOutcome, PortableCaseImportStage,
+};
 use crate::tagging::engine::{RetagSummary, apply_import_time, re_tag};
 use crate::tagging::rule::Rule;
 use crate::tagging::rule_file;
 use crate::ui::about_dialog::{self, AboutDialog};
 use crate::ui::activity_log_dialog::ActivityLogDialog;
 use crate::ui::builtin_rules_dialog::BuiltinRulesDialog;
+use crate::ui::case_summary_dialog::{CaseSummaryDialog, CaseSummaryDialogOutcome};
 use crate::ui::display_timezone_dialog::DisplayTimezoneDialog;
 use crate::ui::filter_bar::FilterBar;
 use crate::ui::format_dialog::{FormatDialog, FormatDialogOutcome};
@@ -94,6 +100,12 @@ enum FilePickOutcome {
     ParserConfigFile(Option<PathBuf>),
     RuleFiles(Option<Vec<PathBuf>>),
     ExportTarget(Option<PathBuf>),
+    /// Save-dialog target for "Export portable case..." — single-path, like
+    /// `ExportTarget`, so the Linux X-close-returns-`Some(vec![])` quirk
+    /// documented on `SourcePaths` doesn't apply here.
+    PortableCaseExportTarget(Option<PathBuf>),
+    /// Open-dialog source for "Import portable case..." — same reasoning.
+    PortableCaseImportSource(Option<PathBuf>),
 }
 
 /// Spawns a thread that blocks on `task` (an already-created
@@ -262,6 +274,26 @@ enum ExportState {
     Failed(String),
 }
 
+enum PortableCaseExportState {
+    Idle,
+    Running {
+        stage: PortableCaseExportStage,
+        path: PathBuf,
+    },
+    Done {
+        summary: PortableCaseExportSummary,
+        path: PathBuf,
+    },
+    Failed(String),
+}
+
+enum PortableCaseImportState {
+    Idle,
+    Running(PortableCaseImportStage),
+    Done { display_name: Option<String> },
+    Failed(String),
+}
+
 pub struct PeachApp {
     db_path: PathBuf,
     session_paths: SessionPaths,
@@ -318,6 +350,10 @@ pub struct PeachApp {
     retag_rx: Option<mpsc::Receiver<RetagOutcome>>,
     export_state: ExportState,
     export_rx: Option<mpsc::Receiver<ExportOutcome>>,
+    portable_case_export_state: PortableCaseExportState,
+    portable_case_export_rx: Option<mpsc::Receiver<PortableCaseExportOutcome>>,
+    portable_case_import_state: PortableCaseImportState,
+    portable_case_import_rx: Option<mpsc::Receiver<PortableCaseImportOutcome>>,
     timeline: TimelineView,
     filter_bar: FilterBar,
     available_levels: Vec<(String, String)>,
@@ -347,6 +383,7 @@ pub struct PeachApp {
     settings_dialog: SettingsDialog,
     about_dialog: AboutDialog,
     activity_log_dialog: ActivityLogDialog,
+    case_summary_dialog: CaseSummaryDialog,
     builtin_rules_dialog: BuiltinRulesDialog,
     rules_reference_dialog: RulesReferenceDialog,
     /// Wall-clock anchor for the `Theme::Rainbow` animation — see
@@ -548,6 +585,10 @@ impl PeachApp {
             retag_rx: None,
             export_state: ExportState::Idle,
             export_rx: None,
+            portable_case_export_state: PortableCaseExportState::Idle,
+            portable_case_export_rx: None,
+            portable_case_import_state: PortableCaseImportState::Idle,
+            portable_case_import_rx: None,
             filter_bar: FilterBar::new(),
             available_levels: Vec::new(),
             available_tags: Vec::new(),
@@ -566,6 +607,7 @@ impl PeachApp {
             settings_dialog: SettingsDialog::Closed,
             about_dialog: AboutDialog::Closed,
             activity_log_dialog: ActivityLogDialog::Closed,
+            case_summary_dialog: CaseSummaryDialog::Closed,
             builtin_rules_dialog: BuiltinRulesDialog::Closed,
             rules_reference_dialog: RulesReferenceDialog::Closed,
             rainbow_start: None,
@@ -730,6 +772,70 @@ impl PeachApp {
             )
             .map_err(|err| format!("{err:#}"));
             let _ = tx.send(ExportOutcome::Done(result));
+        });
+    }
+
+    /// Kicks off a background "Export portable case..." — a full-fidelity,
+    /// `raw`/`fields`/tags/notes-preserving bundle, unlike `start_export`'s
+    /// lossy CSV/JSON — filtered by the timeline's *current* search query,
+    /// same as `start_export` (an empty query bundles the whole session).
+    /// Same spawn-a-thread-and-poll shape as `start_load`/`start_export`.
+    fn start_portable_case_export(&mut self, out_path: PathBuf) {
+        let Some(conn) = self.timeline.try_clone_conn() else {
+            self.portable_case_export_state = PortableCaseExportState::Failed(
+                "failed to open a database connection for export".into(),
+            );
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        self.portable_case_export_rx = Some(rx);
+        self.portable_case_export_state = PortableCaseExportState::Running {
+            stage: PortableCaseExportStage::CopyingTimeline,
+            path: out_path.clone(),
+        };
+
+        let session_sqlite_path = self.session_paths.sqlite_path.clone();
+        let original_session_id = self.session_paths.id.clone();
+        let display_name = self.session_display_name.clone();
+        let filter_query_text = self.filter_bar.text().to_string();
+
+        std::thread::spawn(move || {
+            let result = portable_case::export_portable_case(
+                &conn,
+                &session_sqlite_path,
+                &original_session_id,
+                display_name.as_deref(),
+                &filter_query_text,
+                &out_path,
+                &tx,
+            )
+            .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(PortableCaseExportOutcome::Done(result));
+        });
+    }
+
+    /// Kicks off a background "Import portable case..." — extracts,
+    /// verifies, and registers `zip_path` as a brand-new session (never
+    /// reusing the bundle's original session id, see
+    /// `persist::new_session_dir_for_import`), then switches into it on
+    /// success (`PortableCaseImportOutcome::Done` handling in `ui()`).
+    fn start_portable_case_import(&mut self, zip_path: PathBuf) {
+        let sessions_dir = match &self.ephemeral_session_dir {
+            Some(dir) => dir.clone(),
+            None => self
+                .settings
+                .sessions_dir()
+                .unwrap_or_else(|_| std::env::temp_dir()),
+        };
+        let (tx, rx) = mpsc::channel();
+        self.portable_case_import_rx = Some(rx);
+        self.portable_case_import_state =
+            PortableCaseImportState::Running(PortableCaseImportStage::Extracting);
+
+        std::thread::spawn(move || {
+            let result = portable_case::import_portable_case(&zip_path, &sessions_dir, &tx)
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(PortableCaseImportOutcome::Done(result));
         });
     }
 
@@ -1165,6 +1271,85 @@ impl PeachApp {
         self.activity_log_dialog = ActivityLogDialog::open(entries);
     }
 
+    /// Effective display timezone, falling back to UTC on a bad/unparseable
+    /// `Settings::display_timezone` — used for cosmetic label formatting
+    /// (`CaseSummaryDialog`'s earliest/latest range) where a config typo
+    /// should degrade to a readable UTC label, not abort the whole view the
+    /// way `start_export`'s stricter data-affecting check does.
+    fn display_timezone_or_utc(&self) -> TimezoneSpec {
+        self.settings
+            .display_timezone_spec()
+            .unwrap_or_else(|_| TimezoneSpec::parse("UTC").expect("\"UTC\" always parses"))
+    }
+
+    /// Opens the whole-session "Case Summary" dialog — used by both the
+    /// View menu (`title` is a fixed label) and the portable-case import
+    /// success handler (`title` names the just-imported case), which is why
+    /// `title` is a parameter rather than hardcoded here.
+    fn open_case_summary_dialog(&mut self, title: String) {
+        let Some(conn) = self.timeline.try_clone_conn() else {
+            return;
+        };
+        let Ok(summary) = timeline_queries::case_summary(&conn, &Query::default()) else {
+            return;
+        };
+        let skipped_files = persist::open_session_db(&self.session_paths.sqlite_path)
+            .and_then(|conn| persist::all_activity_log_entries(&conn))
+            .map(|entries| entries.iter().map(|entry| entry.skipped.len()).sum())
+            .ok();
+        let display_tz = self.display_timezone_or_utc();
+        self.case_summary_dialog =
+            CaseSummaryDialog::open_info(title, summary, skipped_files, &display_tz);
+    }
+
+    /// Computes a `CaseSummary` scoped to the timeline's *current* search
+    /// filter and opens it as an export-confirmation preview — "Export
+    /// portable case..."'s menu click calls this instead of opening the
+    /// save-file dialog directly, so the analyst sees exactly what's about
+    /// to be bundled before picking a destination. The save dialog itself
+    /// only opens once the preview reports
+    /// `CaseSummaryDialogOutcome::ExportConfirmed` (see `ui()`'s handling of
+    /// `case_summary_dialog`), via
+    /// [`Self::open_portable_case_export_save_dialog`].
+    fn open_portable_case_export_preview(&mut self) {
+        let Some(conn) = self.timeline.try_clone_conn() else {
+            self.portable_case_export_state = PortableCaseExportState::Failed(
+                "failed to open a database connection for export".into(),
+            );
+            return;
+        };
+        let summary = match timeline_queries::case_summary(&conn, self.timeline.query()) {
+            Ok(summary) => summary,
+            Err(err) => {
+                self.portable_case_export_state =
+                    PortableCaseExportState::Failed(format!("{err:#}"));
+                return;
+            }
+        };
+        let display_tz = self.display_timezone_or_utc();
+        self.case_summary_dialog = CaseSummaryDialog::open_export_confirm(summary, &display_tz);
+    }
+
+    /// Opens the save-file dialog for "Export portable case..." — factored
+    /// out so both the (now preview-gated) menu click path and the preview
+    /// dialog's `ExportConfirmed` outcome reach it without duplicating the
+    /// `rfd::AsyncFileDialog` setup.
+    fn open_portable_case_export_save_dialog(&mut self) {
+        let default_name = self
+            .session_display_name
+            .clone()
+            .unwrap_or_else(|| self.session_paths.id.clone());
+        let task = rfd::AsyncFileDialog::new()
+            .add_filter("Peach Case", &["peachcase"])
+            .set_file_name(format!("{default_name}.peachcase"))
+            .save_file();
+        self.file_pick_rx = Some(spawn_dialog_pick(task, |picked| {
+            FilePickOutcome::PortableCaseExportTarget(
+                picked.map(|h: rfd::FileHandle| h.path().to_path_buf()),
+            )
+        }));
+    }
+
     /// Re-reads `activity_log` and pushes it into the dialog if it's currently
     /// open — called right after a load or re-tag finishes (both the
     /// success and failure paths already wrote an entry by this point, from
@@ -1229,6 +1414,21 @@ impl PeachApp {
     /// `on_exit`): a failure to *write* `config.toml` shouldn't undo the
     /// analyst's choice for the rest of this run, just mean it doesn't
     /// survive a restart.
+    /// `CaseSummaryDialogOutcome::ExportConfirmed` is the only outcome this
+    /// dialog ever reports — a plain "Close"/dismiss (Info mode, or Cancel
+    /// in ExportConfirm mode) is handled entirely inside `CaseSummaryDialog`
+    /// itself (it just closes), never reaches here.
+    fn handle_case_summary_dialog(&mut self, ctx: &egui::Context) {
+        if !self.case_summary_dialog.is_open() {
+            return;
+        }
+        let Some(CaseSummaryDialogOutcome::ExportConfirmed) = self.case_summary_dialog.ui(ctx)
+        else {
+            return;
+        };
+        self.open_portable_case_export_save_dialog();
+    }
+
     fn handle_settings_dialog(&mut self, ctx: &egui::Context) {
         if !self.settings_dialog.is_open() {
             return;
@@ -1351,6 +1551,29 @@ fn find_rule_producing_tag(rule_paths: &[PathBuf], tag_value: &str) -> Option<Pa
     }
 }
 
+/// User-facing label for a [`PortableCaseExportStage`] — stage-based, not
+/// row-count-based like `ExportState`'s progress display, since a single
+/// `INSERT ... SELECT` doesn't expose incremental row progress the way
+/// `export.rs`'s chunked CSV/JSON export does.
+fn portable_case_export_stage_label(stage: PortableCaseExportStage) -> &'static str {
+    match stage {
+        PortableCaseExportStage::CopyingTimeline => "copying timeline",
+        PortableCaseExportStage::CopyingSessionData => "copying tags and notes",
+        PortableCaseExportStage::CollectingParserConfigs => "collecting parser configs",
+        PortableCaseExportStage::Hashing => "verifying integrity",
+        PortableCaseExportStage::Packaging => "packaging",
+    }
+}
+
+fn portable_case_import_stage_label(stage: PortableCaseImportStage) -> &'static str {
+    match stage {
+        PortableCaseImportStage::Extracting => "extracting",
+        PortableCaseImportStage::VerifyingFormat => "verifying format",
+        PortableCaseImportStage::VerifyingIntegrity => "verifying integrity",
+        PortableCaseImportStage::RegisteringSession => "registering session",
+    }
+}
+
 impl eframe::App for PeachApp {
     fn on_exit(&mut self) {
         // Best-effort: a session that was never loaded into (just created
@@ -1415,11 +1638,19 @@ impl eframe::App for PeachApp {
                         FilePickOutcome::ExportTarget(Some(picked)) => {
                             self.start_export(picked);
                         }
+                        FilePickOutcome::PortableCaseExportTarget(Some(picked)) => {
+                            self.start_portable_case_export(picked);
+                        }
+                        FilePickOutcome::PortableCaseImportSource(Some(picked)) => {
+                            self.start_portable_case_import(picked);
+                        }
                         // The analyst cancelled the dialog — nothing to update.
                         FilePickOutcome::SourcePaths(None)
                         | FilePickOutcome::ParserConfigFile(None)
                         | FilePickOutcome::RuleFiles(None)
-                        | FilePickOutcome::ExportTarget(None) => {}
+                        | FilePickOutcome::ExportTarget(None)
+                        | FilePickOutcome::PortableCaseExportTarget(None)
+                        | FilePickOutcome::PortableCaseImportSource(None) => {}
                     }
                     self.file_pick_rx = None;
                 }
@@ -1605,8 +1836,120 @@ impl eframe::App for PeachApp {
             }
         }
 
+        if let Some(rx) = &self.portable_case_export_rx {
+            // Drain everything queued this frame, same reasoning as
+            // `load_rx`/`export_rx`: several stage transitions can fire
+            // between two frames.
+            loop {
+                match rx.try_recv() {
+                    Ok(PortableCaseExportOutcome::Progress(stage)) => {
+                        if let PortableCaseExportState::Running { path, .. } =
+                            &self.portable_case_export_state
+                        {
+                            self.portable_case_export_state = PortableCaseExportState::Running {
+                                stage,
+                                path: path.clone(),
+                            };
+                        }
+                    }
+                    Ok(PortableCaseExportOutcome::Done(result)) => {
+                        match result {
+                            Ok(summary) => {
+                                let path = match &self.portable_case_export_state {
+                                    PortableCaseExportState::Running { path, .. } => path.clone(),
+                                    _ => PathBuf::new(),
+                                };
+                                self.portable_case_export_state =
+                                    PortableCaseExportState::Done { summary, path };
+                            }
+                            Err(err) => {
+                                self.portable_case_export_state =
+                                    PortableCaseExportState::Failed(err);
+                            }
+                        }
+                        self.portable_case_export_rx = None;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        ui.ctx().request_repaint();
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.portable_case_export_state = PortableCaseExportState::Failed(
+                            "portable case export worker disconnected unexpectedly".to_string(),
+                        );
+                        self.portable_case_export_rx = None;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(rx) = &self.portable_case_import_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(PortableCaseImportOutcome::Progress(stage)) => {
+                        self.portable_case_import_state = PortableCaseImportState::Running(stage);
+                    }
+                    Ok(PortableCaseImportOutcome::Done(result)) => {
+                        match result {
+                            Ok(session_paths) => {
+                                match self.load_session(session_paths.sqlite_path) {
+                                    Ok(()) => {
+                                        self.portable_case_import_state =
+                                            PortableCaseImportState::Done {
+                                                display_name: self.session_display_name.clone(),
+                                            };
+                                        let title = format!(
+                                            "Imported: {}",
+                                            self.session_display_name
+                                                .clone()
+                                                .unwrap_or_else(|| self.session_paths.id.clone())
+                                        );
+                                        self.open_case_summary_dialog(title);
+                                    }
+                                    Err(err) => {
+                                        self.portable_case_import_state =
+                                            PortableCaseImportState::Failed(format!(
+                                                "imported, but failed to switch into the new \
+                                                 session: {err:#}"
+                                            ));
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                self.portable_case_import_state =
+                                    PortableCaseImportState::Failed(err);
+                            }
+                        }
+                        self.portable_case_import_rx = None;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        ui.ctx().request_repaint();
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.portable_case_import_state = PortableCaseImportState::Failed(
+                            "portable case import worker disconnected unexpectedly".to_string(),
+                        );
+                        self.portable_case_import_rx = None;
+                        break;
+                    }
+                }
+            }
+        }
+
         let can_switch_session = !matches!(self.load_state, LoadState::Loading { .. })
-            && !matches!(self.retag_state, RetagState::Running);
+            && !matches!(self.retag_state, RetagState::Running)
+            && !matches!(
+                self.portable_case_export_state,
+                PortableCaseExportState::Running { .. }
+            )
+            && !matches!(
+                self.portable_case_import_state,
+                PortableCaseImportState::Running(_)
+            );
 
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -1633,7 +1976,15 @@ impl eframe::App for PeachApp {
                     ui.separator();
                     let can_export = self.timeline.total_rows() > 0
                         && self.file_pick_rx.is_none()
-                        && !matches!(self.export_state, ExportState::Running { .. });
+                        && !matches!(self.export_state, ExportState::Running { .. })
+                        && !matches!(
+                            self.portable_case_export_state,
+                            PortableCaseExportState::Running { .. }
+                        )
+                        && !matches!(
+                            self.portable_case_import_state,
+                            PortableCaseImportState::Running(_)
+                        );
                     if ui
                         .add_enabled(can_export, egui::Button::new("Export (current filter)..."))
                         .on_hover_text(
@@ -1653,6 +2004,53 @@ impl eframe::App for PeachApp {
                                 picked.map(|h: rfd::FileHandle| h.path().to_path_buf()),
                             )
                         }));
+                    }
+                    let can_export_portable_case = can_switch_session
+                        && self.timeline.total_rows() > 0
+                        && self.file_pick_rx.is_none()
+                        && !matches!(self.export_state, ExportState::Running { .. });
+                    if ui
+                        .add_enabled(
+                            can_export_portable_case,
+                            egui::Button::new("Export portable case..."),
+                        )
+                        .on_hover_text(
+                            "Bundles this session (or, with an active search, just the \
+                             matching subset) into a single file another analyst's Peach can \
+                             import — unlike the row export above, raw data, tags, and notes \
+                             all travel intact.",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        self.open_portable_case_export_preview();
+                    }
+                    let can_import_portable_case = can_switch_session
+                        && self.file_pick_rx.is_none()
+                        && !matches!(self.export_state, ExportState::Running { .. });
+                    if ui
+                        .add_enabled(
+                            can_import_portable_case,
+                            egui::Button::new("Import portable case..."),
+                        )
+                        .on_hover_text(
+                            "Opens a .peachcase bundle as a brand-new session — the session \
+                             you're in now is left untouched.",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        let task = rfd::AsyncFileDialog::new()
+                            .add_filter("Peach Case", &["peachcase"])
+                            .pick_file();
+                        self.file_pick_rx = Some(spawn_dialog_pick(
+                            task,
+                            |picked: Option<rfd::FileHandle>| {
+                                FilePickOutcome::PortableCaseImportSource(
+                                    picked.map(|h| h.path().to_path_buf()),
+                                )
+                            },
+                        ));
                     }
                     ui.separator();
                     if ui.button("Settings...").clicked() {
@@ -1699,6 +2097,20 @@ impl eframe::App for PeachApp {
                     ui.separator();
                     if ui.button("Activity Log...").clicked() {
                         self.open_activity_log_dialog();
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            self.timeline.total_rows() > 0,
+                            egui::Button::new("Case Summary..."),
+                        )
+                        .on_hover_text(
+                            "Entries per source/sourcetype/level, tag coverage, and the \
+                             covered time range for the whole session.",
+                        )
+                        .clicked()
+                    {
+                        self.open_case_summary_dialog("Case Summary".to_string());
                         ui.close();
                     }
                 });
@@ -1946,6 +2358,14 @@ impl eframe::App for PeachApp {
 
                 let can_retag = !matches!(self.load_state, LoadState::Loading { .. })
                     && !matches!(self.retag_state, RetagState::Running)
+                    && !matches!(
+                        self.portable_case_export_state,
+                        PortableCaseExportState::Running { .. }
+                    )
+                    && !matches!(
+                        self.portable_case_import_state,
+                        PortableCaseImportState::Running(_)
+                    )
                     && (!self.rule_paths.is_empty() || !self.enabled_builtin_rules.is_empty())
                     && self.timeline.total_rows() > 0;
                 if ui
@@ -2005,8 +2425,68 @@ impl eframe::App for PeachApp {
                 }
             }
 
+            match &self.portable_case_export_state {
+                PortableCaseExportState::Idle => {}
+                PortableCaseExportState::Running { stage, .. } => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!(
+                            "Exporting portable case... {}",
+                            portable_case_export_stage_label(*stage)
+                        ));
+                    });
+                }
+                PortableCaseExportState::Done { summary, path } => {
+                    ui.label(format!(
+                        "Portable case complete: {} entries, {} tags, to {}",
+                        summary.entries_written,
+                        summary.tags_written,
+                        path.display()
+                    ));
+                }
+                PortableCaseExportState::Failed(err) => {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("Portable case export failed: {err}"),
+                    );
+                }
+            }
+
+            match &self.portable_case_import_state {
+                PortableCaseImportState::Idle => {}
+                PortableCaseImportState::Running(stage) => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!(
+                            "Importing portable case... {}",
+                            portable_case_import_stage_label(*stage)
+                        ));
+                    });
+                }
+                PortableCaseImportState::Done { display_name } => {
+                    ui.label(format!(
+                        "Portable case imported and opened: {}",
+                        display_name.as_deref().unwrap_or(&self.session_paths.id)
+                    ));
+                }
+                PortableCaseImportState::Failed(err) => {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("Portable case import failed: {err}"),
+                    );
+                }
+            }
+
             let can_load = !matches!(self.load_state, LoadState::Loading { .. })
                 && !matches!(self.retag_state, RetagState::Running)
+                && !matches!(
+                    self.portable_case_export_state,
+                    PortableCaseExportState::Running { .. }
+                )
+                && !matches!(
+                    self.portable_case_import_state,
+                    PortableCaseImportState::Running(_)
+                )
                 && self.source_path.is_some()
                 && (self.source_kind != SourceKind::Text || self.parser_config_path.is_some());
 
@@ -2167,6 +2647,7 @@ impl eframe::App for PeachApp {
         self.handle_display_timezone_dialog(ui.ctx());
         self.about_dialog.ui(ui.ctx());
         self.activity_log_dialog.ui(ui.ctx());
+        self.handle_case_summary_dialog(ui.ctx());
         self.builtin_rules_dialog
             .ui(ui.ctx(), &mut self.enabled_builtin_rules);
         self.rules_reference_dialog.ui(ui.ctx());

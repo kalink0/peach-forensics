@@ -8,9 +8,24 @@ use duckdb::{Connection, Result};
 /// `BIGINT` as originally sketched. `raw` carries `NOT NULL`: normalization
 /// must never lose the original source data.
 pub fn setup_timeline_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+    setup_timeline_schema_in(conn, "")
+}
+
+/// Same DDL as [`setup_timeline_schema`], with every table name prefixed by
+/// `catalog_prefix` (e.g. `"export_db.main."` after an `ATTACH ... AS
+/// export_db`) — a single source of truth for the schema (including its
+/// `PRIMARY KEY`/`NOT NULL` constraints) so `session::portable_case` can
+/// stand up a freshly attached database with the exact same guarantees as a
+/// live session, instead of a second, hand-duplicated copy of this DDL that
+/// could silently drift. Deliberately *not* implemented via
+/// `CREATE TABLE ... AS SELECT`: DuckDB's CTAS infers a constraint-free
+/// schema from the query's output types, which would let a corrupted or
+/// duplicated portable-case bundle accept duplicate `event_id`s instead of
+/// failing loudly — unacceptable for forensic data.
+pub fn setup_timeline_schema_in(conn: &Connection, catalog_prefix: &str) -> Result<()> {
+    conn.execute_batch(&format!(
         "
-        CREATE TABLE IF NOT EXISTS log_entries (
+        CREATE TABLE IF NOT EXISTS {catalog_prefix}log_entries (
             event_id_source   VARCHAR NOT NULL,
             event_id_seq      BIGINT NOT NULL,
             timestamp_utc     TIMESTAMP NOT NULL,
@@ -21,7 +36,7 @@ pub fn setup_timeline_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (event_id_source, event_id_seq)
         );
 
-        CREATE TABLE IF NOT EXISTS sources (
+        CREATE TABLE IF NOT EXISTS {catalog_prefix}sources (
             source_file_id    VARCHAR PRIMARY KEY,
             path              VARCHAR NOT NULL,
             sourcetype        VARCHAR NOT NULL,
@@ -29,15 +44,15 @@ pub fn setup_timeline_schema(conn: &Connection) -> Result<()> {
             parser_config     VARCHAR
         );
 
-        CREATE TABLE IF NOT EXISTS import_tags (
+        CREATE TABLE IF NOT EXISTS {catalog_prefix}import_tags (
             event_id_source   VARCHAR NOT NULL,
             event_id_seq      BIGINT NOT NULL,
             rule_name         VARCHAR NOT NULL,
             tag_value         VARCHAR NOT NULL,
             applied_at        TIMESTAMP NOT NULL
         );
-        ",
-    )
+        "
+    ))
 }
 
 #[cfg(test)]
@@ -208,5 +223,59 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    /// Regression test for the CTAS pitfall documented on
+    /// [`setup_timeline_schema_in`]: a catalog-qualified schema, stood up in
+    /// an attached database via this function, must keep the same
+    /// `PRIMARY KEY` constraint as the unqualified schema — a duplicate
+    /// `event_id` must still be rejected, not silently accepted the way a
+    /// `CREATE TABLE ... AS SELECT`-built table would.
+    #[test]
+    fn schema_in_attached_database_keeps_primary_key_constraint() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut attached_path = std::env::temp_dir();
+        attached_path.push(format!(
+            "peach-timeline_schema-test-attached-{}-{}.duckdb",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        conn.execute_batch(&format!(
+            "ATTACH '{}' AS export_db;",
+            attached_path.display()
+        ))
+        .unwrap();
+        setup_timeline_schema_in(&conn, "export_db.main.").unwrap();
+
+        let source_file_id = sample_source_file_id();
+        let insert = "INSERT INTO export_db.main.log_entries
+                (event_id_source, event_id_seq, timestamp_utc, raw)
+             VALUES (?, ?, ?, ?)";
+        let ts = Utc
+            .with_ymd_and_hms(2026, 7, 28, 12, 0, 0)
+            .unwrap()
+            .naive_utc();
+        conn.execute(
+            insert,
+            params![source_file_id.to_string(), 0i64, ts, "raw line"],
+        )
+        .unwrap();
+
+        let duplicate = conn.execute(
+            insert,
+            params![source_file_id.to_string(), 0i64, ts, "raw line"],
+        );
+        assert!(
+            duplicate.is_err(),
+            "duplicate event_id must be rejected by the PRIMARY KEY constraint"
+        );
+
+        drop(conn);
+        std::fs::remove_file(&attached_path).ok();
+        std::fs::remove_file(attached_path.with_extension("duckdb.wal")).ok();
     }
 }

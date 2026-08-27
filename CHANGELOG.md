@@ -2,6 +2,13 @@
 
 All notable changes to Peach will be documented in this file.
 
+## Unreleased
+
+### New Features
+
+- **Portable Case export/import** — **File > Export portable case...** bundles a whole session (or, with an active search filter, just the matching subset) into a single `.peachcase` file another analyst's Peach can open via **File > Import portable case...** as a brand-new, independent session. Unlike the existing row-level **Export (current filter)...** (CSV/JSON, no `raw`), a portable case is full-fidelity: `raw`, `fields`, analyst tags, notes, and the activity log all travel intact, and referenced text-parser TOML configs are bundled as reference copies. A filtered export still carries every analyst tag/note from the whole session, not just the filtered subset, so an annotation never silently disappears because of the filter used at export time. Integrity-checked (SHA-256, verified on import) and format-versioned, so a corrupted, tampered, or too-new bundle is refused with a clear error instead of imported anyway.
+- **Case Summary** (**View > Case Summary...**) — an at-a-glance breakdown of the loaded case: total entries, entries per source and per sourcetype, level breakdown, tag coverage (tagged vs. untagged), the covered time range, and a daily-activity histogram (with real gap days shown as zero, not silently skipped), each count-based section as a small bar chart. The same view now also appears as a preview before **Export portable case...** actually runs (scoped to the active filter, so it shows exactly what's about to be bundled, with Cancel/Export... buttons) and automatically after a successful **Import portable case...**, so the result is visible without an extra click.
+
 ## v0.2.1 - 2026-08-24
 
 ### Documentation
