@@ -824,6 +824,11 @@ mod tests {
         let activity = persist::all_activity_log_entries(&imported_sqlite).unwrap();
         assert!(activity.iter().any(|entry| entry.operation == "import"));
 
+        // Windows keeps both files locked open while these connections are
+        // alive — drop them before cleanup, same as `session_schema.rs`'s
+        // own tests.
+        drop(imported_conn);
+        drop(imported_sqlite);
         std::fs::remove_file(&session_sqlite_path).ok();
         std::fs::remove_file(&out_path).ok();
         std::fs::remove_dir_all(&sessions_dir).ok();
@@ -879,6 +884,10 @@ mod tests {
             "reimported log_entries must still reject a duplicate event_id"
         );
 
+        // Windows keeps the duckdb file locked open while `imported_conn`
+        // is alive — drop it before cleanup, same as `session_schema.rs`'s
+        // own tests.
+        drop(imported_conn);
         std::fs::remove_file(&session_sqlite_path).ok();
         std::fs::remove_file(&out_path).ok();
         std::fs::remove_dir_all(&sessions_dir).ok();
@@ -945,6 +954,11 @@ mod tests {
             &vec!["reviewed".to_string()]
         );
 
+        // Windows keeps both files locked open while these connections are
+        // alive — drop them before cleanup, same as `session_schema.rs`'s
+        // own tests.
+        drop(imported_conn);
+        drop(imported_sqlite);
         std::fs::remove_file(&session_sqlite_path).ok();
         std::fs::remove_file(&out_path).ok();
         std::fs::remove_dir_all(&sessions_dir).ok();

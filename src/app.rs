@@ -4507,6 +4507,9 @@ mod tests {
         assert_eq!(entries[0].per_file.len(), 1);
         assert_eq!(entries[0].per_file[0].records_skipped, 2);
 
+        // Windows keeps the sqlite file locked open while `conn` is alive —
+        // drop it before cleanup, same as `session_schema.rs`'s own tests.
+        drop(conn);
         std::fs::remove_dir_all(sqlite_path.parent().unwrap()).unwrap();
     }
 
