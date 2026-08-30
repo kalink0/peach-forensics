@@ -1,8 +1,20 @@
-# AUL pattern-of-life: cable attach/detach at two layers — powerd's
-# experienced plugin state changes and the kernel cable-detect shim.
+# AUL pattern-of-life: cable attach/detach at three layers — powerd's
+# experienced plugin state changes, the kernel cable-detect shim, and
+# RestrictedPerfMode's own plugged-in confirmation.
 # Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
 # (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive USB and power connections".
+#
+# "pluggedIn 1" added from Thesis Friday #9 (Tim Korver), a second,
+# independent powerexperienced subsystem (RestrictedPerfMode's
+# evaluatePowerMode call) confirming charge state alongside
+# chargedurationpredictor's "plugin state changed to". The same log line
+# also reports "display 1" (screen on) when the device was actively in use
+# while charging — Peach's message_contains is an OR-list, not an AND, so
+# that display+pluggedIn combination can't be expressed as a single
+# predicate here; correlate the "usb_power_connections" tag with
+# screen-state entries at the same timestamp instead.
+# https://thesisfriday.com/thesis-friday-9-aul-connecting-a-usb-cable/
 
 [rule]
 name = "aul_usb_power_connections"
@@ -13,6 +25,7 @@ sourcetype = "aul"
 message_contains = [
     "plugin state changed to",
     "IOAccessoryUSBConnectShim",
+    "pluggedIn 1",
 ]
 
 [rule.tag]

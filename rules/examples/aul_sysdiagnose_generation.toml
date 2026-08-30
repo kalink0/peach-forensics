@@ -1,0 +1,22 @@
+# AUL pattern-of-life: user-initiated sysdiagnose generation via the
+# on-screen AssistiveTouch accessibility menu — a deliberate diagnostic-data
+# capture triggered without any physical hardware-button combo, and itself
+# a signal that the accessibility menu was in use. Two message variants
+# seen across OS generations (iOS 12.5.7's names its AssistiveTouch origin
+# explicitly in the message text, iOS 18.2.1's doesn't — the shared
+# "Generating sysdiagnose" substring below covers both).
+#
+# Source: Thesis Friday #15 (Tim Korver), tested iOS 18.2.1 (iPhone 12 mini)
+# and iOS 12.5.7 (iPhone 6):
+# https://thesisfriday.com/thesis-friday-15-generating-a-sysdiagnose-via-assistivetouch/
+
+[rule]
+name = "aul_sysdiagnose_generation"
+description = "User-initiated sysdiagnose generation via the AssistiveTouch menu"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = "Generating sysdiagnose"
+
+[rule.tag]
+value = "sysdiagnose_generation"

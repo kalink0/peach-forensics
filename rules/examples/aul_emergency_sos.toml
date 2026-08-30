@@ -5,6 +5,23 @@
 # Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
 # (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive emergency SOS engine".
+#
+# Two locationd-side predicates added from Thesis Friday #19 (Tim Korver),
+# documenting the cross-device handshake earlier in the chain than sosd's
+# own broadcasts above — watchOS's emergency-enablement assertion and the
+# paired iPhone's own emergency state-5 acknowledgment (tested watchOS
+# 26.2): https://thesisfriday.com/thesis-friday-19-emergency-sos-decoding-the-cross-device-help-handshake/
+#
+# The article's third predicate, the watch-side "Description: Button
+# long-held" Carousel entry, is deliberately *not* included — it's the
+# exact same generic side-button-long-hold predicate already matched by
+# aul_watch_crown_button.toml, and that file's whole point is that a long
+# hold alone doesn't distinguish an SOS trigger from any other long-hold
+# gesture. Duplicating it here would tag every ordinary long hold as
+# "emergency_sos" too, which is worse than the "presence isn't proof of a
+# call" caveat this file already carries for its own predicates. Correlate
+# aul_watch_crown_button's tag with the two predicates below by timestamp
+# instead of adding a third, imprecise one here.
 
 [rule]
 name = "aul_emergency_sos"
@@ -16,6 +33,8 @@ message_contains = [
     "broadcasting SOSStatus",
     "flowStartedOnEitherDevice",
     "sosTriggeredOnPairedDevice",
+    "EmergencyEnablementAssertion",
+    "kCLEmergencyEnablementAssertion",
 ]
 
 [rule.tag]

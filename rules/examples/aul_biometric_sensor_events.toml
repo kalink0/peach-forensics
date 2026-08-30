@@ -11,6 +11,12 @@
 # documenting the macOS Touch ID sensor stack specifically — a genuinely
 # different subsystem/predicate from the iOS home-button predicates above:
 # https://thesisfriday.com/thesis-friday-16-unlocking-a-macbook-with-the-touch-id-sensor/
+#
+# "TouchID button pressed: 1" added from Thesis Friday #26 (Tim Korver),
+# the macOS AppleMesaSEPDriver's own hardware press event — the Mac Touch ID
+# sensor's equivalent of the iOS "Home Button Was Pressed" line above
+# (tested macOS 26.6.2, build 25G83):
+# https://thesisfriday.com/thesis-friday-26-same-unlock-three-different-stories/
 
 [rule]
 name = "aul_biometric_sensor_events"
@@ -25,6 +31,7 @@ message_contains = [
     "kAppleBiometricFinger",
     "Home Button Was Pressed",
     "setFingerOnState: FingerON",
+    "TouchID button pressed: 1",
 ]
 
 [rule.tag]

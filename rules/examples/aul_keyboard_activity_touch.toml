@@ -1,0 +1,25 @@
+# AUL pattern-of-life: the `category KeyboardTouch` predicate — UIKitCore's
+# own touch-down/touch-drag events on the on-screen keyboard, one layer
+# below the appTouchDown/appTouchUp/appTouchDragged telemetry signposts in
+# aul_keyboard_activity_signposts.toml. A separate rule file for the same
+# reason as that one: Peach's rule grammar ANDs every condition within one
+# [rule.match] block, while the source treats category-based matching as an
+# independent alternative to the signposts predicates, not an additional
+# constraint on them. Same tag value as the rest of the keyboard-activity
+# family, so any of these rules tagging an entry produces the same result.
+#
+# Source: Thesis Friday #17 (Tim Korver) — no iOS version stated in the
+# post; observed via MobileNotes/MobileMail/MobileSafari, so the process
+# name ties an entry to the app being typed into:
+# https://thesisfriday.com/thesis-friday-17-touch-events-on-the-ios-on-screen-keyboard/
+
+[rule]
+name = "aul_keyboard_activity_touch"
+description = "Raw on-screen-keyboard touch down/drag (subsystem UIKitCore / com.apple.UIKit:KeyboardTouch)"
+
+[rule.match]
+sourcetype = "aul"
+category = "KeyboardTouch"
+
+[rule.tag]
+value = "keyboard_activity"

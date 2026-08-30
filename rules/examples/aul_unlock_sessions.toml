@@ -6,6 +6,22 @@
 # iLEAPP: The Reference" (Alexis Brignoni):
 # leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive unlock sessions and method".
+#
+# Five macOS-specific predicates added from Thesis Friday #26 (Tim Korver),
+# "Same unlock, three different stories" — distinguishing the Touch ID vs.
+# password unlock path on macOS specifically (tested macOS 26.6.2, build
+# 25G83, Mac16,8/Apple M4 Pro):
+# https://thesisfriday.com/thesis-friday-26-same-unlock-three-different-stories/
+# - "matchResult:timestamp: MATCH" / "has received no-match": biometrickitd's
+#   and coreauthd's own match/reject verdict, one level up from the raw
+#   sensor press in aul_biometric_sensor_events — this is the authentication
+#   decision, not just hardware presence.
+# - "lockScreenImmediateFromTouchIDPress": loginwindow attributing a *lock*
+#   specifically to the Touch ID button, alongside the existing (differently
+#   worded) "lock button source" above.
+# - "authenticated as user" / "right 'system.login.screensaver'": the
+#   password path's authd grant — the only one of the three stories that
+#   puts a cleartext account name in the log.
 
 [rule]
 name = "aul_unlock_sessions"
@@ -20,6 +36,11 @@ message_contains = [
     "Transition: locked ->",
     "apfs is being UN-locked",
     "lock button source",
+    "matchResult:timestamp: MATCH",
+    "has received no-match",
+    "lockScreenImmediateFromTouchIDPress",
+    "authenticated as user",
+    "right 'system.login.screensaver'",
 ]
 
 [rule.tag]
