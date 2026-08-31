@@ -2,6 +2,22 @@
 
 All notable changes to Peach will be documented in this file.
 
+## v0.4.0 - 2026-08-31
+
+### New Features
+
+- **Rule pack updates** (**File → Rule packs...**) — get a curated update to the built-in AUL/EVTX/journald tagging rules into a running Peach without waiting for the next app release. Three ways in: **Check for updates...** (the app's only network request, and only when you click it) against a new, dedicated [kalink0/peach-rules](https://github.com/kalink0/peach-rules) repo; **Browse...** via the native file dialog; or dragging a bundle onto the window (not supported on Linux/Wayland — a `winit` windowing-library limitation, not something Peach can work around; use Browse there). Every bundle is a complete, SHA-256-verified snapshot of every rule — never a partial update — previewed as a new/modified/removed diff (derived from each rule's own version number, not a hand-written changelog) before anything is applied, with an offer to immediately re-tag the current session afterward. Every rule now carries its own version, and the Activity Log records which rule version tagged each load/re-tag.
+- AUL rule pack grown from 37 to 39 rules, sourced from Tim Korver's Thesis Friday research — USB active-charging state, AssistiveTouch-triggered sysdiagnose generation, on-screen-keyboard raw touch events, Emergency SOS's watch-side handshake, and macOS Touch-ID-vs-password unlock disambiguation.
+
+### Improvements
+
+- **Help → Rules reference...** now renders as an actual formatted table with clickable links, instead of a raw markdown text dump.
+
+### Documentation
+
+- Peach is now described as a "DFIR log workbench" rather than a "forensic log viewer" — it's grown well past viewing (README, in-app About, CLI help).
+- Removed the winget install instructions from the README; the winget-forensics submission is still pending upstream approval.
+
 ## v0.3.0 - 2026-08-28
 
 ### New Features
