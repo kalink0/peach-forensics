@@ -1,9 +1,15 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+
+# One run per PR at a time — a new push to the same PR cancels whatever CI
+# run was still going for the commit it replaces, instead of letting both
+# finish (same class of waste as the push+pull_request double-trigger this
+# workflow used to have).
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
