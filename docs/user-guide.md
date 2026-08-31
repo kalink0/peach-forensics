@@ -177,7 +177,7 @@ sourcetype = "aul"
 message_contains = ["Screen did lock", "screen is unlocked"]
 ```
 
-`rules/examples/aul_*.toml` is a pattern-of-life rule pack for AUL (37 rule
+`rules/examples/aul_*.toml` is a pattern-of-life rule pack for AUL (39 rule
 files covering human presence/handling, communication and input, application
 activity, connectivity, device state and power, media/audio/camera, motion
 and vehicle, and emergency SOS) — most predicates are sourced from "Apple
@@ -250,6 +250,35 @@ the three or four AUL rules you actually care about for this case, say. See
 [rules-reference.md](rules-reference.md) for the same information as a
 static, browsable table (generated from the same `rules/examples/*.toml`
 files this picker reads).
+
+### Updating the built-in rule packs
+
+**File → Rule packs...** gets a curated update to the built-in AUL/EVTX/journald
+packs into a running Peach without waiting for the next app release — bundles are
+published separately, at [kalink0/peach-rules](https://github.com/kalink0/peach-rules).
+The window shows what's currently active (either the packs embedded in this build, or a
+previously-applied downloaded pack's version) and three ways to get a new one:
+
+- **Check for updates...** — the only network request anywhere in Peach, and only ever
+  runs when you click this. Offers the newest published pack, if it's newer than what's
+  currently active.
+- **Browse...** — pick a `peach-rules-vN.zip` bundle (downloaded from a
+  [release](https://github.com/kalink0/peach-rules/releases) yourself, say) via the
+  normal native file dialog.
+- **Drag a bundle onto the window** — same effect as Browse, if your desktop environment
+  supports drag-and-drop onto Peach. It doesn't everywhere: Linux/Wayland currently
+  doesn't (a `winit`/windowing-library limitation, not something Peach can work around) —
+  use Browse there instead.
+
+Either path leads to the same preview before anything changes: which rules are new,
+modified, or removed relative to what's currently active, computed from each rule's own
+version rather than a hand-written changelog. Nothing is applied until you click
+**Apply**. A pack is always a complete, self-contained snapshot of every AUL/EVTX/journald
+rule (never a partial update), verified (SHA-256 per file, checked against the bundle's
+own manifest) before it's ever trusted — a corrupted or tampered download is refused, not
+applied best-effort. After applying, Peach offers to **re-tag** the current session
+immediately; skipping that just means the new rules only apply to sources loaded from now
+on, same as changing any other rule selection.
 
 Beyond the built-in packs, every `*.toml` file directly in the configured
 [rules directory](#settings) — your own personal rule collection, see

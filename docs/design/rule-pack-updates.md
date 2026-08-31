@@ -306,17 +306,21 @@ Proposed order — each step is independently testable, later steps depend on ea
      the scratch extraction directory afterward regardless of success/failure. 3 new tests
      (empty dest, wholesale-replaces a stale previous pack including its old manifest.toml,
      creates dest_dir if missing).
-   - **7a, the update check — done.** New module `tagging::pack_update` — **the app's first
-     and only network call**, ureq (chosen over reqwest specifically to stay synchronous,
-     matching the existing `std::thread::spawn`+`mpsc` background-work pattern instead of
-     pulling in an async runtime). `check_for_update(current_pack_version)` hits GitHub's
-     Releases API, `pick_latest_update` (pure, unit-tested without network — 9 tests: tag
-     parsing, picks-highest, ignores app-release tags/tag-without-matching-asset, respects
-     `current_pack_version`) picks the newest `peach-rules-v{N}` release with a matching
-     `.zip` asset. `download_update` fetches the bytes only — verification stays
-     `pack_bundle::load_pack_bundle`'s job. Manually verified against the real repo's
-     GitHub API (correctly returns `Ok(None)`, since no `peach-rules-v*` release exists
-     yet) via a throwaway example, cleaned up after.
+   - **7a, the update check — done, fully live-verified end to end.** New module
+     `tagging::pack_update` — **the app's first and only network call**, ureq (chosen over
+     reqwest specifically to stay synchronous, matching the existing
+     `std::thread::spawn`+`mpsc` background-work pattern instead of pulling in an async
+     runtime). `check_for_update(current_pack_version)` hits `kalink0/peach-rules`'
+     Releases API, `pick_latest_update` (pure, unit-tested without network — 9 tests) picks
+     the newest `v{N}` release with a matching `peach-rules-v{N}.zip` asset.
+     `download_update` fetches the bytes only — verification stays
+     `pack_bundle::load_pack_bundle`'s job. After `kalink0/peach-rules`' own CI published a
+     real `v1` release (§6), the *whole* chain was verified live against real
+     infrastructure via throwaway examples: `check_for_update(None)` finds `v1` with the
+     correct download URL, `check_for_update(Some(1))` correctly reports no update, and
+     `download_update` + `load_pack_bundle` against the real downloaded bytes verifies all
+     89 files' SHA-256 against the CI-built `manifest.toml`. Not synthetic fixtures — this
+     is the actual publish → discover → download → verify path working end to end.
    - **7c, the actual dialog — built, pending the user's own visual test.**
      `ui::rule_pack_dialog` (self-contained, mirrors `ui::session_dialog`'s own-background-
      thread shape rather than routing through `app.rs`'s shared file-pick machinery — no

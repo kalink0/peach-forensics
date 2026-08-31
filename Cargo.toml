@@ -37,5 +37,10 @@ uuid = { version = "1.24.0", features = ["v4"] }
 walkdir = "2.5.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+[build-dependencies]
+# Only for stamping PEACH_BUILD_DATE (build.rs) — same version already
+# vetted for the rest of the crate, not a new dependency choice.
+chrono = "0.4.45"
+
 [target."cfg(windows)".build-dependencies]
 winresource = "0.1.31"

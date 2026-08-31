@@ -43,6 +43,8 @@ fn embed_toml_dir(manifest_dir: &str, dir: &str, prefix: &str, const_name: &str,
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
 
+    stamp_build_date();
+
     embed_toml_dir(
         &manifest_dir,
         "rules/examples",
@@ -81,6 +83,31 @@ fn main() {
 
     #[cfg(windows)]
     embed_windows_icon();
+}
+
+/// Stamps `PEACH_BUILD_DATE` (a plain `YYYY-MM-DD`, UTC) into the binary via
+/// `env!("PEACH_BUILD_DATE")` — for every build, unlike `PEACH_BUILD_TAG`
+/// (only set by `nightly.yml`, and only on a nightly). Exists so the
+/// "Rule packs..." dialog can show *something* comparable to a downloaded
+/// pack's `released_at` date when running on the embedded baseline, which
+/// has no `pack_version` number of its own to compare against (see
+/// `ui::rule_pack_dialog::render_header`).
+///
+/// No `rerun-if-changed` tied to this: Cargo may cache build.rs's last
+/// output (including this env var) across an incremental local `cargo
+/// build` that doesn't touch anything build.rs already watches, so the
+/// stamped date can lag slightly behind the exact moment a given binary
+/// was linked. Harmless for what this is used for (a rough "how old is my
+/// baseline" comparison, not anything forensic) — every CI build
+/// (release.yml/nightly.yml) runs from a fresh checkout with no cached
+/// `target/` anyway, so a real shipped build always gets a fresh stamp;
+/// forcing that unconditionally for local dev builds too would mean
+/// re-running build.rs (and relinking) on every single `cargo build`,
+/// which isn't worth trading away incremental-build speed for a cosmetic
+/// date.
+fn stamp_build_date() {
+    let today = chrono::Utc::now().format("%Y-%m-%d");
+    println!("cargo::rustc-env=PEACH_BUILD_DATE={today}");
 }
 
 /// Embeds `resources/windows/peach.ico` as the compiled `.exe`'s icon

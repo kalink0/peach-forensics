@@ -313,13 +313,19 @@ fn render_header(ui: &mut egui::Ui, applied: &AppliedInfo) {
         None => {
             // No downloaded pack has ever been applied — there's no
             // `pack_version` for that case (only a downloaded bundle's
-            // `manifest.toml` has one). The embedded baseline is still
-            // versioned in the sense that matters here, though: it's
-            // fixed at compile time, one snapshot per Peach release, so
-            // the running Peach version *is* its version.
+            // `manifest.toml` has one), so it can't be compared numerically
+            // against a `v{N}` rule pack the way two downloaded packs can
+            // be compared against each other. `PEACH_BUILD_DATE`
+            // (build.rs's `stamp_build_date`, every build, not just
+            // nightly) is offered instead — directly comparable to a
+            // downloaded pack's own `released_at` date, unlike a bare
+            // Peach version number on its own.
             ui.label(format!(
-                "Active rule pack: built-in baseline (Peach {})",
-                env!("CARGO_PKG_VERSION")
+                "Active rule pack: built-in baseline — Peach {}, built {}. No pack \
+                 version number to compare; check the build date above against a \
+                 rule pack's release date to see which is more current.",
+                env!("CARGO_PKG_VERSION"),
+                env!("PEACH_BUILD_DATE"),
             ));
         }
     }
