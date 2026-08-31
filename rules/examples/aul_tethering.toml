@@ -6,6 +6,7 @@
 [rule]
 name = "aul_tethering"
 description = "Personal hotspot / tethering enabled or disabled"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

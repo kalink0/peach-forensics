@@ -11,6 +11,7 @@
 [rule]
 name = "aul_watch_crown_button"
 description = "Apple Watch Digital Crown / side button physical interaction"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

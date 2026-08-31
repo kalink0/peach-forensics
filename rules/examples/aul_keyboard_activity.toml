@@ -10,6 +10,7 @@
 [rule]
 name = "aul_keyboard_activity"
 description = "Active typing — keyboard touch signposts and key-sound requests"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

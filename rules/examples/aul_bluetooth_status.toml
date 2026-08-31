@@ -8,6 +8,7 @@
 [rule]
 name = "aul_bluetooth_status"
 description = "Bluetooth connect/disconnect and call/handsfree audio routing"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

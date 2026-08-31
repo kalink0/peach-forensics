@@ -8,6 +8,7 @@
 [rule]
 name = "evtx_logon_success"
 description = "Successful account logon (Security-Auditing 4624)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

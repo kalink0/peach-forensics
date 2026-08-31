@@ -20,6 +20,7 @@
 [rule]
 name = "aul_dialed_number_recovery"
 description = "CommCenter entries that may carry a dialed number in plain text (kPhoneNumber)"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

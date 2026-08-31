@@ -37,6 +37,16 @@ pub struct RuleBody {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// A curator-maintained, plain-incrementing counter ("1", "2", ...),
+    /// bumped whenever this rule's `match`/`tag` semantics change —
+    /// independent of a rule *pack*'s own release version (see
+    /// `docs/design/rule-pack-updates.md`). `None` for rule files that
+    /// predate this field or were hand-written outside the shipped packs
+    /// (e.g. via "Tag all matching (advanced)...") — versioning is a
+    /// property of the curated built-in packs, not a requirement for every
+    /// rule a user ever writes.
+    #[serde(default)]
+    pub version: Option<String>,
     #[serde(rename = "match")]
     pub match_fields: toml::Table,
     pub tag: TagSpec,
@@ -177,12 +187,14 @@ fn toml_matches_json(expected: &toml::Value, actual: &serde_json::Value) -> bool
 mod tests {
     use super::*;
 
-    /// Every shipped rule file in `rules/examples/` (the AUL
-    /// pattern-of-life pack, see `docs/`) must parse and have a non-empty
-    /// name/tag — a broken TOML file in there would otherwise only surface
-    /// when an analyst actually tries to load it in the app.
+    /// Every shipped rule file in `rules/examples/` (the AUL/EVTX/journald
+    /// packs, see `docs/`) must parse, have a non-empty name/tag, and carry
+    /// a non-empty `version` — a broken TOML file, or one someone forgot to
+    /// version when adding it, would otherwise only surface much later
+    /// (an unversioned rule silently can't participate in the rule-pack
+    /// diff/changelog described in `docs/design/rule-pack-updates.md`).
     #[test]
-    fn every_shipped_rule_file_parses() {
+    fn every_shipped_rule_file_parses_and_is_versioned() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("rules/examples");
         let mut checked = 0;
         for entry in std::fs::read_dir(&dir).unwrap() {
@@ -197,6 +209,11 @@ mod tests {
             assert!(
                 !rule.rule.tag.value.is_empty(),
                 "{}: empty tag value",
+                path.display()
+            );
+            assert!(
+                rule.rule.version.as_deref().is_some_and(|v| !v.is_empty()),
+                "{}: missing or empty version",
                 path.display()
             );
             checked += 1;
@@ -248,6 +265,33 @@ value = "error"
 
         assert_eq!(rule.rule.name, "generic_error");
         assert_eq!(rule.rule.tag.value, "error");
+    }
+
+    #[test]
+    fn parses_an_explicit_version_field() {
+        let toml_text = r#"
+[rule]
+name = "aul_airplane_mode"
+description = "..."
+version = "3"
+
+[rule.match]
+sourcetype = "aul"
+
+[rule.tag]
+value = "airplane_mode"
+"#;
+        let rule = Rule::from_toml_str(toml_text).unwrap();
+        assert_eq!(rule.rule.version.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn version_defaults_to_none_when_absent() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"e\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        assert_eq!(rule.rule.version, None);
     }
 
     #[test]

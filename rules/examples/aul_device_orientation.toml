@@ -10,6 +10,7 @@
 [rule]
 name = "aul_device_orientation"
 description = "Device orientation transitions (portrait/landscape/face up-down)"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

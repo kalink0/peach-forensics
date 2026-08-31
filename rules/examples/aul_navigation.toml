@@ -11,6 +11,7 @@
 [rule]
 name = "aul_navigation"
 description = "Turn-by-turn navigation instructions (Maps usage)"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

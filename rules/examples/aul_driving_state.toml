@@ -11,6 +11,7 @@
 [rule]
 name = "aul_driving_state"
 description = "Vehicular motion classification (does not distinguish driver from passenger)"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

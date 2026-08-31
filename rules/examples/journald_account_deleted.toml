@@ -6,6 +6,7 @@
 [rule]
 name = "journald_account_deleted"
 description = "A local user account was deleted via userdel"
+version = "1"
 
 [rule.match]
 sourcetype = "journald"

@@ -12,6 +12,7 @@
 [rule]
 name = "aul_airplane_mode"
 description = "Airplane mode enabled or disabled"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

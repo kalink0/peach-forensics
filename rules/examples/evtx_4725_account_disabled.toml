@@ -6,6 +6,7 @@
 [rule]
 name = "evtx_account_disabled"
 description = "A user account was disabled (Security-Auditing 4725)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

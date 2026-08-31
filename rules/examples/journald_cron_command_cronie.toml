@@ -15,6 +15,7 @@
 [rule]
 name = "journald_cron_command_cronie"
 description = "A cron job command executed (cronie / RHEL family)"
+version = "1"
 
 [rule.match]
 sourcetype = "journald"

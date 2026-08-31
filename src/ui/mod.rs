@@ -10,6 +10,7 @@ pub mod format_dialog;
 pub mod note_dialog;
 pub mod raw_fields_dialog;
 pub(crate) mod reveal;
+pub mod rule_pack_dialog;
 pub mod rules_reference_dialog;
 pub mod session_dialog;
 pub mod settings_dialog;

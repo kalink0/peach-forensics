@@ -12,6 +12,7 @@
 [rule]
 name = "aul_touchscreen_events"
 description = "Direct touchscreen contact — fingers physically on the glass"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

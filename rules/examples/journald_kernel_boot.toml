@@ -13,6 +13,7 @@
 [rule]
 name = "journald_kernel_boot"
 description = "System boot — kernel version banner, the first ring-buffer message of every boot"
+version = "1"
 
 [rule.match]
 sourcetype = "journald"

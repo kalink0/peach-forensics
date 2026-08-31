@@ -7,6 +7,7 @@
 [rule]
 name = "aul_audio_volume"
 description = "Volume button presses and audio playback state changes"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

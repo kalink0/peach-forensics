@@ -10,6 +10,7 @@
 [rule]
 name = "evtx_group_membership_change_local"
 description = "Member added to a security-enabled local group (Security-Auditing 4732)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

@@ -13,6 +13,7 @@
 [rule]
 name = "aul_sysdiagnose_generation"
 description = "User-initiated sysdiagnose generation via the AssistiveTouch menu"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

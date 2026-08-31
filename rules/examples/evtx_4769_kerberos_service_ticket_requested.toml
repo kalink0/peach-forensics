@@ -10,6 +10,7 @@
 [rule]
 name = "evtx_kerberos_service_ticket_requested"
 description = "A Kerberos service ticket was requested — domain controllers only (Security-Auditing 4769)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

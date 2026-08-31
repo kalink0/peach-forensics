@@ -12,6 +12,7 @@
 [rule]
 name = "evtx_kernel_power_unexpected_reboot"
 description = "Kernel-Power's own unexpected-reboot marker (41)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

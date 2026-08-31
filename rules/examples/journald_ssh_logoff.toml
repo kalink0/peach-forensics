@@ -9,6 +9,7 @@
 [rule]
 name = "journald_ssh_logoff"
 description = "An SSH session ended (sshd \"session closed for user\")"
+version = "1"
 
 [rule.match]
 sourcetype = "journald"

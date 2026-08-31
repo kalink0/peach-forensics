@@ -10,6 +10,7 @@
 [rule]
 name = "evtx_group_membership_change_universal"
 description = "Member added to a security-enabled universal group (Security-Auditing 4756)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

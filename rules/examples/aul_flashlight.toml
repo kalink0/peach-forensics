@@ -8,6 +8,7 @@
 [rule]
 name = "aul_flashlight"
 description = "Flashlight/torch turned on or off"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

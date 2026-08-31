@@ -26,6 +26,7 @@
 [rule]
 name = "aul_emergency_sos"
 description = "Emergency SOS engine status/flow (presence alone is not proof of a call)"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

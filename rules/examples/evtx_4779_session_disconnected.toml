@@ -9,6 +9,7 @@
 [rule]
 name = "evtx_session_disconnected"
 description = "A session was disconnected from a Window Station (Security-Auditing 4779)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

@@ -9,6 +9,7 @@
 [rule]
 name = "aul_sim_cellular_state"
 description = "SIM slot status and cellular/WiFi data network type changes"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

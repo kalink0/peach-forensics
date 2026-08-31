@@ -8,6 +8,7 @@
 [rule]
 name = "evtx_scheduled_task_deleted"
 description = "A scheduled task was deleted (Security-Auditing 4699)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

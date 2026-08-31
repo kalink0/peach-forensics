@@ -8,6 +8,7 @@
 [rule]
 name = "aul_power_events"
 description = "Boot and orderly shutdown markers"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

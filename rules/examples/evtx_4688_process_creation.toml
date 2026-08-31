@@ -8,6 +8,7 @@
 [rule]
 name = "evtx_process_creation"
 description = "New process created (Security-Auditing 4688)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

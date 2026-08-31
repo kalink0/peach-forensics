@@ -9,6 +9,7 @@
 [rule]
 name = "evtx_privileged_logon"
 description = "Special privileges assigned to a new logon (Security-Auditing 4672)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

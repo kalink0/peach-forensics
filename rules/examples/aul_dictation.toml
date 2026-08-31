@@ -8,6 +8,7 @@
 [rule]
 name = "aul_dictation"
 description = "Voice dictation (keyboard mic input) start/end"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

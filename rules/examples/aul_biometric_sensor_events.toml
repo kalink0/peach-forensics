@@ -21,6 +21,7 @@
 [rule]
 name = "aul_biometric_sensor_events"
 description = "Face ID / Touch ID sensor-level events (not the unlock decision itself)"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

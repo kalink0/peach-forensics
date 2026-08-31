@@ -8,6 +8,7 @@
 [rule]
 name = "evtx_service_install"
 description = "A service was installed (Security-Auditing 4697)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

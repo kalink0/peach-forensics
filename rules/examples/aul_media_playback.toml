@@ -10,6 +10,7 @@
 [rule]
 name = "aul_media_playback"
 description = "Media now-playing state, playback changes, and route info"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

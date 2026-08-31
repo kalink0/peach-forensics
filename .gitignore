@@ -31,6 +31,10 @@ CLAUDE.md
 # never versioned.
 _lava_*.db
 
+# --- Rule pack bundles (scripts/publish_rule_pack.py output) ---
+# Build artifacts, published as GitHub Release assets, never committed.
+/dist/
+
 # --- Editor / IDE ---
 .vscode/
 .idea/
