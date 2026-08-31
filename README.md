@@ -43,11 +43,6 @@ brew trust kalink0/forensics
 brew install peach-forensics
 ```
 
-**Windows (winget)**
-```powershell
-winget install kalink0.Peach
-```
-
 **Windows (Scoop)**
 ```powershell
 scoop bucket add forensics https://github.com/kalink0/scoop-forensics
