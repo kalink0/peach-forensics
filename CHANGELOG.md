@@ -2,6 +2,12 @@
 
 All notable changes to Peach will be documented in this file.
 
+## v0.4.1 - 2026-08-31
+
+### Bug Fixes
+
+- **Rules reference...** no longer shows a fixed, build-time snapshot of the built-in rules — it now reads whatever's actually active, so applying a downloaded rule pack (**File → Rule packs...**) updates it immediately instead of requiring a new Peach release. Also shows which tier is currently active (built-in baseline vs. a downloaded pack's version), and disables "Open on GitHub..." while a downloaded pack is active, since that link only ever matches the baseline.
+
 ## v0.4.0 - 2026-08-31
 
 ### New Features
