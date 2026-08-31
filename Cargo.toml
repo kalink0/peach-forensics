@@ -15,6 +15,7 @@ directories = "6.0.0"
 duckdb = { version = "1.10505.0", features = ["bundled", "chrono", "json", "serde_json"] }
 eframe = "0.35.0"
 egui = "0.35.0"
+egui_commonmark = "0.24.0"
 egui_extras = { version = "0.35.0", features = ["datepicker"] }
 evtx = { version = "0.12.2", default-features = false, features = ["multithreading"] }
 jiff = "0.2.35"

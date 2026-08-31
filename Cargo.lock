@@ -1486,6 +1486,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui_commonmark"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c833127228cc61cef806166adadc23572431fe2ea4cf753e60f654f82a2b3270"
+dependencies = [
+ "egui",
+ "egui_commonmark_backend",
+ "egui_extras",
+ "pulldown-cmark 0.13.4",
+]
+
+[[package]]
+name = "egui_commonmark_backend"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5758a1110eb8259743c9b220241c30ff014b2dec53c1a2b861d464e41fa3483e"
+dependencies = [
+ "egui",
+ "egui_extras",
+ "pulldown-cmark 0.13.4",
+]
+
+[[package]]
 name = "egui_extras"
 version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1494,6 +1517,7 @@ dependencies = [
  "ahash",
  "egui",
  "enum-map",
+ "image",
  "itertools",
  "jiff",
  "log",
@@ -3439,6 +3463,7 @@ dependencies = [
  "duckdb",
  "eframe",
  "egui",
+ "egui_commonmark",
  "egui_extras",
  "evtx",
  "jiff",
@@ -3774,6 +3799,17 @@ name = "pulldown-cmark"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57206b407293d2bcd3af849ce869d52068623f19e1b5ff8e8778e3309439682b"
+dependencies = [
+ "bitflags 2.13.1",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
 dependencies = [
  "bitflags 2.13.1",
  "memchr",
@@ -4367,7 +4403,7 @@ dependencies = [
  "cargo_metadata",
  "error-chain",
  "glob",
- "pulldown-cmark",
+ "pulldown-cmark 0.9.6",
  "tempfile",
  "walkdir",
 ]
