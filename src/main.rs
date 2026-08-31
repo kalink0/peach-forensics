@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-/// Peach — forensic multi-log viewer. Can be started standalone or handed
+/// Peach — DFIR log workbench. Can be started standalone or handed
 /// evidence paths by crush; runs fully independently afterward (no IPC).
 #[derive(Parser, Debug)]
 #[command(name = "peach")]

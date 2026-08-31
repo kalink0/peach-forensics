@@ -68,10 +68,10 @@ impl AboutDialog {
 
 fn about_tab(ui: &mut egui::Ui) {
     ui.heading(format!("Peach {}", display_version()));
-    ui.label("Forensic Multi-Log Viewer  ·  © 2026 Marco Neumann (kalink0)");
+    ui.label("DFIR Log Workbench  ·  © 2026 Marco Neumann (kalink0)");
     ui.add_space(6.0);
     ui.label(
-        "A lean, local-first forensic log viewer for DFIR work. Parses log \
+        "A lean, local-first DFIR log workbench. Parses log \
          sources — AUL, EVTX, journald, and TOML-configurable text logs — \
          into a normalized, taggable timeline, with a Splunk-inspired \
          search syntax and semantic tagging.",

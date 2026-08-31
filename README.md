@@ -11,7 +11,7 @@
 [![License](https://img.shields.io/github/license/kalink0/peach-forensics)](https://github.com/kalink0/peach-forensics/blob/main/LICENSE)
 ![Rust](https://img.shields.io/badge/rust-edition%202024-orange)
 
-A lean, local-first forensic log viewer for DFIR work. Parses log sources into a
+A lean, local-first DFIR log workbench. Parses log sources into a
 normalized, taggable timeline stored in DuckDB, with a Splunk-inspired search syntax
 and a SQLite session layer for analyst tags. Rust + egui, no server, no cloud.
 
