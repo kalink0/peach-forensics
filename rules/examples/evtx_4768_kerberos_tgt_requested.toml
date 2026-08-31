@@ -10,6 +10,7 @@
 [rule]
 name = "evtx_kerberos_tgt_requested"
 description = "A Kerberos TGT was requested — domain controllers only (Security-Auditing 4768)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

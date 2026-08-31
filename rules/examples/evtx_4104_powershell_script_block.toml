@@ -17,6 +17,7 @@
 [rule]
 name = "evtx_powershell_script_block"
 description = "PowerShell Script Block Logging — records the actual (de-obfuscated) code executed (4104)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

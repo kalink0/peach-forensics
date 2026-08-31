@@ -6,6 +6,7 @@
 [rule]
 name = "aul_wifi_status"
 description = "WiFi state changes, network joins, and scan activity"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

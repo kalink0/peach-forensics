@@ -9,6 +9,7 @@
 [rule]
 name = "journald_ssh_logon_failure"
 description = "Failed SSH authentication attempt (sshd \"Failed ...\"/\"Invalid user\")"
+version = "1"
 
 [rule.match]
 sourcetype = "journald"

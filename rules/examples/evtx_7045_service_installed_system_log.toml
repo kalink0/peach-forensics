@@ -15,6 +15,7 @@
 [rule]
 name = "evtx_service_install_system_log"
 description = "A service was installed, from the System log (Service Control Manager, event 7045)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

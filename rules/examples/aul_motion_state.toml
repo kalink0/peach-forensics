@@ -7,6 +7,7 @@
 [rule]
 name = "aul_motion_state"
 description = "Motion/activity state transitions (walking, stationary, etc.)"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

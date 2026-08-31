@@ -30,6 +30,25 @@ pub fn default_user_rules_dir() -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Where the currently-applied downloaded/drag-and-dropped rule pack
+/// (`tagging::pack_bundle`, see `docs/design/rule-pack-updates.md`) lives —
+/// a sibling of [`default_user_rules_dir`], not the same directory: that
+/// one is the analyst's own hand-curated rules (tier 3), this one holds
+/// whatever `tagging::builtin::active_builtin_rules` should use *instead
+/// of* the embedded baseline (tier 2), wholesale-replaced on every apply,
+/// never merged with tier 3. Not yet configurable via `Settings` the way
+/// `rules_dir` is — nothing writes into this directory yet (that's the
+/// still-unbuilt UI, `docs/design/rule-pack-updates.md` step 7), so an
+/// override wouldn't have anything to point at.
+pub fn default_applied_pack_dir() -> anyhow::Result<PathBuf> {
+    let project_dirs = ProjectDirs::from("", "", "peach")
+        .context("could not determine a per-user data directory on this platform")?;
+    let dir = project_dirs.data_dir().join("rule_pack");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create rule pack directory {}", dir.display()))?;
+    Ok(dir)
+}
+
 /// Every `*.toml` file directly under `dir` (not recursive — `create_rule`
 /// only ever writes flat into the configured rules directory, never into a
 /// subfolder), sorted for deterministic ordering. This is what "auto-load

@@ -16,6 +16,7 @@
 [rule]
 name = "aul_keyboard_activity_touch"
 description = "Raw on-screen-keyboard touch down/drag (subsystem UIKitCore / com.apple.UIKit:KeyboardTouch)"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

@@ -12,6 +12,7 @@
 [rule]
 name = "aul_app_focus_lifecycle"
 description = "Foreground app focus changes, cold starts vs. resumes, force-kills"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

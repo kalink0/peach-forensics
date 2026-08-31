@@ -514,6 +514,17 @@ pub struct ActivityFileCount {
 pub struct ActivityRuleCount {
     pub rule_name: String,
     pub count: usize,
+    /// This rule's `tagging::rule::RuleBody::version` at the moment this
+    /// load/re-tag ran — `None` for a rule with no `version` field (an
+    /// older or hand-written rule outside the shipped/downloaded packs,
+    /// see `docs/design/rule-pack-updates.md` §5) and, via `#[serde(default)]`,
+    /// for any `activity_log` row written before this field existed.
+    /// This is what answers "which rule-pack version tagged this source"
+    /// for a given load/re-tag — deliberately not a separate "pack was
+    /// updated" log event, since that wouldn't be tied to any particular
+    /// run; see §5 for the full reasoning.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// One row from `activity_log` — what one load or re-tag operation did, read
@@ -1118,6 +1129,7 @@ mod tests {
             tags_by_rule: vec![ActivityRuleCount {
                 rule_name: "evtx_logon_success".to_string(),
                 count: 12,
+                version: Some("2".to_string()),
             }],
             skip_bad_records_enabled: true,
         }
@@ -1162,6 +1174,7 @@ mod tests {
             vec![ActivityRuleCount {
                 rule_name: "evtx_logon_success".to_string(),
                 count: 12,
+                version: Some("2".to_string()),
             }]
         );
         assert!(entry.skip_bad_records_enabled);
@@ -1245,6 +1258,7 @@ mod tests {
                 tags_by_rule: vec![ActivityRuleCount {
                     rule_name: "generic_error".to_string(),
                     count: 42,
+                    version: None,
                 }],
                 skip_bad_records_enabled: false,
             },
@@ -1262,6 +1276,40 @@ mod tests {
             vec![ActivityRuleCount {
                 rule_name: "generic_error".to_string(),
                 count: 42,
+                version: None,
+            }]
+        );
+    }
+
+    /// A `tags_by_rule` JSON blob written before `version` existed
+    /// (`'{"rule_name": "x", "count": 1}'`, no `version` key at all) must
+    /// still deserialize — `#[serde(default)]` on `ActivityRuleCount::version`
+    /// is what makes an old Activity Log entry readable after upgrading
+    /// Peach, not a schema migration (there's nothing to migrate: this
+    /// column is a JSON blob, not fixed SQL columns — see
+    /// `db::session_schema::setup_session_schema`'s doc comment).
+    #[test]
+    fn tags_by_rule_without_a_version_key_deserializes_as_none() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_session_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO activity_log
+                (operation, started_at, finished_at, source_path, sourcetype,
+                 status, error, entries_inserted, tags_applied, skipped,
+                 per_file, tags_by_rule, skip_bad_records_enabled)
+             VALUES ('retag', 1, 2, NULL, NULL, 'ok', NULL, NULL, 1, '[]', '[]', ?1, 0)",
+            params!["[{\"rule_name\": \"generic_error\", \"count\": 1}]"],
+        )
+        .unwrap();
+
+        let entries = all_activity_log_entries(&conn).unwrap();
+
+        assert_eq!(
+            entries[0].tags_by_rule,
+            vec![ActivityRuleCount {
+                rule_name: "generic_error".to_string(),
+                count: 1,
+                version: None,
             }]
         );
     }

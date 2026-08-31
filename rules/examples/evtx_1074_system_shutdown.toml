@@ -9,6 +9,7 @@
 [rule]
 name = "evtx_system_shutdown_requested"
 description = "A system shutdown or restart was requested, with requestor and reason (1074)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

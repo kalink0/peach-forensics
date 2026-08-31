@@ -13,6 +13,7 @@
 [rule]
 name = "aul_carplay_connection"
 description = "CarPlay accessory handshake, CarKit session auth, and per-vehicle state"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

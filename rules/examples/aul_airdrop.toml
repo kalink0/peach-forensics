@@ -10,6 +10,7 @@
 [rule]
 name = "aul_airdrop"
 description = "AirDrop discoverability, ID, and transfer activity"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

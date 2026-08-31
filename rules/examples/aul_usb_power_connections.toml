@@ -19,6 +19,7 @@
 [rule]
 name = "aul_usb_power_connections"
 description = "USB/power cable attach and detach"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

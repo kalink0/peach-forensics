@@ -23,9 +23,11 @@ independently (no IPC).
 
 Currently implemented: AUL (`.logarchive`), EVTX, journald, and TOML-configurable
 text log parsing, import-time and re-tag tagging, session persistence, portable
-case export/import for handing a case to another analyst, and CLI source
-handoff. See [docs/supported-sources.md](docs/supported-sources.md) for the
-authoritative, up-to-date list of what actually works today.
+case export/import for handing a case to another analyst, downloadable updates
+to the built-in tagging rule packs (**File → Rule packs...**, independent of
+app releases — see [kalink0/peach-rules](https://github.com/kalink0/peach-rules)),
+and CLI source handoff. See [docs/supported-sources.md](docs/supported-sources.md)
+for the authoritative, up-to-date list of what actually works today.
 
 ## Download
 
@@ -112,7 +114,11 @@ built on [egui/eframe](https://egui.rs); the bulk timeline on
 full dependency list with licenses.
 
 The built-in tagging rule packs (`rules/examples/*.toml`) are built on
-published research and primary sources, not re-derived from scratch:
+published research and primary sources, not re-derived from scratch. Curated
+updates to them are published independently of Peach itself at
+[kalink0/peach-rules](https://github.com/kalink0/peach-rules) — see
+**File → Rule packs...** in the app, or that repo's own README for the bundle/
+version format if you just want the rules for something other than Peach:
 
 - **AUL** — most predicates sourced from ["Apple Unified Log Predicates in
   iLEAPP: The

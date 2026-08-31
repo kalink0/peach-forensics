@@ -11,6 +11,7 @@
 [rule]
 name = "evtx_system_boot"
 description = "System startup — Event Log service started (6005)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

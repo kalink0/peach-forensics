@@ -17,6 +17,7 @@
 [rule]
 name = "journald_account_lock_state_changed"
 description = "An account was locked or unlocked via usermod -L/-U"
+version = "1"
 
 [rule.match]
 sourcetype = "journald"

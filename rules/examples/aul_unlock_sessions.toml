@@ -26,6 +26,7 @@
 [rule]
 name = "aul_unlock_sessions"
 description = "Unlock session duration, authentication method, and outcome"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

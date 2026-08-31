@@ -202,7 +202,13 @@ fn render_entry(ui: &mut egui::Ui, entry: &ActivityLogEntry) {
     if !entry.tags_by_rule.is_empty() {
         ui.label("Per rule:");
         for rule in &entry.tags_by_rule {
-            ui.label(format!("  {}: {} tags", rule.rule_name, rule.count));
+            match &rule.version {
+                Some(version) => ui.label(format!(
+                    "  {} (v{version}): {} tags",
+                    rule.rule_name, rule.count
+                )),
+                None => ui.label(format!("  {}: {} tags", rule.rule_name, rule.count)),
+            };
         }
     }
 }
@@ -236,6 +242,7 @@ mod tests {
             tags_by_rule: vec![ActivityRuleCount {
                 rule_name: "evtx_logon_success".to_string(),
                 count: 12,
+                version: Some("2".to_string()),
             }],
             skip_bad_records_enabled: false,
         }

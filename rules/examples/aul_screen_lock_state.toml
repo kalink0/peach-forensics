@@ -8,6 +8,7 @@
 [rule]
 name = "aul_screen_lock_state"
 description = "Screen lock/unlock and biometric match events"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

@@ -8,6 +8,7 @@
 [rule]
 name = "evtx_account_lockout"
 description = "A user account was locked out (Security-Auditing 4740)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

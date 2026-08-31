@@ -8,6 +8,7 @@
 [rule]
 name = "aul_battery_state"
 description = "Battery charge level and charging state changes"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

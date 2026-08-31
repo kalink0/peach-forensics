@@ -9,6 +9,7 @@
 [rule]
 name = "aul_notification_interactions"
 description = "User interaction with a notification (removal, tap-through, reply, ...)"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

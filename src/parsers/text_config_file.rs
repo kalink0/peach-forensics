@@ -384,7 +384,7 @@ mod tests {
     /// Every shipped `parsers/examples/*.toml` must parse as a valid
     /// [`TextFormatDraft`] — same "catch a broken built-in before an
     /// analyst ever hits it" reasoning as
-    /// `tagging::rule::tests::every_shipped_rule_file_parses`.
+    /// `tagging::rule::tests::every_shipped_rule_file_parses_and_is_versioned`.
     #[test]
     fn every_shipped_builtin_format_parses() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("parsers/examples");

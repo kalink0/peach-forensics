@@ -17,6 +17,7 @@
 [rule]
 name = "aul_keyboard_activity_signposts"
 description = "Keyboard touch signposts (subsystem UIKitCore / com.apple.TextInput)"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

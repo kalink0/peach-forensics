@@ -48,9 +48,16 @@ pub fn setup_session_schema(conn: &Connection) -> Result<()> {
         -- source-shaped value: `per_file` is `{\"path\": ..., \"inserted\":
         -- ...}` per successfully-loaded file (a multi-file load's per-file
         -- breakdown; empty for a re-tag), `tags_by_rule` is `{\"rule_name\":
-        -- ..., \"count\": ...}` per rule that matched anything (keyed by
-        -- rule *name*, not tag value — several rules can deliberately share
-        -- a tag value, e.g. EVTX's group-membership-change rules).
+        -- ..., \"count\": ..., \"version\": ...}` per rule that matched
+        -- anything (keyed by rule *name*, not tag value — several rules can
+        -- deliberately share a tag value, e.g. EVTX's group-membership-
+        -- change rules). `version` (nullable, added later — a JSON blob
+        -- column needs no migration for a new optional key, unlike a real
+        -- SQL column) is that rule's `tagging::rule::RuleBody::version` at
+        -- the time this load/re-tag ran, so a stored entry answers which
+        -- rule-pack version tagged something, without needing a separate,
+        -- not-tied-to-any-run pack-was-updated event — see
+        -- `docs/design/rule-pack-updates.md` §5.
         CREATE TABLE IF NOT EXISTS activity_log (
             id                INTEGER PRIMARY KEY,
             operation         TEXT NOT NULL,

@@ -10,6 +10,7 @@
 [rule]
 name = "aul_audio_routes"
 description = "Audio output routing — receiver, speaker, or Bluetooth device"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

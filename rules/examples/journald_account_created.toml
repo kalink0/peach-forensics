@@ -6,6 +6,7 @@
 [rule]
 name = "journald_account_created"
 description = "A local user account was created via useradd"
+version = "1"
 
 [rule.match]
 sourcetype = "journald"

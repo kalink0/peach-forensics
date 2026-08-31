@@ -12,6 +12,7 @@
 [rule]
 name = "evtx_network_share_access_check"
 description = "A network share (SMB) object access was checked (Security-Auditing 5145)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

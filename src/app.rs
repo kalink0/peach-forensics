@@ -38,6 +38,7 @@ use crate::ui::filter_bar::FilterBar;
 use crate::ui::format_dialog::{FormatDialog, FormatDialogOutcome};
 use crate::ui::note_dialog::{NoteDialog, NoteDialogOutcome};
 use crate::ui::raw_fields_dialog::RawFieldsDialog;
+use crate::ui::rule_pack_dialog::{RulePackDialog, RulePackDialogOutcome};
 use crate::ui::rules_reference_dialog::RulesReferenceDialog;
 use crate::ui::session_dialog::{self, SessionManagerDialog, SessionManagerOutcome};
 use crate::ui::settings_dialog::{self, SettingsDialog, SettingsOutcome};
@@ -106,6 +107,12 @@ enum FilePickOutcome {
     PortableCaseExportTarget(Option<PathBuf>),
     /// Open-dialog source for "Import portable case..." — same reasoning.
     PortableCaseImportSource(Option<PathBuf>),
+    /// Open-dialog source for "Rule packs..."'s "Browse..." button — the
+    /// works-everywhere fallback for picking a `peach-rules-vN.zip`
+    /// bundle, since drag-and-drop doesn't work on Wayland (see
+    /// `ui::rule_pack_dialog`'s module doc). Same single-path reasoning as
+    /// `PortableCaseImportSource`.
+    RulePackBundle(Option<PathBuf>),
 }
 
 /// Spawns a thread that blocks on `task` (an already-created
@@ -403,6 +410,7 @@ pub struct PeachApp {
     case_summary_dialog: CaseSummaryDialog,
     builtin_rules_dialog: BuiltinRulesDialog,
     rules_reference_dialog: RulesReferenceDialog,
+    rule_pack_dialog: RulePackDialog,
     /// Wall-clock anchor for the `Theme::Rainbow` animation — see
     /// `theme::tick`'s doc comment for why it's elapsed-time-based rather
     /// than a per-frame step.
@@ -591,10 +599,20 @@ impl PeachApp {
                 .rules_dir()
                 .and_then(|dir| rule_file::scan_rules_dir(&dir))
                 .unwrap_or_default(),
-            enabled_builtin_rules: crate::tagging::builtin::all_builtin_rules()
-                .iter()
-                .map(|rule| rule.rule.name.clone())
-                .collect(),
+            // `active_builtin_rules` is tier 2 (a currently-applied
+            // downloaded rule pack) wholesale-replacing tier 1 (the
+            // embedded baseline) when present — see
+            // `docs/design/rule-pack-updates.md` §3. `.ok()` on the
+            // directory lookup: same best-effort tolerance as `rule_paths`
+            // above, since nothing writes into that directory yet (the
+            // still-unbuilt UI, step 7) so it's normal for the lookup to
+            // find nothing.
+            enabled_builtin_rules: crate::tagging::builtin::active_builtin_rules(
+                rule_file::default_applied_pack_dir().ok().as_deref(),
+            )
+            .iter()
+            .map(|rule| rule.rule.name.clone())
+            .collect(),
             file_pick_rx: None,
             load_state: LoadState::Idle,
             load_rx: None,
@@ -628,6 +646,7 @@ impl PeachApp {
             case_summary_dialog: CaseSummaryDialog::Closed,
             builtin_rules_dialog: BuiltinRulesDialog::Closed,
             rules_reference_dialog: RulesReferenceDialog::Closed,
+            rule_pack_dialog: RulePackDialog::Closed,
             rainbow_start: None,
             tag_preview_rx: None,
             tag_preview_key: None,
@@ -740,6 +759,10 @@ impl PeachApp {
                 started_at,
                 chrono::Utc::now().timestamp(),
                 &retag_result,
+                RuleSelection {
+                    paths: &rule_paths,
+                    enabled_builtin_rules: &enabled_builtin_rules,
+                },
             );
             let result = retag_result.map_err(|err| format!("{err:#}"));
             let _ = tx.send(RetagOutcome::Done(result));
@@ -916,6 +939,10 @@ impl PeachApp {
                 chrono::Utc::now().timestamp(),
                 &load_result,
                 skip_bad_records,
+                RuleSelection {
+                    paths: &rule_paths,
+                    enabled_builtin_rules: &enabled_builtin_rules,
+                },
             );
             let result = load_result
                 .map(|summary| (summary, start.elapsed()))
@@ -1417,6 +1444,33 @@ impl PeachApp {
         }
     }
 
+    /// Starts a re-tag when the "Rule packs..." dialog's own Apply flow
+    /// asks for one — everything else about that dialog (checking for
+    /// updates, verifying a dropped bundle, previewing the diff, applying
+    /// it) is entirely self-contained; re-tagging the current session is
+    /// the one piece that belongs to `app.rs`'s existing machinery
+    /// (`start_retag`), same division of labor as `handle_session_dialog`.
+    fn handle_rule_pack_dialog(&mut self, ctx: &egui::Context) {
+        if !self.rule_pack_dialog.is_open() {
+            return;
+        }
+        match self.rule_pack_dialog.ui(ctx, self.file_pick_rx.is_some()) {
+            Some(RulePackDialogOutcome::RetagRequested) => self.start_retag(),
+            Some(RulePackDialogOutcome::BrowseRequested) => {
+                let task = rfd::AsyncFileDialog::new()
+                    .add_filter("Peach Rule Pack", &["zip"])
+                    .pick_file();
+                self.file_pick_rx = Some(spawn_dialog_pick(
+                    task,
+                    |picked: Option<rfd::FileHandle>| {
+                        FilePickOutcome::RulePackBundle(picked.map(|h| h.path().to_path_buf()))
+                    },
+                ));
+            }
+            None => {}
+        }
+    }
+
     /// Reads the current session's `display_name` (see
     /// `session::persist::load_display_name`) fresh from its `.sqlite`
     /// file — `None` on any failure or if none was ever set, same
@@ -1665,13 +1719,17 @@ impl eframe::App for PeachApp {
                         FilePickOutcome::PortableCaseImportSource(Some(picked)) => {
                             self.start_portable_case_import(picked);
                         }
+                        FilePickOutcome::RulePackBundle(Some(picked)) => {
+                            self.rule_pack_dialog.begin_verify_file(picked);
+                        }
                         // The analyst cancelled the dialog — nothing to update.
                         FilePickOutcome::SourcePaths(None)
                         | FilePickOutcome::ParserConfigFile(None)
                         | FilePickOutcome::RuleFiles(None)
                         | FilePickOutcome::ExportTarget(None)
                         | FilePickOutcome::PortableCaseExportTarget(None)
-                        | FilePickOutcome::PortableCaseImportSource(None) => {}
+                        | FilePickOutcome::PortableCaseImportSource(None)
+                        | FilePickOutcome::RulePackBundle(None) => {}
                     }
                     self.file_pick_rx = None;
                 }
@@ -2075,6 +2133,10 @@ impl eframe::App for PeachApp {
                         ));
                     }
                     ui.separator();
+                    if ui.button("Rule packs...").clicked() {
+                        self.rule_pack_dialog = RulePackDialog::open();
+                        ui.close();
+                    }
                     if ui.button("Settings...").clicked() {
                         self.settings_dialog = SettingsDialog::open(self.settings.clone());
                         ui.close();
@@ -2699,6 +2761,7 @@ impl eframe::App for PeachApp {
         self.builtin_rules_dialog
             .ui(ui.ctx(), &mut self.enabled_builtin_rules);
         self.rules_reference_dialog.ui(ui.ctx());
+        self.handle_rule_pack_dialog(ui.ctx());
     }
 }
 
@@ -3568,11 +3631,13 @@ fn record_load_activity_entry(
     finished_at: i64,
     result: &anyhow::Result<LoadSummary>,
     skip_bad_records_enabled: bool,
+    rules: RuleSelection,
 ) {
     let Ok(conn) = persist::open_session_db(sqlite_path) else {
         eprintln!("peach: failed to open session DB to record activity log entry");
         return;
     };
+    let rule_versions = rule_version_lookup(rules);
     let entry = match result {
         Ok(summary) => persist::NewActivityLogEntry {
             operation: "load".to_string(),
@@ -3612,7 +3677,7 @@ fn record_load_activity_entry(
                         .unwrap_or(0),
                 })
                 .collect(),
-            tags_by_rule: rule_counts_to_activity_counts(&summary.tags_by_rule),
+            tags_by_rule: rule_counts_to_activity_counts(&summary.tags_by_rule, &rule_versions),
             skip_bad_records_enabled,
         },
         Err(err) => persist::NewActivityLogEntry {
@@ -3639,19 +3704,43 @@ fn record_load_activity_entry(
 /// Sorted by rule name for determinism — a `HashMap`'s iteration order
 /// isn't stable, and the forensic principle of "same inputs, same result"
 /// (see CLAUDE.md) applies just as much to what lands in the Activity Log
-/// as to anything else recorded about a load.
+/// as to anything else recorded about a load. `rule_versions` is looked up
+/// by [`rule_version_lookup`] from whatever rule set actually ran — a rule
+/// absent from it (shouldn't happen, since `tags_by_rule` only ever
+/// contains names of rules that just matched something) gets `None`
+/// rather than panicking, since a stale/mismatched lookup is not worth
+/// failing an Activity Log write over.
 fn rule_counts_to_activity_counts(
     tags_by_rule: &HashMap<String, usize>,
+    rule_versions: &HashMap<String, Option<String>>,
 ) -> Vec<persist::ActivityRuleCount> {
     let mut counts: Vec<persist::ActivityRuleCount> = tags_by_rule
         .iter()
         .map(|(rule_name, count)| persist::ActivityRuleCount {
             rule_name: rule_name.clone(),
             count: *count,
+            version: rule_versions.get(rule_name).cloned().flatten(),
         })
         .collect();
     counts.sort_by(|a, b| a.rule_name.cmp(&b.rule_name));
     counts
+}
+
+/// The `name → version` of every rule in the set `rule_paths`/
+/// `enabled_builtin_rules` currently resolve to (see `load_rules`) — what
+/// [`rule_counts_to_activity_counts`] stamps onto the Activity Log's
+/// per-rule breakdown, so a load/re-tag entry answers "which rule
+/// *version* produced this tag count" (`docs/design/rule-pack-updates.md`
+/// §5), not just which rule. Best-effort: an unreadable rule file here
+/// means a missing/`None` version for that one entry, not a failure to
+/// record the Activity Log entry at all — same tolerance `load_rules`
+/// itself extends elsewhere.
+fn rule_version_lookup(rules: RuleSelection) -> HashMap<String, Option<String>> {
+    load_rules(rules.paths, rules.enabled_builtin_rules)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|rule| (rule.rule.name, rule.rule.version))
+        .collect()
 }
 
 /// Same reasoning as [`record_load_activity_entry`], for a re-tag — no
@@ -3663,11 +3752,13 @@ fn record_retag_activity_entry(
     started_at: i64,
     finished_at: i64,
     result: &anyhow::Result<RetagSummary>,
+    rules: RuleSelection,
 ) {
     let Ok(conn) = persist::open_session_db(sqlite_path) else {
         eprintln!("peach: failed to open session DB to record activity log entry");
         return;
     };
+    let rule_versions = rule_version_lookup(rules);
     let entry = match result {
         Ok(summary) => persist::NewActivityLogEntry {
             operation: "retag".to_string(),
@@ -3681,7 +3772,7 @@ fn record_retag_activity_entry(
             tags_applied: Some(summary.applied as i64),
             skipped: Vec::new(),
             per_file: Vec::new(),
-            tags_by_rule: rule_counts_to_activity_counts(&summary.tags_by_rule),
+            tags_by_rule: rule_counts_to_activity_counts(&summary.tags_by_rule, &rule_versions),
             skip_bad_records_enabled: false,
         },
         Err(err) => persist::NewActivityLogEntry {
@@ -3730,8 +3821,13 @@ fn load_rules(
                 .with_context(|| format!("invalid rule file {}", path.display()))
         })
         .collect::<anyhow::Result<Vec<Rule>>>()?;
+    // Tier 2 (a currently-applied downloaded rule pack) wholesale-replaces
+    // tier 1 (the embedded baseline) when present, same as the
+    // `enabled_builtin_rules` seed in `PeachApp::new` — see
+    // `docs/design/rule-pack-updates.md` §3.
+    let applied_pack_dir = rule_file::default_applied_pack_dir().ok();
     rules.extend(
-        crate::tagging::builtin::all_builtin_rules()
+        crate::tagging::builtin::active_builtin_rules(applied_pack_dir.as_deref())
             .into_iter()
             .filter(|rule| enabled_builtin_rules.contains(&rule.rule.name)),
     );
@@ -4004,6 +4100,72 @@ mod tests {
         assert!(rules.iter().any(|r| r.rule.tag.value == "custom_tag"));
         assert!(rules.iter().any(|r| r.rule.tag.value == "wifi_status"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rule_version_lookup_reads_each_rules_version_field() {
+        let dir = temp_test_dir("rule-version-lookup");
+        let versioned_path = dir.join("versioned.toml");
+        std::fs::write(
+            &versioned_path,
+            "[rule]\nname = \"versioned\"\nversion = \"7\"\n[rule.match]\nmessage_contains = \"x\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        let unversioned_path = dir.join("unversioned.toml");
+        std::fs::write(
+            &unversioned_path,
+            "[rule]\nname = \"unversioned\"\n[rule.match]\nmessage_contains = \"y\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+
+        let lookup = rule_version_lookup(RuleSelection {
+            paths: &[versioned_path, unversioned_path],
+            enabled_builtin_rules: &no_builtin_rules(),
+        });
+
+        assert_eq!(lookup.get("versioned"), Some(&Some("7".to_string())));
+        assert_eq!(lookup.get("unversioned"), Some(&None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rule_counts_to_activity_counts_stamps_each_rules_version_and_sorts_by_name() {
+        let tags_by_rule = HashMap::from([
+            ("versioned".to_string(), 3usize),
+            ("unversioned".to_string(), 1usize),
+            ("not_in_lookup".to_string(), 2usize),
+        ]);
+        let rule_versions = HashMap::from([
+            ("versioned".to_string(), Some("5".to_string())),
+            ("unversioned".to_string(), None),
+            // "not_in_lookup" deliberately absent — a rule name present in
+            // `tags_by_rule` but missing from `rule_versions` shouldn't
+            // happen in practice, but must fall back to `None` rather than
+            // panicking (see the doc comment).
+        ]);
+
+        let counts = rule_counts_to_activity_counts(&tags_by_rule, &rule_versions);
+
+        assert_eq!(
+            counts,
+            vec![
+                persist::ActivityRuleCount {
+                    rule_name: "not_in_lookup".to_string(),
+                    count: 2,
+                    version: None,
+                },
+                persist::ActivityRuleCount {
+                    rule_name: "unversioned".to_string(),
+                    count: 1,
+                    version: None,
+                },
+                persist::ActivityRuleCount {
+                    rule_name: "versioned".to_string(),
+                    count: 3,
+                    version: Some("5".to_string()),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -4498,6 +4660,10 @@ mod tests {
             1_753_704_010,
             &Ok(summary),
             true,
+            RuleSelection {
+                paths: &[],
+                enabled_builtin_rules: &std::collections::BTreeSet::new(),
+            },
         );
 
         let conn = persist::open_session_db(&sqlite_path).unwrap();

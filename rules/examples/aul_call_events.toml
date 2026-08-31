@@ -12,6 +12,7 @@
 [rule]
 name = "aul_call_events"
 description = "Phone call tracking, call-app navigation, and keypad tone requests"
+version = "1"
 
 [rule.match]
 sourcetype = "aul"

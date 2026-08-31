@@ -9,6 +9,7 @@
 [rule]
 name = "evtx_scheduled_task_created"
 description = "A scheduled task was created (Security-Auditing 4698)"
+version = "1"
 
 [rule.match]
 sourcetype = "evtx"

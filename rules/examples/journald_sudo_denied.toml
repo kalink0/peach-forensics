@@ -10,6 +10,7 @@
 [rule]
 name = "journald_sudo_denied"
 description = "A sudo attempt failed authentication or was refused by policy"
+version = "1"
 
 [rule.match]
 sourcetype = "journald"

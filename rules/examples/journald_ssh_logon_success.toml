@@ -10,6 +10,7 @@
 [rule]
 name = "journald_ssh_logon_success"
 description = "Successful SSH authentication (sshd \"Accepted ...\")"
+version = "1"
 
 [rule.match]
 sourcetype = "journald"
