@@ -1,52 +1,50 @@
-//! "Rules reference" — the full [docs/rules-reference.md](../../docs/rules-reference.md)
-//! content (every built-in AUL/EVTX/journald rule's match condition, tag,
-//! and description), embedded into the binary (`include_str!`, resolved at
-//! compile time from the repo checkout that built it) and shown in-app.
+//! "Rules reference" — every currently active AUL/EVTX/journald tagging
+//! rule's match condition, tag, and description, grouped by sourcetype.
 //!
-//! Originally this menu item just opened the same file on GitHub in the
-//! system browser — cheap to build, but useless for the airgapped/offline
-//! analysis machines a lot of DFIR work actually happens on, and Peach is
-//! explicitly a local-only tool in the first place (no cloud sync, no
-//! server) — requiring internet access just to read documentation about a
-//! feature that itself works entirely offline was the odd one out. This
-//! dialog is the exact same content instead, readable with zero network
-//! access; a button still offers the GitHub copy for whoever has
-//! connectivity and wants that rendering instead.
+//! Built from [`tagging::builtin::active_builtin_rules`] every time the
+//! dialog opens, **not** from the static `docs/rules-reference.md` file this
+//! dialog used to embed via `include_str!`. That file is generated once at
+//! build time from `rules/examples/*.toml` — accurate for the embedded
+//! (tier 1) baseline, but silently stale the moment a downloaded (tier 2)
+//! rule pack is applied via **File → Rule packs...**, since tier 2
+//! wholesale-replaces tier 1 rather than adding to it (see
+//! `tagging::builtin`'s doc comment). Reading the live active rule set
+//! instead means this dialog always matches whatever's actually tagging
+//! entries right now, whichever tier that is.
 //!
-//! The document has two very different kinds of content, rendered two
-//! different ways:
-//! - Headings and prose (the intro, and each pack's provenance paragraph)
-//!   go through [`egui_commonmark`], so links (iLEAPP, Thesis Friday,
-//!   user-guide.md) stay clickable and headings render as headings.
-//! - Each pack's rule table is *not* piped through the markdown renderer.
-//!   `egui_commonmark`'s table cells don't wrap and treat raw HTML as
-//!   literal text rather than a line break — the source doc's `<br>`/
-//!   `&bull;` (a GitHub-table shim, see `scripts/gen_rules_reference.py`)
-//!   would show up as literal `<br>` text instead of a line break, and a
-//!   `Match` cell with 20+ predicates (e.g. `aul_bluetooth_status`) would
-//!   force the whole table absurdly wide with no wrapping. [`parse_rule_row`]
-//!   instead extracts each row into a [`RuleRow`] and [`render_rule_table`]
-//!   draws it with `egui_extras::TableBuilder`, same as the rest of the
-//!   app's tables (see `ui::timeline_view`) — real column wrapping, real
-//!   per-row height instead.
+//! One consequence: the old "Open on GitHub..." button pointed at that same
+//! static file, which only ever matches this dialog's content while tier 1
+//! is active — a downloaded pack has no single corresponding page on
+//! GitHub. The button stays, but is disabled (with an explanatory tooltip)
+//! whenever a downloaded pack is active rather than linking to something
+//! that no longer matches what's on screen.
+//!
+//! Headings/prose go through [`egui_commonmark`] for clickable links and
+//! real heading styles; each pack's rule table is hand-built with
+//! `egui_extras::TableBuilder` instead (real column wrapping, real per-row
+//! height for rules with many predicates) — same split the previous,
+//! markdown-doc-backed version of this dialog used.
 
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_extras::{Column, TableBuilder};
 
+use crate::tagging::builtin;
+use crate::tagging::pack_bundle;
+use crate::tagging::rule::Rule;
+use crate::tagging::rule_file;
 use crate::ui::dialog_window::show_dialog_window;
 
-const RULES_REFERENCE_MD: &str = include_str!("../../docs/rules-reference.md");
-
-/// The GitHub copy of the same file — offered as a secondary "if you have
-/// internet" option, not the primary path anymore.
+/// The GitHub copy of the build-time-generated reference doc — only ever
+/// accurate while the embedded (tier 1) baseline is active, see this
+/// module's doc comment. Gated accordingly in the UI.
 const RULES_REFERENCE_URL: &str =
     "https://github.com/kalink0/peach-forensics/blob/main/docs/rules-reference.md";
 
-/// One `| name | match | tag | description |` data row from the source
-/// doc's pipe tables. `name`/`tag` are always a single backtick-wrapped
-/// code span in the source (see `scripts/gen_rules_reference.py`), so
-/// stripping one leading/trailing backtick is exact, not a heuristic.
+/// One rule, flattened for table display. `name` already carries the
+/// rule's own version suffix (e.g. `aul_airplane_mode (v3)`) when present,
+/// rather than a separate column — keeps the table at the same four
+/// columns the previous doc-backed version had.
 pub struct RuleRow {
     name: String,
     match_condition: String,
@@ -54,15 +52,27 @@ pub struct RuleRow {
     description: String,
 }
 
-/// One `## `-level section of the doc — one rule pack (AUL/EVTX/journald).
+/// One sourcetype's worth of rules — `heading_markdown` is rendered once
+/// through `CommonMarkViewer`, the rows through `TableBuilder`.
 pub struct Section {
-    /// The `## ` heading line plus any prose paragraph(s) before the
-    /// table, still raw markdown, rendered through `CommonMarkViewer`.
-    intro_markdown: String,
+    heading_markdown: String,
     rules: Vec<RuleRow>,
 }
 
 impl RuleRow {
+    fn from_rule(rule: &Rule) -> Self {
+        let name = match &rule.rule.version {
+            Some(version) => format!("{} (v{version})", rule.rule.name),
+            None => rule.rule.name.clone(),
+        };
+        RuleRow {
+            name,
+            match_condition: format_match(&rule.rule.match_fields),
+            tag: rule.rule.tag.value.clone(),
+            description: rule.rule.description.clone().unwrap_or_default(),
+        }
+    }
+
     fn matches_filter(&self, filter_lower: &str) -> bool {
         filter_lower.is_empty()
             || self.name.to_lowercase().contains(filter_lower)
@@ -75,10 +85,15 @@ impl RuleRow {
 pub enum RulesReferenceDialog {
     Closed,
     Open {
-        /// Everything before the first `## ` heading (title + top-level
-        /// intro paragraph) — parsed once at open time, not every frame,
-        /// same reasoning `RawFieldsDialog` pretty-prints `fields` once.
-        preamble_markdown: String,
+        /// `None` — the embedded baseline is active, the only case where
+        /// [`RULES_REFERENCE_URL`] still shows the same rules as this
+        /// dialog. `Some` — a downloaded pack's own `pack_version` (read
+        /// from its `manifest.toml`, best-effort, same as
+        /// `ui::rule_pack_dialog`'s header) is active instead, and the
+        /// "Open on GitHub..." button is disabled accordingly.
+        active_pack_version: Option<u32>,
+        /// Parsed once at open time, not every frame — same reasoning
+        /// `RawFieldsDialog` pretty-prints `fields` once.
         sections: Vec<Section>,
         /// `egui_commonmark`'s image/layout cache — persists across frames
         /// on purpose; recreating it every frame would defeat its point.
@@ -93,10 +108,15 @@ pub enum RulesReferenceDialog {
 
 impl RulesReferenceDialog {
     pub fn open() -> Self {
-        let (preamble_markdown, sections) = parse_reference_doc(RULES_REFERENCE_MD);
+        let applied_pack_dir = rule_file::default_applied_pack_dir().ok();
+        let active_pack_version = applied_pack_dir
+            .as_deref()
+            .and_then(pack_bundle::read_applied_manifest)
+            .map(|manifest| manifest.pack.pack_version);
+        let rules = builtin::active_builtin_rules(applied_pack_dir.as_deref());
         Self::Open {
-            preamble_markdown,
-            sections,
+            active_pack_version,
+            sections: build_sections(&rules),
             cache: CommonMarkCache::default(),
             filter: String::new(),
         }
@@ -110,7 +130,7 @@ impl RulesReferenceDialog {
         let mut close = false;
 
         if let Self::Open {
-            preamble_markdown,
+            active_pack_version,
             sections,
             cache,
             filter,
@@ -143,10 +163,24 @@ impl RulesReferenceDialog {
                         ui.add_space(4.0);
                     });
 
+                    render_active_pack_line(ui, *active_pack_version);
+
                     ui.horizontal(|ui| {
                         ui.label("Filter:");
                         ui.text_edit_singleline(filter);
-                        if ui.button("Open on GitHub...").clicked() {
+                        let github_button = ui.add_enabled(
+                            active_pack_version.is_none(),
+                            egui::Button::new("Open on GitHub..."),
+                        );
+                        let github_button = if active_pack_version.is_some() {
+                            github_button.on_disabled_hover_text(
+                                "A downloaded rule pack is active — the GitHub copy only \
+                                 matches the built-in baseline, not this pack.",
+                            )
+                        } else {
+                            github_button
+                        };
+                        if github_button.clicked() {
                             ui.ctx()
                                 .open_url(egui::OpenUrl::same_tab(RULES_REFERENCE_URL));
                         }
@@ -157,7 +191,14 @@ impl RulesReferenceDialog {
 
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if filter_lower.is_empty() {
-                            CommonMarkViewer::new().show(ui, cache, preamble_markdown);
+                            CommonMarkViewer::new().show(
+                                ui,
+                                cache,
+                                "Built from the rules actually active in this session right \
+                                 now, not a fixed snapshot — this updates whenever a \
+                                 different rule pack is applied. See **File → Rule packs...** \
+                                 to check for updates.",
+                            );
                         }
 
                         for section in sections.iter() {
@@ -170,7 +211,7 @@ impl RulesReferenceDialog {
                                 continue;
                             }
 
-                            CommonMarkViewer::new().show(ui, cache, &section.intro_markdown);
+                            CommonMarkViewer::new().show(ui, cache, &section.heading_markdown);
                             render_rule_table(ui, &visible_rules);
                             ui.add_space(12.0);
                         }
@@ -182,6 +223,105 @@ impl RulesReferenceDialog {
         if close {
             *self = Self::Closed;
         }
+    }
+}
+
+fn render_active_pack_line(ui: &mut egui::Ui, active_pack_version: Option<u32>) {
+    match active_pack_version {
+        Some(version) => {
+            ui.label(format!(
+                "Showing rule pack version {version} (applied via Rule packs...)."
+            ));
+        }
+        None => {
+            ui.label(format!(
+                "Showing the built-in baseline — Peach {}, built {}.",
+                env!("CARGO_PKG_VERSION"),
+                env!("PEACH_BUILD_DATE"),
+            ));
+        }
+    }
+}
+
+/// Groups `rules` into one [`Section`] per sourcetype (AUL, EVTX,
+/// journald), sorted by rule name within each — plus a catch-all "Other"
+/// group for anything that doesn't declare one of those three (e.g. a
+/// downloaded pack containing a rule with no `sourcetype` match condition
+/// at all), so a rule this dialog doesn't recognize is still shown rather
+/// than silently dropped.
+fn build_sections(rules: &[Rule]) -> Vec<Section> {
+    let mut aul = Vec::new();
+    let mut evtx = Vec::new();
+    let mut journald = Vec::new();
+    let mut other = Vec::new();
+
+    for rule in rules {
+        let sourcetype = rule
+            .rule
+            .match_fields
+            .get("sourcetype")
+            .and_then(|v| v.as_str());
+        match sourcetype {
+            Some("aul") => aul.push(rule),
+            Some("evtx") => evtx.push(rule),
+            Some("journald") => journald.push(rule),
+            _ => other.push(rule),
+        }
+    }
+
+    [
+        ("AUL pattern-of-life rules", aul),
+        ("EVTX Security-Auditing rules", evtx),
+        ("journald rules", journald),
+        ("Other rules", other),
+    ]
+    .into_iter()
+    .filter(|(_, group)| !group.is_empty())
+    .map(|(label, mut group)| {
+        group.sort_by(|a, b| a.rule.name.cmp(&b.rule.name));
+        let rules: Vec<RuleRow> = group.iter().map(|r| RuleRow::from_rule(r)).collect();
+        Section {
+            heading_markdown: format!("## {label} ({})", rules.len()),
+            rules,
+        }
+    })
+    .collect()
+}
+
+/// Renders a rule's `[rule.match]` table as human-readable lines, one
+/// condition per line — `sourcetype` is skipped (already implied by which
+/// [`Section`] the rule is in), `message_contains` gets its own bulleted
+/// form for its OR-list semantics, everything else is `key = value` with
+/// the value in the same syntax the source TOML itself uses (via
+/// `toml::Value`'s own `Display`), rather than re-deriving a
+/// presentation-only format — what's on screen matches what the rule file
+/// actually says.
+fn format_match(match_fields: &toml::Table) -> String {
+    let mut parts = Vec::new();
+    for (key, value) in match_fields {
+        if key == "sourcetype" {
+            continue;
+        }
+        if key == "message_contains" {
+            parts.push(format_message_contains(value));
+        } else {
+            parts.push(format!("{key} = {value}"));
+        }
+    }
+    if parts.is_empty() {
+        "(sourcetype only)".to_string()
+    } else {
+        parts.join("\n")
+    }
+}
+
+fn format_message_contains(value: &toml::Value) -> String {
+    match value {
+        toml::Value::Array(items) => {
+            let bullets: Vec<String> = items.iter().map(|v| format!("• {v}")).collect();
+            format!("message contains any of:\n{}", bullets.join("\n"))
+        }
+        other => format!("message contains {other}"),
     }
 }
 
@@ -237,10 +377,10 @@ fn render_rule_table(ui: &mut egui::Ui, rows: &[&RuleRow]) {
 /// Approximates the row height a wrapped multi-line `Match` cell needs, so
 /// `TableBuilder::body::row` (which wants a height up front, not something
 /// it measures after the fact) doesn't clip a rule with many predicates.
-/// Counts explicit lines only (each `<br>`-turned-newline is one bullet),
-/// not word-wrap within a single very long bullet — an approximation, not
-/// exact layout math; worst case one unusually long single line looks
-/// slightly cramped, nothing is lost or hidden.
+/// Counts explicit lines only (each condition/bullet is its own line via
+/// [`format_match`]), not word-wrap within a single very long line — an
+/// approximation, not exact layout math; worst case one unusually long
+/// single line looks slightly cramped, nothing is lost or hidden.
 fn estimate_row_height(row: &RuleRow) -> f32 {
     const LINE_HEIGHT: f32 = 16.0;
     const VERTICAL_PADDING: f32 = 10.0;
@@ -248,155 +388,120 @@ fn estimate_row_height(row: &RuleRow) -> f32 {
     lines * LINE_HEIGHT + VERTICAL_PADDING
 }
 
-/// Splits the source doc into the top-level preamble (everything before
-/// the first `## ` heading) and one [`Section`] per `## ` heading.
-fn parse_reference_doc(markdown: &str) -> (String, Vec<Section>) {
-    let lines: Vec<&str> = markdown.lines().collect();
-    let mut i = 0;
-
-    let mut preamble = Vec::new();
-    while i < lines.len() && !lines[i].starts_with("## ") {
-        preamble.push(lines[i]);
-        i += 1;
-    }
-
-    let mut sections = Vec::new();
-    while i < lines.len() {
-        let mut intro = vec![lines[i]]; // the "## " heading line itself
-        i += 1;
-        while i < lines.len() && !lines[i].starts_with('|') && !lines[i].starts_with("## ") {
-            intro.push(lines[i]);
-            i += 1;
-        }
-
-        let mut rules = Vec::new();
-        if i < lines.len() && lines[i].starts_with('|') {
-            i += 1; // header row ("| Rule name | Match | Tag | Description |")
-            if i < lines.len() && lines[i].starts_with('|') {
-                i += 1; // separator row ("|---|---|---|---|")
-            }
-            while i < lines.len() && lines[i].starts_with('|') {
-                if let Some(row) = parse_rule_row(lines[i]) {
-                    rules.push(row);
-                }
-                i += 1;
-            }
-        }
-
-        while i < lines.len() && lines[i].trim().is_empty() {
-            i += 1;
-        }
-
-        sections.push(Section {
-            intro_markdown: intro.join("\n"),
-            rules,
-        });
-    }
-
-    (preamble.join("\n"), sections)
-}
-
-fn parse_rule_row(line: &str) -> Option<RuleRow> {
-    let inner = line.trim().strip_prefix('|')?.strip_suffix('|')?;
-    let cells: Vec<&str> = inner.split('|').map(str::trim).collect();
-    if cells.len() != 4 {
-        return None;
-    }
-    Some(RuleRow {
-        name: strip_code_span(cells[0]),
-        match_condition: decode_match_cell(cells[1]),
-        tag: strip_code_span(cells[2]),
-        description: cells[3].to_string(),
-    })
-}
-
-fn strip_code_span(cell: &str) -> String {
-    cell.trim_matches('`').to_string()
-}
-
-/// Turns the GitHub-table HTML shim (`<br>` between predicates, `&bull;`
-/// before each one — see `scripts/gen_rules_reference.py`) into a real
-/// newline/bullet for a plain `egui::Label`. Safe to do unconditionally
-/// here (unlike the old monospace-blob dialog, or a markdown renderer):
-/// this table is hand-built with `TableBuilder`, not re-serialized as
-/// markdown, so nothing needs to stay valid single-line GFM table syntax.
-fn decode_match_cell(cell: &str) -> String {
-    cell.replace("<br>", "\n").replace("&bull;", "•")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn rule(toml_text: &str) -> Rule {
+        Rule::from_toml_str(toml_text).expect("valid test rule TOML")
+    }
+
     #[test]
-    fn parse_rule_row_strips_code_spans_and_decodes_bullets() {
-        let row = parse_rule_row(
-            "| `aul_x` | message contains any of:<br>&bull; `a`<br>&bull; `b` | `x_tag` | Some description |",
-        )
-        .expect("valid row");
-        assert_eq!(row.name, "aul_x");
-        assert_eq!(
-            row.match_condition,
-            "message contains any of:\n• `a`\n• `b`"
+    fn format_match_skips_sourcetype_and_renders_key_value_pairs() {
+        let r = rule(
+            "[rule]\nname = \"e\"\n[rule.match]\nsourcetype = \"evtx\"\nevent_id = 4625\n[rule.tag]\nvalue = \"t\"\n",
         );
-        assert_eq!(row.tag, "x_tag");
-        assert_eq!(row.description, "Some description");
+        assert_eq!(format_match(&r.rule.match_fields), "event_id = 4625");
     }
 
     #[test]
-    fn parse_rule_row_handles_a_single_non_list_match() {
-        let row = parse_rule_row("| `aul_y` | message contains `kPhoneNumber` | `y_tag` | Desc |")
-            .expect("valid row");
-        assert_eq!(row.match_condition, "message contains `kPhoneNumber`");
+    fn format_match_renders_message_contains_array_as_bullets() {
+        let r = rule(
+            "[rule]\nname = \"e\"\n[rule.match]\nmessage_contains = [\"a\", \"b\"]\n[rule.tag]\nvalue = \"t\"\n",
+        );
+        assert_eq!(
+            format_match(&r.rule.match_fields),
+            "message contains any of:\n• \"a\"\n• \"b\""
+        );
     }
 
     #[test]
-    fn parse_rule_row_rejects_a_line_that_is_not_a_pipe_table_row() {
-        assert!(parse_rule_row("Not a table row").is_none());
-        assert!(parse_rule_row("| only two | cells |").is_none());
+    fn format_match_renders_a_single_message_contains_string() {
+        let r = rule(
+            "[rule]\nname = \"e\"\n[rule.match]\nmessage_contains = \"kPhoneNumber\"\n[rule.tag]\nvalue = \"t\"\n",
+        );
+        assert_eq!(
+            format_match(&r.rule.match_fields),
+            "message contains \"kPhoneNumber\""
+        );
     }
 
     #[test]
-    fn parse_reference_doc_splits_preamble_and_sections() {
-        let doc = "\
-# Title
+    fn format_match_reports_sourcetype_only_rules_explicitly() {
+        let r = rule(
+            "[rule]\nname = \"e\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"t\"\n",
+        );
+        assert_eq!(format_match(&r.rule.match_fields), "(sourcetype only)");
+    }
 
-Intro paragraph.
+    #[test]
+    fn rule_row_from_rule_appends_version_when_present() {
+        let r = rule(
+            "[rule]\nname = \"aul_x\"\nversion = \"3\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"x\"\n",
+        );
+        let row = RuleRow::from_rule(&r);
+        assert_eq!(row.name, "aul_x (v3)");
+    }
 
-## AUL pattern-of-life rules (2)
+    #[test]
+    fn rule_row_from_rule_omits_version_suffix_when_absent() {
+        let r = rule(
+            "[rule]\nname = \"aul_x\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"x\"\n",
+        );
+        let row = RuleRow::from_rule(&r);
+        assert_eq!(row.name, "aul_x");
+    }
 
-Some provenance text.
-
-| Rule name | Match | Tag | Description |
-|---|---|---|---|
-| `aul_a` | message contains `a` | `a_tag` | Rule A |
-| `aul_b` | message contains `b` | `b_tag` | Rule B |
-
-## EVTX rules (1)
-
-More provenance text.
-
-| Rule name | Match | Tag | Description |
-|---|---|---|---|
-| `evtx_a` | `event_id` = `1` | `evtx_a_tag` | Event A |
-";
-        let (preamble, sections) = parse_reference_doc(doc);
-        assert!(preamble.contains("# Title"));
-        assert!(preamble.contains("Intro paragraph."));
+    #[test]
+    fn build_sections_groups_by_sourcetype_and_sorts_by_name() {
+        let rules = vec![
+            rule(
+                "[rule]\nname = \"aul_b\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"t\"\n",
+            ),
+            rule(
+                "[rule]\nname = \"aul_a\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"t\"\n",
+            ),
+            rule(
+                "[rule]\nname = \"evtx_a\"\n[rule.match]\nsourcetype = \"evtx\"\n[rule.tag]\nvalue = \"t\"\n",
+            ),
+        ];
+        let sections = build_sections(&rules);
 
         assert_eq!(sections.len(), 2);
-        assert!(
-            sections[0]
-                .intro_markdown
-                .contains("AUL pattern-of-life rules (2)")
-        );
-        assert!(sections[0].intro_markdown.contains("Some provenance text."));
+        assert!(sections[0].heading_markdown.contains("AUL"));
         assert_eq!(sections[0].rules.len(), 2);
         assert_eq!(sections[0].rules[0].name, "aul_a");
         assert_eq!(sections[0].rules[1].name, "aul_b");
+        assert!(sections[1].heading_markdown.contains("EVTX"));
+    }
 
-        assert_eq!(sections[1].rules.len(), 1);
-        assert_eq!(sections[1].rules[0].name, "evtx_a");
+    #[test]
+    fn build_sections_puts_rules_with_no_recognized_sourcetype_in_other() {
+        let rules = vec![rule(
+            "[rule]\nname = \"generic_error\"\n[rule.match]\nlevel = \"ERROR\"\n[rule.tag]\nvalue = \"error\"\n",
+        )];
+        let sections = build_sections(&rules);
+
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].heading_markdown.contains("Other"));
+    }
+
+    /// Regression coverage against the real embedded baseline, not just
+    /// the parser/grouping logic in isolation — confirms
+    /// `active_builtin_rules(None)` produces all three expected pack
+    /// sections with no empty ones.
+    #[test]
+    fn the_embedded_baseline_groups_into_three_non_empty_sections() {
+        let rules = builtin::active_builtin_rules(None);
+        let sections = build_sections(&rules);
+        assert_eq!(sections.len(), 3);
+        for section in &sections {
+            assert!(!section.rules.is_empty());
+            for row in &section.rules {
+                assert!(!row.name.is_empty());
+                assert!(!row.tag.is_empty());
+            }
+        }
     }
 
     /// `matches_filter` takes an *already-lowercased* filter (the call
@@ -420,29 +525,17 @@ More provenance text.
         assert!(!row.matches_filter("bluetooth"));
     }
 
-    /// Regression coverage against the actual embedded file, not just the
-    /// parser in isolation — confirms `include_str!` resolved a real,
-    /// non-empty file with the expected three pack sections and that
-    /// parsing it end to end produces a sane, non-empty result.
     #[test]
-    fn the_embedded_rules_reference_parses_into_three_non_empty_sections() {
-        let (preamble, sections) = parse_reference_doc(RULES_REFERENCE_MD);
-        assert!(preamble.contains("Tagging Rule Reference"));
-        assert_eq!(sections.len(), 3);
-        for section in &sections {
-            assert!(!section.rules.is_empty());
-            for rule in &section.rules {
-                assert!(!rule.name.is_empty());
-                assert!(!rule.tag.is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn open_starts_closed_dialog_open_with_no_filter() {
+    fn open_starts_dialog_open_with_no_filter_and_no_active_pack_version() {
         let dialog = RulesReferenceDialog::open();
         assert!(dialog.is_open());
-        assert!(matches!(&dialog, RulesReferenceDialog::Open { filter, .. } if filter.is_empty()));
+        assert!(matches!(
+            &dialog,
+            RulesReferenceDialog::Open {
+                filter,
+                ..
+            } if filter.is_empty()
+        ));
     }
 
     #[test]
