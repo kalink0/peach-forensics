@@ -30,11 +30,11 @@ Or individually: `cargo fmt --all -- --check`, `cargo clippy --all-targets --all
 
 ## Adding a source type or parser
 
-`LogParser` (`src/parsers/mod.rs`) is the extension point for a new sourcetype — see the existing wrappers (`src/parsers/evtx.rs`, `aul.rs`, `journald.rs`, `text_config.rs`) for the pattern each one follows. If your change adds a new column extracted from a sourcetype's `fields` JSON (the way Host/Process/Event ID/Subsystem/Category already work), [docs/field-extraction.md](docs/field-extraction.md#adding-a-new-extracted-field) has a step-by-step checklist for that specific case.
+`LogParser` (`src/parsers/mod.rs`) is the extension point for a new sourcetype — see the existing wrappers (`src/parsers/evtx.rs`, `aul.rs`, `journald.rs`, `intrusion_log.rs`, `text_config.rs`) for the pattern each one follows. If your change adds a new column extracted from a sourcetype's `fields` JSON (the way Host/Process/Event ID/Subsystem/Category already work), [docs/field-extraction.md](docs/field-extraction.md#adding-a-new-extracted-field) has a step-by-step checklist for that specific case.
 
 ## Adding a tagging rule
 
-The built-in AUL/EVTX/journald rule packs live in `rules/examples/*.toml` — see
+The built-in AUL/EVTX/journald/intrusion_log rule packs live in `rules/examples/*.toml` — see
 [docs/user-guide.md#tagging](docs/user-guide.md#tagging) for the full TOML format
 (`[rule]`/`[rule.match]`/`[rule.tag]`, match keys, `message_contains`'s OR-list
 semantics). To add or extend one:

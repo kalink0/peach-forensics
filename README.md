@@ -21,8 +21,9 @@ independently (no IPC).
 
 ## Status
 
-Currently implemented: AUL (`.logarchive`), EVTX, journald, and TOML-configurable
-text log parsing, import-time and re-tag tagging, session persistence, portable
+Currently implemented: AUL (`.logarchive`), EVTX, journald, Android Intrusion
+Log (Advanced Protection Mode), and TOML-configurable text log parsing,
+import-time and re-tag tagging, session persistence, portable
 case export/import for handing a case to another analyst, downloadable updates
 to the built-in tagging rule packs (**File → Rule packs...**, independent of
 app releases — see [kalink0/peach-rules](https://github.com/kalink0/peach-rules)),
@@ -97,8 +98,8 @@ no durable unencrypted session copy should be left behind.
 - [docs/supported-sources.md](docs/supported-sources.md) — supported/planned source
   types
 - [docs/rules-reference.md](docs/rules-reference.md) — every built-in tagging rule
-  (AUL/EVTX/journald), generated from the actual shipped rule files; also
-  available fully offline in-app via **Help → Rules reference...**
+  (AUL/EVTX/journald/intrusion_log), generated from the actual shipped rule
+  files; also available fully offline in-app via **Help → Rules reference...**
 - [CHANGELOG.md](CHANGELOG.md) — what changed in each release
 
 ## Acknowledgements
@@ -135,6 +136,13 @@ version format if you just want the rules for something other than Peach:
   report and PowerShell's own logging docs.
 - **journald** — message text sourced directly from OpenSSH, sudo,
   shadow-utils, and systemd's own logging code.
+- **Android Intrusion Log** — tag IDs and descriptions sourced from
+  Android's own AOSP `SecurityLogTags.logtags`/`SecurityLog.java`
+  (Apache-2.0); the JSON format itself and each event's `tag_key`
+  cross-confirmed against two independent implementations that parse real
+  device exports: the [Mobile Verification
+  Toolkit](https://github.com/mvt-project/mvt) (Amnesty International's
+  Security Lab) and [ALEAPP](https://github.com/abrignoni/ALEAPP).
 
 See each rule file's own header comment for its specific citation, and
 [docs/rules-reference.md](docs/rules-reference.md) for the full, generated

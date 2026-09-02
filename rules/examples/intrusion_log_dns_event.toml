@@ -1,0 +1,19 @@
+# Android Intrusion Logging (Advanced Protection Mode, Android 16+) —
+# dns_event: a DNS resolution performed by an app, from AOSP's
+# android.app.admin.DnsEvent (Apache-2.0). Envelope/field names
+# cross-confirmed against MVT's DnsEvent module and ALEAPP's
+# intrusion_logging.py, both of which parse real device exports.
+# `hostname`/`ip_addresses`/`package_name` are all available on the entry
+# for further filtering, e.g. `hostname = "..."`, via the Filter bar.
+
+[rule]
+name = "intrusion_log_dns_event"
+description = "An app performed a DNS lookup"
+version = "1"
+
+[rule.match]
+sourcetype = "intrusion_log"
+event_type = "dns_event"
+
+[rule.tag]
+value = "dns_event"

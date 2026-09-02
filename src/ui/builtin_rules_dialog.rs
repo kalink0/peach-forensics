@@ -1,8 +1,8 @@
 //! "Built-in Rules" picker — lets the analyst see every currently active
-//! AUL/EVTX/journald tagging rule (match condition, tag, description) and
-//! choose exactly which ones are enabled, rather than only an all-or-nothing
-//! pack switch. Doubles as the in-app rule reference — the same
-//! information [docs/rules-reference.md](../../docs/rules-reference.md)
+//! AUL/EVTX/journald/intrusion_log tagging rule (match condition, tag,
+//! description) and choose exactly which ones are enabled, rather than only
+//! an all-or-nothing pack switch. Doubles as the in-app rule reference — the
+//! same information [docs/rules-reference.md](../../docs/rules-reference.md)
 //! documents, generated from the same `rules/examples/*.toml` files.
 //!
 //! Holds no rule data itself — `PeachApp::enabled_builtin_rules` (a
@@ -62,7 +62,7 @@ impl BuiltinRulesDialog {
                 .and_then(pack_bundle::read_applied_manifest)
                 .map(|manifest| manifest.pack.pack_version);
             let rules = builtin::active_builtin_rules(applied_pack_dir.as_deref());
-            let (aul, evtx, journald, other) = group_by_sourcetype(&rules);
+            let (aul, evtx, journald, intrusion_log, other) = group_by_sourcetype(&rules);
 
             close = show_dialog_window(
                 ctx,
@@ -71,6 +71,29 @@ impl BuiltinRulesDialog {
                 [720.0, 560.0],
                 true,
                 |ui, close| {
+                    // Pinned to the bottom *before* the scroll area below —
+                    // same reasoning as `activity_log_dialog`/
+                    // `rules_reference_dialog`'s bottom bars: an unbounded
+                    // `ScrollArea` claims all remaining space in its parent
+                    // `Ui` first, which for this dialog's five stacked
+                    // sections (each already individually scrollable up to
+                    // 180px, but with no outer scroll area to move
+                    // *between* them) meant shrinking the window small
+                    // enough made the lower sections — and the Close
+                    // button — completely unreachable, not just
+                    // inconvenient to scroll to. `Panel::bottom` reserves
+                    // its own space up front regardless of source order, so
+                    // the button stays visible and the scroll area gets
+                    // exactly what's left of the window's actual (bounded)
+                    // height.
+                    egui::Panel::bottom("peach_builtin_rules_dialog_bottom_bar").show(ui, |ui| {
+                        ui.add_space(4.0);
+                        if ui.button("Close").clicked() {
+                            *close = true;
+                        }
+                        ui.add_space(4.0);
+                    });
+
                     ui.label(
                         "Which built-in rules apply on every load/re-tag. Hover a rule for \
                          its full match condition and description.",
@@ -88,20 +111,19 @@ impl BuiltinRulesDialog {
                     }
                     ui.separator();
 
-                    render_rule_group(ui, "AUL", &aul, enabled);
-                    ui.separator();
-                    render_rule_group(ui, "EVTX", &evtx, enabled);
-                    ui.separator();
-                    render_rule_group(ui, "journald", &journald, enabled);
-                    if !other.is_empty() {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        render_rule_group(ui, "AUL", &aul, enabled);
                         ui.separator();
-                        render_rule_group(ui, "Other", &other, enabled);
-                    }
-
-                    ui.separator();
-                    if ui.button("Close").clicked() {
-                        *close = true;
-                    }
+                        render_rule_group(ui, "EVTX", &evtx, enabled);
+                        ui.separator();
+                        render_rule_group(ui, "journald", &journald, enabled);
+                        ui.separator();
+                        render_rule_group(ui, "Android Intrusion Log", &intrusion_log, enabled);
+                        if !other.is_empty() {
+                            ui.separator();
+                            render_rule_group(ui, "Other", &other, enabled);
+                        }
+                    });
                 },
             );
         }
@@ -112,18 +134,21 @@ impl BuiltinRulesDialog {
     }
 }
 
-/// Splits `rules` into AUL/EVTX/journald groups by each rule's own
-/// `sourcetype` match condition, plus a catch-all fourth group for
-/// anything that doesn't declare one of those three — same reasoning as
+/// Splits `rules` into AUL/EVTX/journald/intrusion_log groups by each
+/// rule's own `sourcetype` match condition, plus a catch-all fifth group
+/// for anything that doesn't declare one of those four — same reasoning as
 /// `ui::rules_reference_dialog::build_sections`: a rule this dialog
 /// doesn't recognize (e.g. from a downloaded pack with unexpected content)
 /// is still shown rather than silently dropped, since it would otherwise
 /// stay enabled in `enabled_builtin_rules` with no way to inspect or
 /// disable it from here.
-fn group_by_sourcetype(rules: &[Rule]) -> (Vec<Rule>, Vec<Rule>, Vec<Rule>, Vec<Rule>) {
+type SourcetypeGroups = (Vec<Rule>, Vec<Rule>, Vec<Rule>, Vec<Rule>, Vec<Rule>);
+
+fn group_by_sourcetype(rules: &[Rule]) -> SourcetypeGroups {
     let mut aul = Vec::new();
     let mut evtx = Vec::new();
     let mut journald = Vec::new();
+    let mut intrusion_log = Vec::new();
     let mut other = Vec::new();
 
     for rule in rules {
@@ -136,11 +161,12 @@ fn group_by_sourcetype(rules: &[Rule]) -> (Vec<Rule>, Vec<Rule>, Vec<Rule>, Vec<
             Some("aul") => aul.push(rule.clone()),
             Some("evtx") => evtx.push(rule.clone()),
             Some("journald") => journald.push(rule.clone()),
+            Some("intrusion_log") => intrusion_log.push(rule.clone()),
             _ => other.push(rule.clone()),
         }
     }
 
-    (aul, evtx, journald, other)
+    (aul, evtx, journald, intrusion_log, other)
 }
 
 fn render_rule_group(
@@ -249,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn group_by_sourcetype_splits_into_the_three_known_groups() {
+    fn group_by_sourcetype_splits_into_the_four_known_groups() {
         let rules = vec![
             Rule::from_toml_str(
                 "[rule]\nname = \"aul_a\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"t\"\n",
@@ -263,9 +289,13 @@ mod tests {
                 "[rule]\nname = \"journald_a\"\n[rule.match]\nsourcetype = \"journald\"\n[rule.tag]\nvalue = \"t\"\n",
             )
             .unwrap(),
+            Rule::from_toml_str(
+                "[rule]\nname = \"intrusion_log_a\"\n[rule.match]\nsourcetype = \"intrusion_log\"\n[rule.tag]\nvalue = \"t\"\n",
+            )
+            .unwrap(),
         ];
 
-        let (aul, evtx, journald, other) = group_by_sourcetype(&rules);
+        let (aul, evtx, journald, intrusion_log, other) = group_by_sourcetype(&rules);
 
         assert_eq!(aul.len(), 1);
         assert_eq!(aul[0].rule.name, "aul_a");
@@ -273,6 +303,8 @@ mod tests {
         assert_eq!(evtx[0].rule.name, "evtx_a");
         assert_eq!(journald.len(), 1);
         assert_eq!(journald[0].rule.name, "journald_a");
+        assert_eq!(intrusion_log.len(), 1);
+        assert_eq!(intrusion_log[0].rule.name, "intrusion_log_a");
         assert!(other.is_empty());
     }
 
@@ -285,11 +317,12 @@ mod tests {
             .unwrap(),
         ];
 
-        let (aul, evtx, journald, other) = group_by_sourcetype(&rules);
+        let (aul, evtx, journald, intrusion_log, other) = group_by_sourcetype(&rules);
 
         assert!(aul.is_empty());
         assert!(evtx.is_empty());
         assert!(journald.is_empty());
+        assert!(intrusion_log.is_empty());
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].rule.name, "generic");
     }

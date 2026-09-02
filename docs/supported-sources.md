@@ -120,6 +120,53 @@ alternative binds against `libsystemd`, Linux-only).
   - A single corrupt/truncated object aborts the whole parse, same as EVTX.
 - No config-driven field-mapping, like AUL/EVTX.
 
+### Android Intrusion Log (Advanced Protection Mode)
+
+A directory (AndroidQF's own `intrusion-logs/` output layout — searched
+recursively for `.txt` files), same "one directory = one source" shape as
+AUL. Reads Android's **Intrusion Logging** feature (Android 16+, Advanced
+Protection Mode, built by Google with [Amnesty International's Security
+Lab](https://securitylab.amnesty.org/latest/2026/05/android-intrusion-logging-as-a-new-source-of-data-for-consensual-forensic-analysis/)
+specifically for spyware/"consensual" forensic analysis) — newline-delimited
+JSON, one event per line, verified directly against the [Mobile
+Verification Toolkit](https://github.com/mvt-project/mvt)'s own
+`intrusion_logs` module rather than guessed from documentation.
+
+- **Out of scope, deliberately:** the logs themselves are collected once
+  daily on-device, end-to-end encrypted, and stored in the user's Google
+  account. Decrypting and exporting them is a cloud/account-credential
+  operation, not a local read-only file, so it's handled entirely by
+  [AndroidQF](https://github.com/mvt-project/androidqf) or MVT during
+  acquisition, before Peach ever sees anything. This parser starts from an
+  already-extracted local `intrusion-logs/` directory.
+- Three event types, each wrapped under its own top-level JSON key per
+  line: `dns_event`, `connect_event`, `security_event` (the last nesting
+  one level deeper — a tag naming the specific event, e.g.
+  `keyguard_dismiss_auth_attempt`, alongside that event's own detail
+  object — see [rules-reference.md](rules-reference.md#android-intrusion-log-rules)
+  for the full tag catalogue, one row per tag).
+- `event_time` is Unix epoch, but the **unit differs by event type** —
+  milliseconds for `dns_event`/`connect_event`, nanoseconds for
+  `security_event` — confirmed against MVT's own conversion code, not
+  assumed consistent across the three.
+- `level` is always empty — Android's own schema carries no severity for
+  any of these three event types.
+- `message` is a reconstructed, human-readable one-line summary (not
+  present verbatim in the source JSON) — always prefixed `[Peach] `, same
+  convention as EVTX's message templates, to mark it as derived rather
+  than source text.
+- `fields` preserves the original JSON structure exactly as found (nothing
+  flattened away), plus two derived, flat lookup keys: `event_type` (the
+  outer key) and, for `security_event` specifically, `security_event_tag`
+  (the inner key) — so a tagging rule can match
+  `security_event_tag = "..."` directly.
+- An event whose one-and-only top-level key isn't one of the three known
+  types is not silently dropped or guessed at (Android's own docs describe
+  this feature as one still being expanded) — it's treated as an
+  unparseable record, same as any other malformed line
+  (`skip_bad_records` applies here too).
+- No config-driven field-mapping, like AUL/EVTX/journald.
+
 ## Explicitly out of scope
 
 USN Journal, FSEvents, encrypted containers, and automatic format detection as a

@@ -2,7 +2,7 @@
 
 Generated from `rules/examples/*.toml` — the actual shipped rule files, not a hand-transcribed summary that can drift from them. Regenerate (`python3 scripts/gen_rules_reference.py`) after adding/editing a rule file rather than hand-editing this doc directly.
 
-All three packs below ship **embedded in the binary itself** (`build.rs` + `src/tagging/builtin.rs`) and every rule in them is enabled by default — see [user-guide.md](user-guide.md#tagging) for the "Built-in rules..." picker that lets you enable/disable individual rules rather than only a whole pack at once.
+All four packs below ship **embedded in the binary itself** (`build.rs` + `src/tagging/builtin.rs`) and every rule in them is enabled by default — see [user-guide.md](user-guide.md#tagging) for the "Built-in rules..." picker that lets you enable/disable individual rules rather than only a whole pack at once.
 
 ## AUL pattern-of-life rules (39)
 
@@ -122,3 +122,58 @@ Message text sourced directly from the logging daemons' own source (OpenSSH, sud
 | `journald_su_session` | `process` = `su`<br>message contains `session opened for user` | `privilege_escalation` | A user switched accounts via su ("session opened for user") |
 | `journald_sudo_command` | `process` = `sudo`<br>message contains `COMMAND=` | `privileged_command` | A command was run via sudo ("COMMAND=") |
 | `journald_sudo_denied` | `process` = `sudo`<br>message contains any of:<br>&bull; `incorrect password attempt`<br>&bull; `is not allowed to run sudo`<br>&bull; `is not in the sudoers file`<br>&bull; `command not allowed` | `privileged_command_denied` | A sudo attempt failed authentication or was refused by policy |
+
+## Android Intrusion Log rules (48)
+
+For Android's Advanced Protection Mode "Intrusion Logging" feature (Android 16+, built by Google with [Amnesty International's Security Lab](https://securitylab.amnesty.org/latest/2026/05/android-intrusion-logging-as-a-new-source-of-data-for-consensual-forensic-analysis/) for spyware forensics) — one rule per Android SecurityLog tag plus `dns_event`/`connect_event`, sourced directly from the [Mobile Verification Toolkit](https://github.com/mvt-project/mvt)'s own already-verified event catalogue, not re-derived from the Android API docs independently — see each rule file's header comment for the specific citation. Every rule matches `sourcetype = "intrusion_log"`.
+
+| Rule name | Match | Tag | Description |
+|---|---|---|---|
+| `intrusion_log_adb_shell_cmd` | `event_type` = `security_event`<br>`security_event_tag` = `adb_shell_cmd` | `adb_shell_cmd` | A single command was run over ADB via 'adb shell <command>' (SecurityLog tag 210002) |
+| `intrusion_log_adb_shell_interactive` | `event_type` = `security_event`<br>`security_event_tag` = `adb_shell_interactive` | `adb_shell_interactive` | An interactive ADB shell session was opened on the device (SecurityLog tag 210001) |
+| `intrusion_log_adb_sync_recv_file` | `event_type` = `security_event`<br>`security_event_tag` = `adb_sync_recv_file` | `adb_sync_recv_file` | A file was copied off the device over ADB ('adb pull') (SecurityLog tag 210003) |
+| `intrusion_log_adb_sync_send_file` | `event_type` = `security_event`<br>`security_event_tag` = `adb_sync_send_file` | `adb_sync_send_file` | A file was copied onto the device over ADB ('adb push') (SecurityLog tag 210004) |
+| `intrusion_log_app_process_start` | `event_type` = `security_event`<br>`security_event_tag` = `app_process_start` | `app_process_start` | An application process was launched (SecurityLog tag 210005) |
+| `intrusion_log_backup_service_toggled` | `event_type` = `security_event`<br>`security_event_tag` = `backup_service_toggled` | `backup_service_toggled` | An administrator enabled or disabled the device backup service (SecurityLog tag 210044) |
+| `intrusion_log_bluetooth_connection` | `event_type` = `security_event`<br>`security_event_tag` = `bluetooth_connection` | `bluetooth_connection` | The device attempted to connect to a Bluetooth device (SecurityLog tag 210039) |
+| `intrusion_log_bluetooth_disconnection` | `event_type` = `security_event`<br>`security_event_tag` = `bluetooth_disconnection` | `bluetooth_disconnection` | The device disconnected from a connected Bluetooth device (SecurityLog tag 210040) |
+| `intrusion_log_camera_policy_set` | `event_type` = `security_event`<br>`security_event_tag` = `camera_policy_set` | `camera_policy_set` | An administrator set a policy disabling the camera (SecurityLog tag 210034) |
+| `intrusion_log_cert_authority_installed` | `event_type` = `security_event`<br>`security_event_tag` = `cert_authority_installed` | `cert_authority_installed` | A root/CA certificate was added to the system's trusted credential store — a classic prerequisite for TLS interception (SecurityLog tag 210029) |
+| `intrusion_log_cert_authority_removed` | `event_type` = `security_event`<br>`security_event_tag` = `cert_authority_removed` | `cert_authority_removed` | A root/CA certificate was removed from the system's trusted credential store (SecurityLog tag 210030) |
+| `intrusion_log_cert_validation_failure` | `event_type` = `security_event`<br>`security_event_tag` = `cert_validation_failure` | `cert_validation_failure` | An X.509 certificate failed validation (SecurityLog tag 210033) |
+| `intrusion_log_connect_event` | `event_type` = `connect_event` | `connect_event` | An app made an outbound network connection |
+| `intrusion_log_crypto_self_test_completed` | `event_type` = `security_event`<br>`security_event_tag` = `crypto_self_test_completed` | `crypto_self_test_completed` | The device's cryptographic subsystem completed its self-test (SecurityLog tag 210031) |
+| `intrusion_log_dns_event` | `event_type` = `dns_event` | `dns_event` | An app performed a DNS lookup |
+| `intrusion_log_key_destruction` | `event_type` = `security_event`<br>`security_event_tag` = `key_destruction` | `key_destruction` | A cryptographic key was deleted from the device's keystore (SecurityLog tag 210026) |
+| `intrusion_log_key_generated` | `event_type` = `security_event`<br>`security_event_tag` = `key_generated` | `key_generated` | A cryptographic key was generated in the device's keystore (SecurityLog tag 210024) |
+| `intrusion_log_key_import` | `event_type` = `security_event`<br>`security_event_tag` = `key_import` | `key_import` | A cryptographic key was imported into the device's keystore (SecurityLog tag 210025) |
+| `intrusion_log_key_integrity_violation` | `event_type` = `security_event`<br>`security_event_tag` = `key_integrity_violation` | `key_integrity_violation` | A stored cryptographic key failed an integrity check (SecurityLog tag 210032) |
+| `intrusion_log_keyguard_disabled_features_set` | `event_type` = `security_event`<br>`security_event_tag` = `keyguard_disabled_features_set` | `keyguard_disabled_features_set` | An administrator disabled specific lockscreen features (SecurityLog tag 210021) |
+| `intrusion_log_keyguard_dismiss_auth_attempt` | `event_type` = `security_event`<br>`security_event_tag` = `keyguard_dismiss_auth_attempt` | `keyguard_dismiss_auth_attempt` | An authentication attempt was made to unlock the lockscreen, successful or not (SecurityLog tag 210007) |
+| `intrusion_log_keyguard_dismissed` | `event_type` = `security_event`<br>`security_event_tag` = `keyguard_dismissed` | `keyguard_dismissed` | The lockscreen was dismissed, on a device with a secure lock screen configured (SecurityLog tag 210006) |
+| `intrusion_log_keyguard_secured` | `event_type` = `security_event`<br>`security_event_tag` = `keyguard_secured` | `keyguard_secured` | The device screen was locked, either by the user or after an inactivity timeout (SecurityLog tag 210008) |
+| `intrusion_log_log_buffer_size_critical` | `event_type` = `security_event`<br>`security_event_tag` = `log_buffer_size_critical` | `log_buffer_size_critical` | The on-device security log buffer reached 90% of its capacity (SecurityLog tag 210015) |
+| `intrusion_log_logging_started` | `event_type` = `security_event`<br>`security_event_tag` = `logging_started` | `logging_started` | Security audit logging (this feature) was turned on (SecurityLog tag 210011) |
+| `intrusion_log_logging_stopped` | `event_type` = `security_event`<br>`security_event_tag` = `logging_stopped` | `logging_stopped` | Security audit logging (this feature) was turned off (SecurityLog tag 210012) |
+| `intrusion_log_max_password_attempts_set` | `event_type` = `security_event`<br>`security_event_tag` = `max_password_attempts_set` | `max_password_attempts_set` | An administrator configured how many failed unlock attempts trigger a device wipe (SecurityLog tag 210020) |
+| `intrusion_log_max_screen_lock_timeout_set` | `event_type` = `security_event`<br>`security_event_tag` = `max_screen_lock_timeout_set` | `max_screen_lock_timeout_set` | An administrator configured the maximum allowed screen-lock timeout (SecurityLog tag 210019) |
+| `intrusion_log_media_mount` | `event_type` = `security_event`<br>`security_event_tag` = `media_mount` | `media_mount` | Removable storage media was mounted (SecurityLog tag 210013) |
+| `intrusion_log_media_unmount` | `event_type` = `security_event`<br>`security_event_tag` = `media_unmount` | `media_unmount` | Removable storage media was unmounted (SecurityLog tag 210014) |
+| `intrusion_log_nfc_disabled` | `event_type` = `security_event`<br>`security_event_tag` = `nfc_disabled` | `nfc_disabled` | NFC was disabled (SecurityLog tag 210046) |
+| `intrusion_log_nfc_enabled` | `event_type` = `security_event`<br>`security_event_tag` = `nfc_enabled` | `nfc_enabled` | NFC was enabled (SecurityLog tag 210045) |
+| `intrusion_log_os_shutdown` | `event_type` = `security_event`<br>`security_event_tag` = `os_shutdown` | `os_shutdown` | The Android OS shut down (SecurityLog tag 210010) |
+| `intrusion_log_os_startup` | `event_type` = `security_event`<br>`security_event_tag` = `os_startup` | `os_startup` | The Android OS finished starting up, including its boot-time integrity/verification state (SecurityLog tag 210009) |
+| `intrusion_log_package_installed` | `event_type` = `security_event`<br>`security_event_tag` = `package_installed` | `package_installed` | An application package was installed (SecurityLog tag 210041) |
+| `intrusion_log_package_uninstalled` | `event_type` = `security_event`<br>`security_event_tag` = `package_uninstalled` | `package_uninstalled` | An application package was uninstalled (SecurityLog tag 210043) |
+| `intrusion_log_package_updated` | `event_type` = `security_event`<br>`security_event_tag` = `package_updated` | `package_updated` | An application package was updated to a new version (SecurityLog tag 210042) |
+| `intrusion_log_password_changed` | `event_type` = `security_event`<br>`security_event_tag` = `password_changed` | `password_changed` | The user changed their lockscreen password (SecurityLog tag 210036) |
+| `intrusion_log_password_complexity_required` | `event_type` = `security_event`<br>`security_event_tag` = `password_complexity_required` | `password_complexity_required` | An administrator required one of the platform's predefined lockscreen password complexity levels (SecurityLog tag 210035) |
+| `intrusion_log_password_complexity_set` | `event_type` = `security_event`<br>`security_event_tag` = `password_complexity_set` | `password_complexity_set` | An administrator configured a minimum lockscreen password complexity requirement (SecurityLog tag 210017) |
+| `intrusion_log_password_expiration_set` | `event_type` = `security_event`<br>`security_event_tag` = `password_expiration_set` | `password_expiration_set` | An administrator configured a lockscreen password expiration policy (SecurityLog tag 210016) |
+| `intrusion_log_password_history_length_set` | `event_type` = `security_event`<br>`security_event_tag` = `password_history_length_set` | `password_history_length_set` | An administrator configured how many previous passwords are remembered to prevent reuse (SecurityLog tag 210018) |
+| `intrusion_log_remote_lock` | `event_type` = `security_event`<br>`security_event_tag` = `remote_lock` | `remote_lock` | An administrator remotely locked the device or a work profile (SecurityLog tag 210022) |
+| `intrusion_log_user_restriction_added` | `event_type` = `security_event`<br>`security_event_tag` = `user_restriction_added` | `user_restriction_added` | An administrator added a restriction on what the user is allowed to do on the device (SecurityLog tag 210027) |
+| `intrusion_log_user_restriction_removed` | `event_type` = `security_event`<br>`security_event_tag` = `user_restriction_removed` | `user_restriction_removed` | An administrator removed a previously-set user restriction (SecurityLog tag 210028) |
+| `intrusion_log_wifi_connection` | `event_type` = `security_event`<br>`security_event_tag` = `wifi_connection` | `wifi_connection` | The device attempted to connect to a Wi-Fi network under management policy (SecurityLog tag 210037) |
+| `intrusion_log_wifi_disconnection` | `event_type` = `security_event`<br>`security_event_tag` = `wifi_disconnection` | `wifi_disconnection` | The device disconnected from a managed Wi-Fi network (SecurityLog tag 210038) |
+| `intrusion_log_wipe_failure` | `event_type` = `security_event`<br>`security_event_tag` = `wipe_failure` | `wipe_failure` | A device or user-data wipe was attempted and failed (SecurityLog tag 210023) |
