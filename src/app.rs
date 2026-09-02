@@ -17,6 +17,7 @@ use crate::model::log_entry::LogEntry;
 use crate::model::timezone_spec::TimezoneSpec;
 use crate::parsers::aul::AulParser;
 use crate::parsers::evtx::EvtxFileParser;
+use crate::parsers::intrusion_log::IntrusionLogParser;
 use crate::parsers::journald::JournaldFileParser;
 use crate::parsers::text_config::TextConfigParser;
 use crate::parsers::text_config_file::{self, TextFormatDraft};
@@ -52,6 +53,7 @@ enum SourceKind {
     Evtx,
     Journald,
     Text,
+    IntrusionLog,
 }
 
 /// What a background-spawned native file/folder dialog resolved to, sent
@@ -496,26 +498,29 @@ fn source_path_and_queue_from_pick(mut picked: Vec<PathBuf>) -> Option<(PathBuf,
 }
 
 /// Whether the "Built-in rules..." button is worth showing at all. Every
-/// built-in rule (any of the three packs) only ever matches AUL, EVTX, or
-/// journald entries (a hard-coded `sourcetype` condition on every rule —
-/// see `tagging::builtin`), so offering the button while the analyst is
-/// about to load something else, with none of those three already loaded
-/// either, would offer a control that provably cannot affect anything
-/// currently relevant: neither the upcoming load nor a re-tag of what's
-/// already in the timeline. True either when an AUL/EVTX/journald load is
-/// about to happen (current `source_kind`) or when the session already
-/// holds at least one loaded source of one of those three sourcetypes that
-/// "Re-tag now" could apply the rules to.
+/// built-in rule (any of the four packs) only ever matches AUL, EVTX,
+/// journald, or intrusion_log entries (a hard-coded `sourcetype` condition
+/// on every rule — see `tagging::builtin`), so offering the button while
+/// the analyst is about to load something else, with none of those four
+/// already loaded either, would offer a control that provably cannot
+/// affect anything currently relevant: neither the upcoming load nor a
+/// re-tag of what's already in the timeline. True either when one of those
+/// four kinds of load is about to happen (current `source_kind`) or when
+/// the session already holds at least one loaded source of one of those
+/// four sourcetypes that "Re-tag now" could apply the rules to.
 fn builtin_rules_button_is_relevant(
     source_kind: SourceKind,
     loaded_sources: &[LoadedSource],
 ) -> bool {
     matches!(
         source_kind,
-        SourceKind::Aul | SourceKind::Evtx | SourceKind::Journald
-    ) || loaded_sources
-        .iter()
-        .any(|source| matches!(source.sourcetype.as_str(), "aul" | "evtx" | "journald"))
+        SourceKind::Aul | SourceKind::Evtx | SourceKind::Journald | SourceKind::IntrusionLog
+    ) || loaded_sources.iter().any(|source| {
+        matches!(
+            source.sourcetype.as_str(),
+            "aul" | "evtx" | "journald" | "intrusion_log"
+        )
+    })
 }
 
 impl PeachApp {
@@ -2243,6 +2248,11 @@ impl eframe::App for PeachApp {
                     SourceKind::Text,
                     "Text (config-based)",
                 );
+                ui.selectable_value(
+                    &mut self.source_kind,
+                    SourceKind::IntrusionLog,
+                    "Android Intrusion Log",
+                );
                 if !self.pending_cli_sources.is_empty() {
                     ui.label(format!(
                         "({} more source(s) queued from --add-source)",
@@ -2252,12 +2262,14 @@ impl eframe::App for PeachApp {
             });
 
             ui.horizontal(|ui| {
-                if self.source_kind == SourceKind::Aul {
+                if matches!(self.source_kind, SourceKind::Aul | SourceKind::IntrusionLog) {
+                    let folder_label = match self.source_kind {
+                        SourceKind::Aul => "Choose .logarchive folder...",
+                        SourceKind::IntrusionLog => "Choose intrusion-logs folder...",
+                        _ => unreachable!("handled by the outer matches! above"),
+                    };
                     if ui
-                        .add_enabled(
-                            self.file_pick_rx.is_none(),
-                            egui::Button::new("Choose .logarchive folder..."),
-                        )
+                        .add_enabled(self.file_pick_rx.is_none(), egui::Button::new(folder_label))
                         .clicked()
                     {
                         let task = rfd::AsyncFileDialog::new().pick_folder();
@@ -2274,7 +2286,9 @@ impl eframe::App for PeachApp {
                             ("Choose .journal file(s)...", Some(("journald", "journal")))
                         }
                         SourceKind::Text => ("Choose log file(s)...", None),
-                        SourceKind::Aul => unreachable!("handled above"),
+                        SourceKind::Aul | SourceKind::IntrusionLog => {
+                            unreachable!("handled above")
+                        }
                     };
                     if ui
                         .add_enabled(self.file_pick_rx.is_none(), egui::Button::new(file_label))
@@ -2772,11 +2786,14 @@ const LOAD_BATCH_SIZE: usize = 10_000;
 
 /// Resolves `source_path` to the concrete list of files [`run_load`] will
 /// parse, one file = one independent parse run = one `source_file_id`/
-/// `sources` row (see [`load_one_file`]). AUL's `.logarchive` is always one
-/// atomic source (never split up) regardless of `source_path` being a
-/// directory, and a plain file pick for any sourcetype is always exactly
-/// itself — both short-circuit before ever touching the filesystem beyond
-/// `source_path` itself.
+/// `sources` row (see [`load_one_file`]). AUL's `.logarchive` and an
+/// intrusion-log export are always one atomic source each (never split up)
+/// regardless of `source_path` being a directory — both parsers walk their
+/// own directory internally (see [`crate::parsers::aul::AulParser`],
+/// [`crate::parsers::intrusion_log::IntrusionLogParser`]) — and a plain
+/// file pick for any sourcetype is always exactly itself; all three
+/// short-circuit before ever touching the filesystem beyond `source_path`
+/// itself.
 ///
 /// Otherwise (a folder picked for EVTX/journald/Text), walks it
 /// recursively. EVTX/journald filter by their own canonical,
@@ -2790,13 +2807,13 @@ const LOAD_BATCH_SIZE: usize = 10_000;
 /// upfront. Sorted for deterministic load order — same folder + same
 /// config must always produce the same result.
 fn collect_source_files(source_kind: SourceKind, source_path: &Path) -> Vec<PathBuf> {
-    if source_kind == SourceKind::Aul || source_path.is_file() {
+    if matches!(source_kind, SourceKind::Aul | SourceKind::IntrusionLog) || source_path.is_file() {
         return vec![source_path.to_path_buf()];
     }
     let extension_filter: Option<&str> = match source_kind {
         SourceKind::Evtx => Some("evtx"),
         SourceKind::Journald => Some("journal"),
-        SourceKind::Text | SourceKind::Aul => None,
+        SourceKind::Text | SourceKind::Aul | SourceKind::IntrusionLog => None,
     };
     let mut files: Vec<PathBuf> = walkdir::WalkDir::new(source_path)
         .into_iter()
@@ -2815,20 +2832,29 @@ fn collect_source_files(source_kind: SourceKind, source_path: &Path) -> Vec<Path
 }
 
 /// Real byte size of `path` — if it's a file, its own size; if it's a
-/// directory (AUL's `.logarchive` case — the only sourcetype
-/// [`collect_source_files`] ever hands a directory to this function, since
-/// every other sourcetype's folder pick resolves to individual files
-/// first), the sum of just its `.tracev3` files. `path.metadata().len()`
-/// on a directory returns a small, meaningless number (just the directory
-/// entry itself, not its contents), so that shortcut can't be used for
-/// AUL. Restricted to `.tracev3` rather than every file under the
-/// directory (dsc/uuidtext/timesync too) so this total matches exactly
-/// what [`AulParser`]'s own `on_bytes_progress` reporting sums to (see its
-/// doc comment) — otherwise the progress bar would stall short of 100%
-/// instead of reaching it cleanly. iLEAPP's `ImportProgress` makes the
-/// same restriction for the same reason.
-fn path_byte_size(path: &Path) -> u64 {
+/// directory (AUL's `.logarchive` or an intrusion-log export — the only two
+/// sourcetypes [`collect_source_files`] ever hands a directory to this
+/// function, since every other sourcetype's folder pick resolves to
+/// individual files first), the sum of just the files that sourcetype's
+/// parser actually reads (`.tracev3` for AUL, `.txt` for intrusion_log).
+/// `path.metadata().len()` on a directory returns a small, meaningless
+/// number (just the directory entry itself, not its contents), so that
+/// shortcut can't be used for either. AUL's restriction to `.tracev3`
+/// specifically (not every file under the directory — `dsc`/`uuidtext`/
+/// `timesync` too) matters for a reason intrusion_log doesn't share: it
+/// must match exactly what [`AulParser`]'s own `on_bytes_progress`
+/// reporting sums to (see its doc comment), or the progress bar would stall
+/// short of 100% instead of reaching it cleanly — `IntrusionLogParser` has
+/// no such per-file progress reporting (the default `parse_streaming`
+/// wrapper), so its own `.txt`-only restriction is just "don't count files
+/// this parser doesn't read" rather than a progress-matching requirement.
+fn path_byte_size(sourcetype: &str, path: &Path) -> u64 {
     if path.is_dir() {
+        let extension: &str = if sourcetype == "intrusion_log" {
+            "txt"
+        } else {
+            "tracev3"
+        };
         walkdir::WalkDir::new(path)
             .into_iter()
             .filter_map(|entry| entry.ok())
@@ -2837,7 +2863,7 @@ fn path_byte_size(path: &Path) -> u64 {
                 entry
                     .path()
                     .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("tracev3"))
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
             })
             .filter_map(|entry| entry.metadata().ok())
             .map(|metadata| metadata.len())
@@ -2925,7 +2951,7 @@ fn run_load(
     // Constructed unconditionally, not just inside the `SourceKind::Text`
     // match arm below: `&dyn LogParser` needs something to borrow from for
     // the rest of this function, and only the arm that's actually taken
-    // ever gets referenced — the other three unit structs cost nothing to
+    // ever gets referenced — the other unit structs cost nothing to
     // instantiate. `text_parser` is the only one that isn't a plain unit
     // struct (it carries `default_source_timezone`), which is exactly why
     // this had to move out of the match arm: a value constructed *inside*
@@ -2934,6 +2960,7 @@ fn run_load(
     let aul_parser = AulParser;
     let evtx_parser = EvtxFileParser;
     let journald_parser = JournaldFileParser;
+    let intrusion_log_parser = IntrusionLogParser;
     let text_parser = TextConfigParser {
         default_assume_offset: settings.default_source_timezone,
     };
@@ -2942,6 +2969,12 @@ fn run_load(
         SourceKind::Aul => (
             &aul_parser,
             ParserConfig::from_toml_str("[parser]\nname = \"aul\"\nsourcetype = \"aul\"\n")?,
+        ),
+        SourceKind::IntrusionLog => (
+            &intrusion_log_parser,
+            ParserConfig::from_toml_str(
+                "[parser]\nname = \"intrusion_log\"\nsourcetype = \"intrusion_log\"\n",
+            )?,
         ),
         SourceKind::Evtx => (
             &evtx_parser,
@@ -2971,7 +3004,10 @@ fn run_load(
     if files.is_empty() {
         anyhow::bail!("no matching files found under {}", source_path.display());
     }
-    let bytes_total: u64 = files.iter().map(|path| path_byte_size(path)).sum();
+    let bytes_total: u64 = files
+        .iter()
+        .map(|path| path_byte_size(&sourcetype, path))
+        .sum();
 
     let load_ctx = LoadContext {
         parser,
@@ -3068,7 +3104,7 @@ fn run_sequential(
         if ctx.cancel.load(Ordering::Relaxed) {
             break;
         }
-        let file_bytes = path_byte_size(&file_path);
+        let file_bytes = path_byte_size(ctx.sourcetype, &file_path);
         match load_one_file(
             ctx,
             &file_path,
@@ -3490,7 +3526,7 @@ fn parse_file_for_worker(ctx: &LoadContext, file_path: &Path, tx: &mpsc::SyncSen
         return;
     }
 
-    let bytes = path_byte_size(file_path);
+    let bytes = path_byte_size(ctx.sourcetype, file_path);
     let mut batch: Vec<LogEntry> = Vec::with_capacity(LOAD_BATCH_SIZE);
     let mut inserted = 0usize;
     // Same reasoning as `load_one_file`'s own capture: `parse_source_streaming`
@@ -3989,7 +4025,21 @@ mod tests {
     }
 
     #[test]
-    fn builtin_rules_button_is_not_relevant_with_none_of_the_three_sourcetypes_involved() {
+    fn builtin_rules_button_is_relevant_when_source_kind_is_intrusion_log() {
+        assert!(builtin_rules_button_is_relevant(
+            SourceKind::IntrusionLog,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn builtin_rules_button_is_relevant_when_an_intrusion_log_source_is_already_loaded() {
+        let loaded = [loaded_source("text_config"), loaded_source("intrusion_log")];
+        assert!(builtin_rules_button_is_relevant(SourceKind::Text, &loaded));
+    }
+
+    #[test]
+    fn builtin_rules_button_is_not_relevant_with_none_of_the_four_sourcetypes_involved() {
         let loaded = [loaded_source("text_config")];
         assert!(!builtin_rules_button_is_relevant(SourceKind::Text, &loaded));
         assert!(!builtin_rules_button_is_relevant(SourceKind::Text, &[]));
@@ -4394,6 +4444,18 @@ mod tests {
         std::fs::write(dir.join("not-an-aul-file.txt"), b"x").unwrap();
 
         let files = collect_source_files(SourceKind::Aul, &dir);
+
+        assert_eq!(files, vec![dir.clone()]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn collect_source_files_returns_the_folder_itself_for_intrusion_log_even_though_its_a_directory()
+     {
+        let dir = temp_test_dir("intrusion-log-folder");
+        std::fs::write(dir.join("intrusion-logs-0.txt"), b"x").unwrap();
+
+        let files = collect_source_files(SourceKind::IntrusionLog, &dir);
 
         assert_eq!(files, vec![dir.clone()]);
         std::fs::remove_dir_all(dir).unwrap();
@@ -5110,7 +5172,7 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("b.tracev3"), vec![0u8; 50]).unwrap();
 
-        assert_eq!(path_byte_size(&dir), 150);
+        assert_eq!(path_byte_size("aul", &dir), 150);
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -5124,7 +5186,18 @@ mod tests {
         std::fs::write(dir.join("a.tracev3"), vec![0u8; 100]).unwrap();
         std::fs::write(dir.join("some_uuidtext_file"), vec![0u8; 999]).unwrap();
 
-        assert_eq!(path_byte_size(&dir), 100);
+        assert_eq!(path_byte_size("aul", &dir), 100);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn path_byte_size_of_an_intrusion_log_directory_sums_txt_files_not_tracev3() {
+        let dir = temp_test_dir("byte-size-dir-intrusion-log");
+        std::fs::write(dir.join("intrusion-logs-0.txt"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.join("manifest.tracev3"), vec![0u8; 999]).unwrap();
+
+        assert_eq!(path_byte_size("intrusion_log", &dir), 100);
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -5135,7 +5208,7 @@ mod tests {
         let file = dir.join("only.log");
         std::fs::write(&file, vec![0u8; 42]).unwrap();
 
-        assert_eq!(path_byte_size(&file), 42);
+        assert_eq!(path_byte_size("evtx", &file), 42);
 
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -11,6 +11,7 @@ use crate::tagging::rule_file;
 include!(concat!(env!("OUT_DIR"), "/aul_builtin_rules.rs"));
 include!(concat!(env!("OUT_DIR"), "/evtx_builtin_rules.rs"));
 include!(concat!(env!("OUT_DIR"), "/journald_builtin_rules.rs"));
+include!(concat!(env!("OUT_DIR"), "/intrusion_log_builtin_rules.rs"));
 
 /// The AUL pattern-of-life rule pack (`rules/examples/aul_*.toml`),
 /// embedded at compile time by `build.rs` and parsed here. Every file in
@@ -69,15 +70,41 @@ pub fn journald_login_rules() -> Vec<Rule> {
         .collect()
 }
 
-/// All three built-in packs together, AUL then EVTX then journald — every
-/// rule the "Built-in rules..." picker (`ui::builtin_rules_dialog`) can
-/// show and `app::load_rules` can filter by name. A fresh `Vec` on every
-/// call, same as the three pack functions it wraps — cheap enough (tens of
-/// small TOML parses) that nothing here caches it.
+/// The Android Intrusion Logging tagging pack
+/// (`rules/examples/intrusion_log_*.toml`) — one rule per Android
+/// SecurityLog tag (`security_event_tag`, ~46 of them, see
+/// `parsers::intrusion_log::security_event_display_name`) plus `dns_event`/
+/// `connect_event`, sourced from AOSP's own `SecurityLogTags.logtags`
+/// (cross-confirmed against MVT and ALEAPP's independently-built parsers
+/// for the same format — see each rule file's header comment for the
+/// specific citation), not re-derived from the Android SecurityLog API
+/// docs independently. Every rule matches `sourcetype = "intrusion_log"`
+/// plus the `event_type`/`security_event_tag` fields
+/// `parsers::intrusion_log::IntrusionLogParser` derives onto each entry.
+///
+/// Parsing panics on failure for the same reason as
+/// [`aul_pattern_of_life_rules`]: fixed at compile time, not user input,
+/// already covered by `tagging::rule::tests::every_shipped_rule_file_parses_and_is_versioned`.
+pub fn intrusion_log_rules() -> Vec<Rule> {
+    INTRUSION_LOG_RULE_TOMLS
+        .iter()
+        .map(|text| {
+            Rule::from_toml_str(text).expect("embedded intrusion_log rule TOML failed to parse")
+        })
+        .collect()
+}
+
+/// All four built-in packs together, AUL then EVTX then journald then
+/// intrusion_log — every rule the "Built-in rules..." picker
+/// (`ui::builtin_rules_dialog`) can show and `app::load_rules` can filter
+/// by name. A fresh `Vec` on every call, same as the four pack functions it
+/// wraps — cheap enough (tens of small TOML parses) that nothing here
+/// caches it.
 pub fn all_builtin_rules() -> Vec<Rule> {
     let mut rules = aul_pattern_of_life_rules();
     rules.extend(evtx_security_auditing_rules());
     rules.extend(journald_login_rules());
+    rules.extend(intrusion_log_rules());
     rules
 }
 
@@ -374,15 +401,99 @@ mod tests {
     }
 
     #[test]
-    fn all_builtin_rules_combines_all_three_packs() {
+    fn embeds_every_intrusion_log_rule_file_and_all_parse() {
+        let rules = intrusion_log_rules();
+        // Same "loose lower bound" reasoning as the other packs' own tests
+        // — 48 rules shipped today (46 security_event tags plus dns_event/
+        // connect_event), more can be added later without this test
+        // needing an edit.
+        assert!(
+            rules.len() >= 48,
+            "expected at least 48 embedded intrusion_log rules, got {}",
+            rules.len()
+        );
+    }
+
+    #[test]
+    fn all_embedded_intrusion_log_rules_match_sourcetype_intrusion_log() {
+        for rule in intrusion_log_rules() {
+            assert_eq!(
+                rule.rule
+                    .match_fields
+                    .get("sourcetype")
+                    .and_then(|v| v.as_str()),
+                Some("intrusion_log"),
+                "rule {} does not match sourcetype = \"intrusion_log\"",
+                rule.rule.name
+            );
+        }
+    }
+
+    #[test]
+    fn intrusion_log_known_tag_values_are_present() {
+        let tags: Vec<String> = intrusion_log_rules()
+            .iter()
+            .map(|r| r.rule.tag.value.clone())
+            .collect();
+        for expected in [
+            "dns_event",
+            "connect_event",
+            "keyguard_dismiss_auth_attempt",
+            "cert_authority_installed",
+            "wipe_failure",
+        ] {
+            assert!(
+                tags.iter().any(|t| t == expected),
+                "expected tag {expected} among embedded intrusion_log rules, got {tags:?}"
+            );
+        }
+    }
+
+    /// Regression guard for the same class of bug the EVTX/journald packs'
+    /// own nested-field tests guard against: a rule can parse and declare
+    /// the right `sourcetype` while still never matching real data if the
+    /// `security_event_tag` condition isn't actually resolved — here it's
+    /// a plain flat field on `fields` (not a normalized key), added by
+    /// `parsers::intrusion_log::IntrusionLogParser` itself rather than
+    /// resolved by `tagging::rule::normalized_field`, so this exercises the
+    /// parser/rule contract end to end.
+    #[test]
+    fn embedded_intrusion_log_keyguard_dismiss_auth_attempt_rule_matches_a_realistic_record() {
+        let rules = intrusion_log_rules();
+        let rule = rules
+            .iter()
+            .find(|r| r.rule.tag.value == "keyguard_dismiss_auth_attempt")
+            .expect("expected an embedded rule tagging keyguard_dismiss_auth_attempt");
+
+        let fields = serde_json::json!({
+            "event_type": "security_event",
+            "security_event_tag": "keyguard_dismiss_auth_attempt",
+            "keyguard_dismiss_auth_attempt": {"success": false, "method_strength": 1}
+        });
+        assert!(rule.matches("intrusion_log", None, None, &fields));
+
+        let wrong_tag = serde_json::json!({
+            "event_type": "security_event",
+            "security_event_tag": "wipe_failure"
+        });
+        assert!(!rule.matches("intrusion_log", None, None, &wrong_tag));
+    }
+
+    #[test]
+    fn all_builtin_rules_combines_all_four_packs() {
         let all = all_builtin_rules();
         let aul_count = aul_pattern_of_life_rules().len();
         let evtx_count = evtx_security_auditing_rules().len();
         let journald_count = journald_login_rules().len();
+        let intrusion_log_count = intrusion_log_rules().len();
 
-        assert_eq!(all.len(), aul_count + evtx_count + journald_count);
+        assert_eq!(
+            all.len(),
+            aul_count + evtx_count + journald_count + intrusion_log_count
+        );
         assert!(all.iter().any(|r| r.rule.tag.value == "wifi_status"));
         assert!(all.iter().any(|r| r.rule.tag.value == "logon_success"));
+        assert!(all.iter().any(|r| r.rule.tag.value == "dns_event"));
     }
 
     #[test]

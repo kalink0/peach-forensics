@@ -77,3 +77,23 @@ that is still a blog post's own quoted log lines, not an independent read of a r
 device record. Per [[aul_pattern_of_life_categorization]]'s own lesson: treat these as a
 solid first cut, not a substitute for spot-checking against real AUL data if/when that
 becomes available.
+
+---
+
+## Android Intrusion Logging — AOSP / MVT / ALEAPP
+
+Not a blog series — tracked as a single entry. The Intrusion Logging feature itself
+comes from [Amnesty International Security Lab's
+announcement](https://securitylab.amnesty.org/latest/2026/05/android-intrusion-logging-as-a-new-source-of-data-for-consensual-forensic-analysis/)
+(built by Google with Amnesty for spyware/"consensual" forensic analysis). Primary
+source for the rule content is AOSP's own `SecurityLogTags.logtags`/`SecurityLog.java`
+(Apache-2.0), for tag ID, tag_key, and description in all 46 `security_event` rules
+plus `dns_event`/`connect_event` (`rules/examples/intrusion_log_*.toml`, 48 files).
+Cross-confirmed against two independent tools that parse real device exports of the
+same format: Amnesty's own [Mobile Verification
+Toolkit](https://github.com/mvt-project/mvt) (`SECURITY_EVENT_TAGS`) and
+[ALEAPP](https://github.com/abrignoni/ALEAPP) (`intrusionDetectionStore.py`'s
+`_SECURITY_TAGS`) — cited for validation only, not as a text source. See each rule
+file's header comment for the exact citation. Android's own docs describe this feature as still being expanded, so worth re-checking against a fresh AOSP/MVT state when a new SecurityLog tag ships.
+
+**Reviewed:** 2026-09-02.

@@ -187,8 +187,9 @@ fn toml_matches_json(expected: &toml::Value, actual: &serde_json::Value) -> bool
 mod tests {
     use super::*;
 
-    /// Every shipped rule file in `rules/examples/` (the AUL/EVTX/journald
-    /// packs, see `docs/`) must parse, have a non-empty name/tag, and carry
+    /// Every shipped rule file in `rules/examples/` (the
+    /// AUL/EVTX/journald/intrusion_log packs, see `docs/`) must parse, have
+    /// a non-empty name/tag, and carry
     /// a non-empty `version` — a broken TOML file, or one someone forgot to
     /// version when adding it, would otherwise only surface much later
     /// (an unversioned rule silently can't participate in the rule-pack

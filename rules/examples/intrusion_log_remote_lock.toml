@@ -1,0 +1,20 @@
+# Android Intrusion Logging (Advanced Protection Mode, Android 16+) —
+# security_event, Android SecurityLog tag 210022 ("Remote Lock"). Tag ID
+# and description from AOSP's SecurityLogTags.logtags/SecurityLog.java
+# (Apache-2.0); tag_key cross-confirmed against MVT's
+# SECURITY_EVENT_TAGS and ALEAPP's intrusionDetectionStore.py, both of
+# which parse real device exports of this format:
+# https://developer.android.com/reference/android/app/admin/SecurityLog
+
+[rule]
+name = "intrusion_log_remote_lock"
+description = "An administrator remotely locked the device or a work profile (SecurityLog tag 210022)"
+version = "1"
+
+[rule.match]
+sourcetype = "intrusion_log"
+event_type = "security_event"
+security_event_tag = "remote_lock"
+
+[rule.tag]
+value = "remote_lock"

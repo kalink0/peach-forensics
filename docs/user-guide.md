@@ -16,12 +16,19 @@ own Cancel/Close/OK button, or the small **✕** in its title bar.
 
 ## Loading a source
 
-1. Pick a **Sourcetype**: `AUL (.logarchive)`, `EVTX`, `journald`, or
-   `Text (config-based)`.
+1. Pick a **Sourcetype**: `AUL (.logarchive)`, `EVTX`, `journald`,
+   `Text (config-based)`, or `Android Intrusion Log`.
 2. Click the picker button:
    - AUL expects a folder — the `.logarchive` bundle itself (it contains
      `Persist`/`Special`/`Signpost`/`HighVolume` subfolders plus `dsc`/`uuidtext`/
      `timesync` reference data). One `.logarchive` becomes one source.
+   - Android Intrusion Log also expects a folder — the `intrusion-logs/`
+     directory an [AndroidQF](https://github.com/mvt-project/androidqf)
+     acquisition produces (searched recursively for `.txt` files). One
+     folder becomes one source, same as AUL. See
+     [supported-sources.md](supported-sources.md) for what this sourcetype
+     covers and, importantly, what it doesn't (acquisition/decryption is
+     outside Peach's scope).
    - EVTX/journald/Text's **"Choose ... file(s)..."** button supports
      selecting several files at once (e.g. `Application.evtx` +
      `Security.evtx` + `System.evtx` together) — the first one becomes the
@@ -237,22 +244,43 @@ marker) as well as matching on message text, to avoid two unrelated daemons
 coincidentally sharing a substring — the generic PAM failure rule is the one
 deliberate exception, scoped to message text alone.
 
+`rules/examples/intrusion_log_*.toml` is the Android Intrusion Log rule
+pack: 48 rules — one per Android SecurityLog tag (~46 of them, e.g.
+`keyguard_dismiss_auth_attempt` for a failed unlock attempt,
+`cert_authority_installed` for a root certificate install — a classic
+MITM/spyware indicator, `adb_shell_cmd`, `wipe_failure`,
+`package_installed`/`updated`/`uninstalled`) plus `dns_event` and
+`connect_event`. Tag IDs and descriptions sourced from Android's own AOSP
+`SecurityLogTags.logtags`/`SecurityLog.java`; the JSON format and each
+event's tag key cross-confirmed against two independent tools that parse
+real device exports of the same format — the [Mobile Verification
+Toolkit](https://github.com/mvt-project/mvt) and
+[ALEAPP](https://github.com/abrignoni/ALEAPP) (see each rule file's header
+comment for the specific citation). Every rule
+matches `sourcetype = "intrusion_log"` plus `event_type`/
+`security_event_tag`, two fields
+`parsers::intrusion_log::IntrusionLogParser` derives onto each entry
+rather than fields Android's own JSON carries directly — see
+[supported-sources.md](supported-sources.md) for that derivation.
+
 Unlike other rule files (which load either automatically from the
 configured [rules directory](#settings) or by explicit selection via
-"Choose tagging rules..."), all three packs ship **embedded in the binary
+"Choose tagging rules..."), all four packs ship **embedded in the binary
 itself** (`build.rs` bundles every `rules/examples/aul_*.toml`,
-`rules/examples/evtx_*.toml`, and `rules/examples/journald_*.toml` file at
-compile time — see `src/tagging/builtin.rs`) and every rule in them is
-applied automatically on every load and re-tag by default — no file to
-locate or select, works the same in a release build with no repo nearby.
-Every rule matches its own `sourcetype` on its own, so an enabled AUL rule
-never tags an EVTX or journald row, or vice versa.
+`rules/examples/evtx_*.toml`, `rules/examples/journald_*.toml`, and
+`rules/examples/intrusion_log_*.toml` file at compile time — see
+`src/tagging/builtin.rs`) and every rule in them is applied automatically
+on every load and re-tag by default — no file to locate or select, works
+the same in a release build with no repo nearby. Every rule matches its
+own `sourcetype` on its own, so an enabled AUL rule never tags an EVTX,
+journald, or intrusion_log row, or vice versa.
 
 **Built-in rules...** (next to "Choose tagging rules...", only shown when
 relevant to the current source) opens a picker listing every rule from
-whichever tier is currently active — AUL, EVTX, and journald in their own
-sections, each rule a checkbox (hover one for its full match condition, tag,
-and description), plus **Select all**/**Select none** per section. Like
+whichever tier is currently active — AUL, EVTX, journald, and Android
+Intrusion Log in their own sections, each rule a checkbox (hover one for
+its full match condition, tag, and description), plus **Select
+all**/**Select none** per section. Like
 [Rules reference...](#tagging), this reflects a downloaded pack (see
 "Updating the built-in rule packs" below) if one is currently applied,
 not just the version embedded in this build. This is exact, per-rule
@@ -265,9 +293,10 @@ static, browsable table generated from the packs embedded at build time
 
 ### Updating the built-in rule packs
 
-**File → Rule packs...** gets a curated update to the built-in AUL/EVTX/journald
-packs into a running Peach without waiting for the next app release — bundles are
-published separately, at [kalink0/peach-rules](https://github.com/kalink0/peach-rules).
+**File → Rule packs...** gets a curated update to the built-in
+AUL/EVTX/journald/intrusion_log packs into a running Peach without waiting
+for the next app release — bundles are published separately, at
+[kalink0/peach-rules](https://github.com/kalink0/peach-rules).
 The window shows what's currently active (either the packs embedded in this build, or a
 previously-applied downloaded pack's version) and three ways to get a new one:
 
@@ -285,8 +314,9 @@ previously-applied downloaded pack's version) and three ways to get a new one:
 Either path leads to the same preview before anything changes: which rules are new,
 modified, or removed relative to what's currently active, computed from each rule's own
 version rather than a hand-written changelog. Nothing is applied until you click
-**Apply**. A pack is always a complete, self-contained snapshot of every AUL/EVTX/journald
-rule (never a partial update), verified (SHA-256 per file, checked against the bundle's
+**Apply**. A pack is always a complete, self-contained snapshot of every
+AUL/EVTX/journald/intrusion_log rule (never a partial update), verified
+(SHA-256 per file, checked against the bundle's
 own manifest) before it's ever trusted — a corrupted or tampered download is refused, not
 applied best-effort. After applying, Peach offers to **re-tag** the current session
 immediately; skipping that just means the new rules only apply to sources loaded from now
@@ -322,8 +352,8 @@ Three modes:
 - **View raw/fields...** — same data as "Copy whole event as text", shown in
   a read-only, scrollable, selectable window instead of only going to the
   clipboard: `raw` (the full original record/line) and `fields` (the
-  source-specific JSON — for AUL/EVTX/journald this largely overlaps `raw`,
-  but for a `text_config` source it's genuinely different: `raw` is the
+  source-specific JSON — for AUL/EVTX/journald/intrusion_log this largely
+  overlaps `raw`, but for a `text_config` source it's genuinely different: `raw` is the
   literal original line, `fields` is what the regex captured out of it).
 - **Filter by...** — a submenu listing whichever of the clicked row's
   Sourcetype/Host/Process/Event ID/Subsystem/Category are actually
@@ -539,8 +569,9 @@ load parallelizes:
   which itself opens in this folder by default).
 - **Parse threads for folder loads** — worker threads for parsing a
   multi-file folder load (EVTX/journald/Text) in parallel; automatic by
-  default. Irrelevant for AUL or a single-file load — both are always
-  exactly one parse unit, nothing to spread across threads.
+  default. Irrelevant for AUL, Android Intrusion Log, or a single-file
+  load — all three are always exactly one parse unit, nothing to spread
+  across threads.
 - **Assume timezone for logs with no timezone of their own** — a session-wide
   fallback for a text source's own `assume_offset` (see
   [Text parser configs](#text-parser-configs) above), used whenever that
@@ -550,7 +581,8 @@ load parallelizes:
   timeline, unlike a fixed offset, which would silently apply the wrong
   number to half a case that spans a DST transition. Blank (the default)
   means every text source still needs its own `assume_offset`; never
-  applies to AUL/EVTX/journald, whose own timestamps are already absolute.
+  applies to AUL/EVTX/journald/intrusion_log, whose own timestamps are
+  already absolute.
   A source's own `assume_offset` always wins if it sets one. Also directly
   editable in the load controls once **Text (config-based)** is selected
   (same field, applies and saves immediately either place) — kept in

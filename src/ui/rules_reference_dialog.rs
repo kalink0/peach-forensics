@@ -1,5 +1,6 @@
-//! "Rules reference" — every currently active AUL/EVTX/journald tagging
-//! rule's match condition, tag, and description, grouped by sourcetype.
+//! "Rules reference" — every currently active AUL/EVTX/journald/
+//! intrusion_log tagging rule's match condition, tag, and description,
+//! grouped by sourcetype.
 //!
 //! Built from [`tagging::builtin::active_builtin_rules`] every time the
 //! dialog opens, **not** from the static `docs/rules-reference.md` file this
@@ -244,15 +245,16 @@ fn render_active_pack_line(ui: &mut egui::Ui, active_pack_version: Option<u32>) 
 }
 
 /// Groups `rules` into one [`Section`] per sourcetype (AUL, EVTX,
-/// journald), sorted by rule name within each — plus a catch-all "Other"
-/// group for anything that doesn't declare one of those three (e.g. a
-/// downloaded pack containing a rule with no `sourcetype` match condition
-/// at all), so a rule this dialog doesn't recognize is still shown rather
-/// than silently dropped.
+/// journald, intrusion_log), sorted by rule name within each — plus a
+/// catch-all "Other" group for anything that doesn't declare one of those
+/// four (e.g. a downloaded pack containing a rule with no `sourcetype`
+/// match condition at all), so a rule this dialog doesn't recognize is
+/// still shown rather than silently dropped.
 fn build_sections(rules: &[Rule]) -> Vec<Section> {
     let mut aul = Vec::new();
     let mut evtx = Vec::new();
     let mut journald = Vec::new();
+    let mut intrusion_log = Vec::new();
     let mut other = Vec::new();
 
     for rule in rules {
@@ -265,6 +267,7 @@ fn build_sections(rules: &[Rule]) -> Vec<Section> {
             Some("aul") => aul.push(rule),
             Some("evtx") => evtx.push(rule),
             Some("journald") => journald.push(rule),
+            Some("intrusion_log") => intrusion_log.push(rule),
             _ => other.push(rule),
         }
     }
@@ -273,6 +276,7 @@ fn build_sections(rules: &[Rule]) -> Vec<Section> {
         ("AUL pattern-of-life rules", aul),
         ("EVTX Security-Auditing rules", evtx),
         ("journald rules", journald),
+        ("Android Intrusion Log rules", intrusion_log),
         ("Other rules", other),
     ]
     .into_iter()
@@ -488,13 +492,14 @@ mod tests {
 
     /// Regression coverage against the real embedded baseline, not just
     /// the parser/grouping logic in isolation — confirms
-    /// `active_builtin_rules(None)` produces all three expected pack
-    /// sections with no empty ones.
+    /// `active_builtin_rules(None)` produces all four expected pack
+    /// sections with no empty ones (and no "Other" catch-all, since every
+    /// embedded rule declares one of the four known sourcetypes).
     #[test]
-    fn the_embedded_baseline_groups_into_three_non_empty_sections() {
+    fn the_embedded_baseline_groups_into_four_non_empty_sections() {
         let rules = builtin::active_builtin_rules(None);
         let sections = build_sections(&rules);
-        assert_eq!(sections.len(), 3);
+        assert_eq!(sections.len(), 4);
         for section in &sections {
             assert!(!section.rules.is_empty());
             for row in &section.rules {

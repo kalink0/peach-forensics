@@ -75,6 +75,13 @@ fn main() {
     );
     embed_toml_dir(
         &manifest_dir,
+        "rules/examples",
+        "intrusion_log_",
+        "INTRUSION_LOG_RULE_TOMLS",
+        "intrusion_log_builtin_rules.rs",
+    );
+    embed_toml_dir(
+        &manifest_dir,
         "parsers/examples",
         "",
         "TEXT_PARSER_TOMLS",

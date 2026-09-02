@@ -54,14 +54,17 @@ def main():
     aul_files = sorted(RULES_DIR.glob("aul_*.toml"))
     evtx_files = sorted(RULES_DIR.glob("evtx_*.toml"))
     journald_files = sorted(RULES_DIR.glob("journald_*.toml"))
+    intrusion_log_files = sorted(RULES_DIR.glob("intrusion_log_*.toml"))
 
     aul_rules = [load_rule(p) for p in aul_files]
     evtx_rules = [load_rule(p) for p in evtx_files]
     journald_rules = [load_rule(p) for p in journald_files]
+    intrusion_log_rules = [load_rule(p) for p in intrusion_log_files]
 
     aul_rules.sort(key=lambda r: r["name"])
     evtx_rules.sort(key=lambda r: r["match"].get("event_id", 0))
     journald_rules.sort(key=lambda r: r["name"])
+    intrusion_log_rules.sort(key=lambda r: r["name"])
 
     out = []
     out.append("# Tagging Rule Reference")
@@ -75,7 +78,7 @@ def main():
     )
     out.append("")
     out.append(
-        "All three packs below ship **embedded in the binary itself** "
+        "All four packs below ship **embedded in the binary itself** "
         "(`build.rs` + `src/tagging/builtin.rs`) and every rule in them is "
         "enabled by default — see [user-guide.md](user-guide.md#tagging) "
         "for the \"Built-in rules...\" picker that lets you enable/disable "
@@ -123,11 +126,29 @@ def main():
     out.append("")
     out.append(build_table(journald_rules))
     out.append("")
+    out.append(f"## Android Intrusion Log rules ({len(intrusion_log_rules)})")
+    out.append("")
+    out.append(
+        "For Android's Advanced Protection Mode \"Intrusion Logging\" "
+        "feature (Android 16+, built by Google with [Amnesty International's "
+        "Security Lab](https://securitylab.amnesty.org/latest/2026/05/android-intrusion-logging-as-a-new-source-of-data-for-consensual-forensic-analysis/) "
+        "for spyware forensics) — one rule per Android SecurityLog tag plus "
+        "`dns_event`/`connect_event`, sourced directly from the [Mobile "
+        "Verification Toolkit](https://github.com/mvt-project/mvt)'s own "
+        "already-verified event catalogue, not re-derived from the Android "
+        "API docs independently — see each rule file's header comment for "
+        "the specific citation. Every rule matches "
+        "`sourcetype = \"intrusion_log\"`."
+    )
+    out.append("")
+    out.append(build_table(intrusion_log_rules))
+    out.append("")
 
     OUT_PATH.write_text("\n".join(out))
     print(
         f"wrote {OUT_PATH} ({len(aul_rules)} AUL + {len(evtx_rules)} EVTX + "
-        f"{len(journald_rules)} journald rules)"
+        f"{len(journald_rules)} journald + {len(intrusion_log_rules)} "
+        f"intrusion_log rules)"
     )
 
 

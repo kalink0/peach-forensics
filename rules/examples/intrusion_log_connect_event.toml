@@ -1,0 +1,19 @@
+# Android Intrusion Logging (Advanced Protection Mode, Android 16+) —
+# connect_event: an outbound network connection made by an app, from
+# AOSP's android.app.admin.ConnectEvent (Apache-2.0).
+# Envelope/field names cross-confirmed against MVT's ConnectEvent module
+# and ALEAPP's intrusion_logging.py, both of which parse real device
+# exports. `ip_address`/`port`/`package_name` are all available on the
+# entry for further filtering via the Filter bar.
+
+[rule]
+name = "intrusion_log_connect_event"
+description = "An app made an outbound network connection"
+version = "1"
+
+[rule.match]
+sourcetype = "intrusion_log"
+event_type = "connect_event"
+
+[rule.tag]
+value = "connect_event"

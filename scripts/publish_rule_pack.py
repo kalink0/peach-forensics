@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Builds peach-rules-v{N}.zip — the downloadable rule-pack bundle described
 in docs/design/rule-pack-updates.md — from the current rules/examples/*.toml
-files (AUL + EVTX + journald together; every bundle is a full snapshot of
-all three families, never a delta).
+files (AUL + EVTX + journald + intrusion_log together; every bundle is a
+full snapshot of all four families, never a delta).
 
 Published from a separate repo, kalink0/peach-rules — not this one — so a
 rule-pack release never gets mixed into peach-forensics' own app-release
@@ -23,7 +23,11 @@ the peach-rules CI workflow does.
 
 Output goes to dist/peach-rules-v{N}.zip (gitignored — a build artifact,
 not something to commit) plus dist/peach-rules-v{N}/manifest.toml and the
-included rule files, unzipped, for inspection before publishing.
+included rule files, unzipped, for inspection before publishing, and
+dist/peach-rules-v{N}-notes.md — a rule-name-to-version table meant to be
+passed straight to `gh release create --notes-file`, so the release page
+itself answers "which version is rule X at in this pack?" without anyone
+downloading and unzipping the bundle first.
 
 Run: python3 scripts/publish_rule_pack.py [--version N] [--min-peach-version X.Y.Z]
 """
@@ -43,14 +47,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RULES_DIR = REPO_ROOT / "rules" / "examples"
 DIST_DIR = REPO_ROOT / "dist"
 
-FAMILY_PREFIXES = ("aul_", "evtx_", "journald_")
+FAMILY_PREFIXES = ("aul_", "evtx_", "journald_", "intrusion_log_")
 TAG_PATTERN = re.compile(r"^peach-rules-v(\d+)$")
 
 
 def rule_files() -> list[Path]:
-    """Every AUL/EVTX/journald rule file — sorted for a deterministic zip
-    (same inputs, same bundle, every time), matching the same principle
-    build.rs already applies to the embedded packs."""
+    """Every AUL/EVTX/journald/intrusion_log rule file — sorted for a
+    deterministic zip (same inputs, same bundle, every time), matching the
+    same principle build.rs already applies to the embedded packs."""
     files = [
         path
         for path in RULES_DIR.glob("*.toml")
@@ -107,6 +111,45 @@ def current_peach_version() -> str:
     if not match:
         raise SystemExit("could not find [package].version in Cargo.toml")
     return match.group(1)
+
+
+def source_commit() -> str:
+    """Short SHA of the peach-forensics checkout this script is running
+    from — more precise than a human-typed branch/tag name for "what was
+    this bundle built from", and correct regardless of who's asking
+    (a local dry run, or peach-rules' publish workflow after checking out
+    a specific `ref`): whatever's actually on disk right now is the
+    answer, not a name that could point somewhere else by the time anyone
+    reads the release notes later."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def write_release_notes(dest: Path, entries: list[dict]) -> None:
+    """A per-rule name-to-version table, written as the GitHub release's
+    own notes body — visible directly on the release page, no download or
+    unzip needed to answer "which version is rule X at in this pack?".
+    Sorted by rule name, not file order, for easy scanning/diffing between
+    releases."""
+    lines = [
+        f"Built from kalink0/peach-forensics@{source_commit()}. See that "
+        "repo's rules/examples/ for the individual rule sources and "
+        "citations.",
+        "",
+        "## Rule versions in this pack",
+        "",
+        "| Rule | Version |",
+        "|---|---|",
+    ]
+    for entry in sorted(entries, key=lambda e: e["rule_name"]):
+        lines.append(f'| `{entry["rule_name"]}` | {entry["rule_version"]} |')
+    dest.write_text("\n".join(lines) + "\n")
 
 
 def write_manifest(dest: Path, pack_version: int, min_peach_version: str, entries: list[dict]) -> None:
@@ -180,15 +223,20 @@ def main() -> None:
         for entry in entries:
             zf.write(staging_dir / entry["name"], entry["name"])
 
+    notes_path = DIST_DIR / f"{bundle_name}-notes.md"
+    write_release_notes(notes_path, entries)
+
     print(f"built {zip_path} ({len(entries)} rule files, pack_version={pack_version})")
     print(f"unzipped copy for inspection: {staging_dir}")
+    print(f"release notes (rule name -> version table): {notes_path}")
     print()
     print("to publish: push this bundle to a release in kalink0/peach-rules (tag")
     print(f'v{pack_version}), not this repo — e.g. from a checkout of peach-rules:')
     print(
         f'  gh release create v{pack_version} '
         f'/path/to/peach-forensics/{zip_path.relative_to(REPO_ROOT)} '
-        f'--repo kalink0/peach-rules --title "Rule pack v{pack_version}" --notes "..."'
+        f'--repo kalink0/peach-rules --title "Rule pack v{pack_version}" '
+        f'--notes-file /path/to/peach-forensics/{notes_path.relative_to(REPO_ROOT)}'
     )
 
 

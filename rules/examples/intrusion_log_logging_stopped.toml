@@ -1,0 +1,20 @@
+# Android Intrusion Logging (Advanced Protection Mode, Android 16+) —
+# security_event, Android SecurityLog tag 210012 ("Logging Stopped"). Tag ID
+# and description from AOSP's SecurityLogTags.logtags/SecurityLog.java
+# (Apache-2.0); tag_key cross-confirmed against MVT's
+# SECURITY_EVENT_TAGS and ALEAPP's intrusionDetectionStore.py, both of
+# which parse real device exports of this format:
+# https://developer.android.com/reference/android/app/admin/SecurityLog
+
+[rule]
+name = "intrusion_log_logging_stopped"
+description = "Security audit logging (this feature) was turned off (SecurityLog tag 210012)"
+version = "1"
+
+[rule.match]
+sourcetype = "intrusion_log"
+event_type = "security_event"
+security_event_tag = "logging_stopped"
+
+[rule.tag]
+value = "logging_stopped"

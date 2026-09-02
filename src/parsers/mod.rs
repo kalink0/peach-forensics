@@ -9,6 +9,7 @@ pub mod aul;
 pub mod builtin_text_formats;
 pub mod evtx;
 mod evtx_templates;
+pub mod intrusion_log;
 pub mod journald;
 pub mod text_config;
 pub mod text_config_file;

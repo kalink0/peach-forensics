@@ -71,11 +71,12 @@ pub struct Settings {
     /// (`"+02:00"`, `"UTC"`) or an IANA zone name (`"Europe/Berlin"`), see
     /// [`crate::model::timezone_spec::TimezoneSpec`]. `None` (the default)
     /// means every text source still needs its own `assume_offset`, same
-    /// as before this setting existed. Never applies to AUL/EVTX/journald
-    /// — their own timestamps are already absolute, see
-    /// `parsers::text_config`'s doc comment for why only text sources ever
-    /// need an assumed timezone at all. `#[serde(default)]` for the same
-    /// backward-compat reason every override field here has it.
+    /// as before this setting existed. Never applies to
+    /// AUL/EVTX/journald/intrusion_log — their own timestamps are already
+    /// absolute, see `parsers::text_config`'s doc comment for why only
+    /// text sources ever need an assumed timezone at all.
+    /// `#[serde(default)]` for the same backward-compat reason every
+    /// override field here has it.
     #[serde(default)]
     pub default_source_timezone: Option<String>,
     /// Timezone the timeline table (and CSV/JSON export) renders

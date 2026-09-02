@@ -173,6 +173,16 @@ fn acknowledgements_tab(ui: &mut egui::Ui) {
          logging code, not re-derived from memory \u{2014} see each rule \
          file's header comment for its specific citation.",
     );
+    ui.add_space(4.0);
+    ui.label(
+        "The built-in Android Intrusion Log tagging rule pack \
+         (rules/examples/intrusion_log_*.toml) sources tag IDs and \
+         descriptions from Android's own AOSP SecurityLogTags.logtags / \
+         SecurityLog.java, cross-confirmed against two independent tools \
+         that parse the same real-world export format: the Mobile \
+         Verification Toolkit (Amnesty International's Security Lab) and \
+         ALEAPP.",
+    );
 
     ui.add_space(10.0);
     ui.strong("Special thanks");

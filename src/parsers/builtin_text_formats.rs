@@ -1,12 +1,12 @@
 //! Built-in text-parser format starters (`parsers/examples/*.toml`),
 //! embedded at compile time by `build.rs` — same mechanism as
-//! [`crate::tagging::builtin`]'s AUL/EVTX/journald rule packs, applied here
-//! to the *other* kind of TOML config this app reads. Unlike those rule
-//! packs (which apply automatically, no analyst action needed), these are
-//! starting points loaded into "Define format..." (`ui::format_dialog`) —
-//! a text log's actual shape varies too much file to file for a built-in
-//! preset to ever apply itself blindly the way a fixed EVTX `event_id`
-//! can.
+//! [`crate::tagging::builtin`]'s AUL/EVTX/journald/intrusion_log rule packs,
+//! applied here to the *other* kind of TOML config this app reads. Unlike
+//! those rule packs (which apply automatically, no analyst action needed),
+//! these are starting points loaded into "Define format..."
+//! (`ui::format_dialog`) — a text log's actual shape varies too much file
+//! to file for a built-in preset to ever apply itself blindly the way a
+//! fixed EVTX `event_id` can.
 
 use crate::parsers::text_config_file::TextFormatDraft;
 

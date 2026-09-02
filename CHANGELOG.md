@@ -2,15 +2,17 @@
 
 All notable changes to Peach will be documented in this file.
 
-## Unreleased
+## v0.5.0 - 2026-09-02
 
 ### New Features
 
+- **Android Intrusion Log** support (**Sourcetype → Android Intrusion Log**) — reads Android's new Advanced Protection Mode "Intrusion Logging" feature (Android 16+, built by Google with Amnesty International's Security Lab specifically for spyware/"consensual" forensic analysis), once already extracted locally via [AndroidQF](https://github.com/mvt-project/androidqf)/[MVT](https://github.com/mvt-project/mvt) (acquisition/decryption from the user's Google account is outside Peach's scope). Covers DNS lookups, outbound network connections, and ~46 Android SecurityLog events (failed unlock attempts, ADB shell commands, root certificate installs, package installs, device wipes, and more) — a new 48-rule built-in tagging pack ships alongside it, sourced directly from MVT's own already-verified event catalogue.
 - EVTX rule pack grown from 35 to 41 rules: system time changes (4616, an anti-forensic/timestomping indicator), Kerberos replay attacks (4649), object access attempts (4663), network share connections (5140, complementing the existing 5145), service start type changes (7040, a classic defense-evasion indicator), and PowerShell Module Logging (4103, alongside the existing 4104 Script Block Logging). journald rule pack grown from 15 to 18 rules: generic login-session open/close via `systemd-logind` (console, graphical, or su/sudo — not just SSH), and a generic PAM authentication-failure catch-all for services without a dedicated rule. All sourced from Microsoft's own documentation, the JPCERT/CC lateral-movement report already cited elsewhere in this pack, and systemd's own docs.
 
 ### Bug Fixes
 
 - **Built-in rules...** had the same staleness problem v0.4.1's "Rules reference..." fix addressed, just less visibly: the checkbox list always showed the built-in baseline while the enabled/disabled state underneath was already tracking whatever's actually active — so a newly-added baseline rule could appear unchecked (or a rule from an older downloaded pack not appear at all) whenever a downloaded pack was active. Now reads the same live active rule set as Rules reference, and shows which tier is active the same way.
+- **Built-in rules...** could also make its own Close button and lower rule sections completely unreachable on a small window — each of its five sections scrolled on its own, but nothing let you scroll *between* them. Now wrapped in one outer scroll area, with Close pinned to the bottom regardless of window size.
 
 ## v0.4.1 - 2026-08-31
 
