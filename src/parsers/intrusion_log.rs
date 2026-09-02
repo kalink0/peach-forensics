@@ -10,7 +10,9 @@
 //! operation, not a local read-only file), and is handled by
 //! [AndroidQF](https://github.com/mvt-project/androidqf) or the [Mobile
 //! Verification Toolkit](https://github.com/mvt-project/mvt) (both from
-//! Amnesty's Security Lab) during acquisition. This parser picks up from
+//! Amnesty's Security Lab), or by a dedicated Android acquisition tool
+//! like [ALEX](https://github.com/prosch88/ALEX), during acquisition.
+//! This parser picks up from
 //! there: once already extracted to a local `intrusion-logs/` directory
 //! (AndroidQF's own output layout), it reads exactly the same
 //! newline-delimited JSON format MVT's own `mvt-android

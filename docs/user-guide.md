@@ -23,9 +23,10 @@ own Cancel/Close/OK button, or the small **✕** in its title bar.
      `Persist`/`Special`/`Signpost`/`HighVolume` subfolders plus `dsc`/`uuidtext`/
      `timesync` reference data). One `.logarchive` becomes one source.
    - Android Intrusion Log also expects a folder — the `intrusion-logs/`
-     directory an [AndroidQF](https://github.com/mvt-project/androidqf)
-     acquisition produces (searched recursively for `.txt` files). One
-     folder becomes one source, same as AUL. See
+     directory an [AndroidQF](https://github.com/mvt-project/androidqf) or
+     [ALEX](https://github.com/prosch88/ALEX) acquisition produces
+     (searched recursively for `.txt` files). One folder becomes one
+     source, same as AUL. See
      [supported-sources.md](supported-sources.md) for what this sourcetype
      covers and, importantly, what it doesn't (acquisition/decryption is
      outside Peach's scope).

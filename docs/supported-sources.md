@@ -136,9 +136,11 @@ Verification Toolkit](https://github.com/mvt-project/mvt)'s own
   daily on-device, end-to-end encrypted, and stored in the user's Google
   account. Decrypting and exporting them is a cloud/account-credential
   operation, not a local read-only file, so it's handled entirely by
-  [AndroidQF](https://github.com/mvt-project/androidqf) or MVT during
-  acquisition, before Peach ever sees anything. This parser starts from an
-  already-extracted local `intrusion-logs/` directory.
+  [AndroidQF](https://github.com/mvt-project/androidqf), MVT, or
+  [ALEX](https://github.com/prosch88/ALEX) (a dedicated Android
+  acquisition tool) during acquisition, before Peach ever sees anything.
+  This parser starts from an already-extracted local `intrusion-logs/`
+  directory.
 - Three event types, each wrapped under its own top-level JSON key per
   line: `dns_event`, `connect_event`, `security_event` (the last nesting
   one level deeper — a tag naming the specific event, e.g.
