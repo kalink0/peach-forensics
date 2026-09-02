@@ -1,0 +1,22 @@
+# EVTX Security-Auditing: a Kerberos replay attack was detected — domain
+# controllers only. Generated when a domain controller receives an
+# Authenticator (server name, client name, time, microseconds) it recently
+# saw before and responds KRB_AP_ERR_REPEAT. Can be benign (network
+# device misconfiguration/routing loops resending the same packet), but is
+# also a documented signal for Kerberos replay/relay attacks — worth
+# surfacing either way rather than silently dropping it as noise.
+# Reference: Microsoft's official Security Auditing event reference,
+# "4649(S) A replay attack was detected":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4649
+
+[rule]
+name = "evtx_kerberos_replay_attack"
+description = "A Kerberos replay attack was detected — domain controllers only (Security-Auditing 4649)"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4649
+
+[rule.tag]
+value = "kerberos_replay_attack"

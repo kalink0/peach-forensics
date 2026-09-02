@@ -1,0 +1,23 @@
+# journald: a PAM authentication attempt failed, on *any* service —
+# deliberately not scoped to `process` (unlike this pack's other PAM-based
+# rules), since PAM writes through whichever program invoked it (console
+# login, gdm/lightdm, polkit, su, sudo, sshd, ...) and this pack doesn't
+# have a dedicated rule for every one of them. Will co-fire alongside the
+# more specific journald_ssh_logon_failure.toml on an SSH failure, if that
+# system's PAM stack includes pam_unix — both rules tag genuinely separate
+# log lines for the same real event, not a duplicate tag on one row.
+# pam_unix's message text ("pam_unix(SERVICE:auth): authentication
+# failure; ...") is stable and widely documented, e.g.:
+# https://knowledge.broadcom.com/external/article/7874/pam_unix-authentication-failure-is-issue.html
+
+[rule]
+name = "journald_pam_auth_failure_generic"
+description = "A PAM authentication attempt failed, any service (pam_unix \"authentication failure\")"
+version = "1"
+
+[rule.match]
+sourcetype = "journald"
+message_contains = "authentication failure"
+
+[rule.tag]
+value = "auth_failure"

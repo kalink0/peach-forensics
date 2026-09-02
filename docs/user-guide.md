@@ -195,39 +195,47 @@ is covered directly from Unified Log predicates.
 
 `rules/examples/evtx_*.toml` is the tagging companion to the built-in EVTX
 message templates (see [field-extraction.md](field-extraction.md#message-templates-evtx)):
-35 rule files covering Security-Auditing event IDs those templates render or
+41 rule files covering Security-Auditing event IDs those templates render or
 otherwise high forensic value — logon/logoff (4624/4625/4634/4648/4672),
 process creation and exit (4688/4689), service install (4697, and 7045 from
 the System log, not gated behind a special audit subcategory the way 4697
-is), account lifecycle
+is), service start type changed (7040, defense-evasion indicator), account
+lifecycle
 (created/enabled/disabled/deleted/locked/unlocked: 4720/4722/4725/4726/4740/4767),
 self vs. admin password changes (4723/4724), group management
 (4728/4732/4756), credential validation (4776), Kerberos TGT/service ticket
-requests (4768/4769 — domain-controller-only, base signal for Kerberoasting/
-Golden Ticket detection), SMB share access checks (5145), scheduled task
-creation/deletion (4698/4699), RDP session reconnect/disconnect
-(4778/4779), PowerShell Script Block Logging (4104, a different
-channel/provider than the rest of this pack — see that rule file's header
-comment), boot/shutdown (6005/6008/41/1074), and the audit log being
-cleared (1102) — cross-checked against Microsoft's official Security
-Auditing event reference (or, for 4104/7045/boot-shutdown, other primary
-sources — see each rule file's header comment for its specific citation).
+requests and replay attacks (4768/4769/4649 — domain-controller-only, base
+signal for Kerberoasting/Golden Ticket detection), SMB share connections and
+access checks (5140/5145), object access attempts (4663, requires a SACL),
+scheduled task creation/deletion (4698/4699), RDP session reconnect/
+disconnect (4778/4779), PowerShell Script Block Logging and Module Logging
+(4104/4103, a different channel/provider than the rest of this pack — see
+those rule files' header comments), system time changes (4616, an
+anti-forensic/timestomping indicator, always logged regardless of audit
+policy), boot/shutdown (6005/6008/41/1074), and the audit log being cleared
+(1102) — cross-checked against Microsoft's official Security Auditing event
+reference (or, for 4104/4103/7045/boot-shutdown, other primary sources — see
+each rule file's header comment for its specific citation).
 `event_id`/`provider` are normalized match keys resolved against EVTX's
 actual nested `Event.System.*` JSON shape, not a flat top-level lookup —
 see `tagging::rule::normalized_field`'s doc comment if writing a custom
 rule against these fields yourself.
 
-`rules/examples/journald_*.toml` is journald's rule pack: 15 rules covering
+`rules/examples/journald_*.toml` is journald's rule pack: 18 rules covering
 SSH logon success/failure/logoff, sudo command usage/denial, privilege
-escalation via `su`, password changes, account lifecycle/group membership
-changes via `useradd`/`userdel`/`usermod`, cron job execution, and a kernel
-boot marker. Message text sourced directly from OpenSSH, sudo,
-shadow-utils', and systemd's own logging code (see each rule file's header
-comment for its specific citation) — journald has no structured `event_id`
-the way EVTX does, so every rule scopes itself to a specific `process`
-(journald's `SYSLOG_IDENTIFIER`) or trusted field (`_TRANSPORT`, for the
-kernel boot marker) as well as matching on message text, to avoid two
-unrelated daemons coincidentally sharing a substring.
+escalation via `su`, generic login-session open/close via `systemd-logind`
+(console, graphical, or su/sudo — not just SSH), a generic PAM
+authentication-failure catch-all for services without a dedicated rule,
+password changes, account lifecycle/group membership changes via
+`useradd`/`userdel`/`usermod`, cron job execution, and a kernel boot marker.
+Message text sourced directly from OpenSSH, sudo, shadow-utils', and
+systemd's own logging code (see each rule file's header comment for its
+specific citation) — journald has no structured `event_id` the way EVTX
+does, so most rules scope themselves to a specific `process` (journald's
+`SYSLOG_IDENTIFIER`) or trusted field (`_TRANSPORT`, for the kernel boot
+marker) as well as matching on message text, to avoid two unrelated daemons
+coincidentally sharing a substring — the generic PAM failure rule is the one
+deliberate exception, scoped to message text alone.
 
 Unlike other rule files (which load either automatically from the
 configured [rules directory](#settings) or by explicit selection via
@@ -241,15 +249,19 @@ Every rule matches its own `sourcetype` on its own, so an enabled AUL rule
 never tags an EVTX or journald row, or vice versa.
 
 **Built-in rules...** (next to "Choose tagging rules...", only shown when
-relevant to the current source) opens a picker listing every built-in rule
-from all three packs — AUL, EVTX, and journald in their own sections, each
-rule a checkbox (hover one for its full match condition, tag, and
-description), plus **Select all**/**Select none** per section. This is
-exact, per-rule control, not just a whole-pack on/off switch: enable only
-the three or four AUL rules you actually care about for this case, say. See
+relevant to the current source) opens a picker listing every rule from
+whichever tier is currently active — AUL, EVTX, and journald in their own
+sections, each rule a checkbox (hover one for its full match condition, tag,
+and description), plus **Select all**/**Select none** per section. Like
+[Rules reference...](#tagging), this reflects a downloaded pack (see
+"Updating the built-in rule packs" below) if one is currently applied,
+not just the version embedded in this build. This is exact, per-rule
+control, not just a whole-pack on/off switch: enable only the three or four
+AUL rules you actually care about for this case, say. See
 [rules-reference.md](rules-reference.md) for the same information as a
-static, browsable table (generated from the same `rules/examples/*.toml`
-files this picker reads).
+static, browsable table generated from the packs embedded at build time
+(so it won't reflect a downloaded pack the way this picker and the in-app
+**Help → Rules reference...** dialog do).
 
 ### Updating the built-in rule packs
 
@@ -731,12 +743,17 @@ own offset (e.g. `2026-07-28 14:00:00.000 +02:00`), so it stays
 unambiguous even if this setting changes later. **View > Activity Log...**
 is covered above.
 
-**Help > Rules reference...** opens the same [rules-reference.md](rules-reference.md)
-table described under [Tagging](#tagging) above in its own window — embedded
-in the binary, so it works fully offline (no browser, no network, nothing
-extra to carry to an airgapped analysis machine). Has its own filter field
-for jumping to a rule/tag by name instead of scrolling, plus an **Open on
-GitHub...** button for the nicely-rendered table if you do have internet.
+**Help > Rules reference...** opens the same rule table as **Built-in
+rules...** (described under [Tagging](#tagging) above) in its own window,
+formatted for reading rather than for enabling/disabling — reflects
+whichever tier is currently active (built-in baseline or a downloaded
+pack, see "Updating the built-in rule packs" under Tagging), works fully
+offline either way (no browser, no network, nothing extra to carry to an
+airgapped analysis machine). Has its own filter field for jumping to a
+rule/tag by name instead of scrolling, plus an **Open on GitHub...**
+button for the same table rendered on GitHub — only enabled while the
+built-in baseline is active, since a downloaded pack has no single
+matching page there.
 **Help > About Peach...** covers version info, licenses, and the research
 sources behind the built-in rule packs.
 

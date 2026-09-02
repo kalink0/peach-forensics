@@ -1,0 +1,23 @@
+# EVTX Security-Auditing: the system clock was changed. Always logged
+# regardless of which audit subcategories are enabled (unlike almost every
+# other rule in this pack) — Microsoft's own reference notes this event
+# fires unconditionally. High anti-forensic value: an attacker (or a
+# careless analyst) rolling the clock back/forward mid-incident shows up
+# here, with old/new time and the responsible process in the event data.
+# `Subject\Security ID` = "LOCAL SERVICE" is routine NTP drift correction,
+# not evidence of anything — still worth surfacing, just expect volume.
+# Reference: Microsoft's official Security Auditing event reference,
+# "4616(S) The system time was changed":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4616
+
+[rule]
+name = "evtx_system_time_changed"
+description = "The system clock was changed (Security-Auditing 4616)"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4616
+
+[rule.tag]
+value = "system_time_changed"

@@ -50,7 +50,7 @@ Most predicates sourced from ["Apple Unified Log Predicates in iLEAPP: The Refer
 | `aul_watch_crown_button` | message contains any of:<br>&bull; `Description: Crown down`<br>&bull; `Description: Button held`<br>&bull; `Description: Button long-held` | `watch_crown_button` | Apple Watch Digital Crown / side button physical interaction |
 | `aul_wifi_status` | message contains any of:<br>&bull; `WiFi state changed:`<br>&bull; `Toggled WiFi state`<br>&bull; `is WiFi associated?`<br>&bull; `link status changed`<br>&bull; `reachability changed`<br>&bull; `ISNetworkObserver`<br>&bull; `ForgetSSID`<br>&bull; `en0: SSID`<br>&bull; `Removing Lease SSID`<br>&bull; `SysMon: WiFi state changed:`<br>&bull; `WiFiManagerClientRemoveNetworkWithReason:`<br>&bull; `WiFiSecurityRemovePassword`<br>&bull; `AlwaysOnWifi:`<br>&bull; `WiFiDeviceManagerSetNetworks:`<br>&bull; `Scanning For Broadcast found:`<br>&bull; `Scanning Remaining Channels`<br>&bull; `WiFiSettlementObserver _handleScanResults`<br>&bull; `Attempting to join`<br>&bull; `WiFiLQAMgrSetCurrentNetwork: Joined SSID:`<br>&bull; `Preparing background scan request for`<br>&bull; `WiFiNetworkPrepareKnownBssList`<br>&bull; `to list of known networks`<br>&bull; `{AUTOJOIN, SCAN*} Scanning 2Ghz Channels found:`<br>&bull; `{AUTOJOIN, SCAN*} Scanning 5Ghz Channels found:`<br>&bull; `WFMacRandomisation`<br>&bull; `manual association`<br>&bull; `Copy password for Network`<br>&bull; `Attempting auto join association`<br>&bull; `Link went down`<br>&bull; `Total connection time` | `wifi_status` | WiFi state changes, network joins, and scan activity |
 
-## EVTX Security-Auditing rules (35)
+## EVTX Security-Auditing rules (41)
 
 Cross-checked against [Microsoft's official Security Auditing event reference](https://learn.microsoft.com/windows/security/threat-protection/auditing/) for each event ID — see each rule file's header comment for the specific citation. Every rule matches `sourcetype = "evtx"`; companion to the built-in EVTX message templates (see [field-extraction.md](field-extraction.md#message-templates-evtx)).
 
@@ -59,11 +59,15 @@ Cross-checked against [Microsoft's official Security Auditing event reference](h
 | `evtx_kernel_power_unexpected_reboot` | `event_id` = `41` | `unexpected_shutdown` | Kernel-Power's own unexpected-reboot marker (41) |
 | `evtx_system_shutdown_requested` | `event_id` = `1074` | `system_shutdown` | A system shutdown or restart was requested, with requestor and reason (1074) |
 | `evtx_audit_log_cleared` | `event_id` = `1102` | `audit_log_cleared` | The Security audit log was cleared (1102) — investigate why |
+| `evtx_powershell_module_logging` | `event_id` = `4103` | `powershell_module_logging` | PowerShell Module Logging — records pipeline execution/command invocations (4103) |
 | `evtx_powershell_script_block` | `event_id` = `4104` | `powershell_script_block` | PowerShell Script Block Logging — records the actual (de-obfuscated) code executed (4104) |
+| `evtx_system_time_changed` | `event_id` = `4616` | `system_time_changed` | The system clock was changed (Security-Auditing 4616) |
 | `evtx_logon_success` | `event_id` = `4624` | `logon_success` | Successful account logon (Security-Auditing 4624) |
 | `evtx_auth_failure` | `event_id` = `4625` | `auth_failure` | Failed account logon (Security-Auditing 4625) |
 | `evtx_logoff` | `event_id` = `4634` | `logoff` | Account logoff (Security-Auditing 4634) |
 | `evtx_explicit_credentials` | `event_id` = `4648` | `explicit_credentials` | Logon attempted using explicit credentials, e.g. RunAs (Security-Auditing 4648) |
+| `evtx_kerberos_replay_attack` | `event_id` = `4649` | `kerberos_replay_attack` | A Kerberos replay attack was detected — domain controllers only (Security-Auditing 4649) |
+| `evtx_object_access_attempt` | `event_id` = `4663` | `object_access_attempt` | An attempt was made to access an object — file/registry/etc., requires SACL (Security-Auditing 4663) |
 | `evtx_privileged_logon` | `event_id` = `4672` | `privileged_logon` | Special privileges assigned to a new logon (Security-Auditing 4672) |
 | `evtx_process_creation` | `event_id` = `4688` | `process_creation` | New process created (Security-Auditing 4688) |
 | `evtx_process_exited` | `event_id` = `4689` | `process_exited` | A process has exited (Security-Auditing 4689) |
@@ -87,12 +91,14 @@ Cross-checked against [Microsoft's official Security Auditing event reference](h
 | `evtx_credential_validation` | `event_id` = `4776` | `credential_validation` | NTLM credential validation attempt, success or failure (Security-Auditing 4776) |
 | `evtx_session_reconnected` | `event_id` = `4778` | `session_reconnected` | A session was reconnected to a Window Station (Security-Auditing 4778) |
 | `evtx_session_disconnected` | `event_id` = `4779` | `session_disconnected` | A session was disconnected from a Window Station (Security-Auditing 4779) |
+| `evtx_network_share_accessed` | `event_id` = `5140` | `network_share_access` | A network share (SMB) was connected to — once per session (Security-Auditing 5140) |
 | `evtx_network_share_access_check` | `event_id` = `5145` | `network_share_access` | A network share (SMB) object access was checked (Security-Auditing 5145) |
 | `evtx_system_boot` | `event_id` = `6005` | `system_boot` | System startup — Event Log service started (6005) |
 | `evtx_unexpected_shutdown_detected` | `event_id` = `6008` | `unexpected_shutdown` | An unexpected/dirty shutdown was detected on the previous boot (6008) |
+| `evtx_service_start_type_changed` | `event_id` = `7040` | `service_start_type_changed` | A service's start type was changed, e.g. disabled (System log, Service Control Manager, 7040) |
 | `evtx_service_install_system_log` | `event_id` = `7045` | `service_install` | A service was installed, from the System log (Service Control Manager, event 7045) |
 
-## journald rules (15)
+## journald rules (18)
 
 Message text sourced directly from the logging daemons' own source (OpenSSH, sudo, shadow-utils) rather than re-derived from memory — see each rule file's header comment for the specific citation. Every rule matches `sourcetype = "journald"` and scopes itself to a specific `process` (journald's `SYSLOG_IDENTIFIER`), since message text alone is the only signal journald offers — unlike EVTX's structured `event_id`.
 
@@ -106,6 +112,9 @@ Message text sourced directly from the logging daemons' own source (OpenSSH, sud
 | `journald_cron_command_debian` | `process` = `CRON`<br>message contains `CMD (` | `cron_command` | A cron job command executed (vixie-cron / Debian family) |
 | `journald_group_membership_change` | `process` = `usermod`<br>message contains any of:<br>&bull; `' to group '`<br>&bull; `' from group '` | `group_membership_change` | A user was added to or removed from a group via usermod |
 | `journald_kernel_boot` | `_TRANSPORT` = `kernel`<br>message contains `Linux version` | `system_boot` | System boot — kernel version banner, the first ring-buffer message of every boot |
+| `journald_logind_session_closed` | `process` = `systemd-logind`<br>message contains `logged out. Waiting for processes to exit.` | `logoff` | A login session was closed — console, graphical, or su/sudo (systemd-logind "logged out") |
+| `journald_logind_session_opened` | `process` = `systemd-logind`<br>message contains `New session` | `logon_success` | A login session was opened — console, graphical, or su/sudo (systemd-logind "New session") |
+| `journald_pam_auth_failure_generic` | message contains `authentication failure` | `auth_failure` | A PAM authentication attempt failed, any service (pam_unix "authentication failure") |
 | `journald_password_changed` | `process` = `passwd`<br>message contains `changed by '` | `password_changed` | A user's password was changed via passwd |
 | `journald_ssh_logoff` | `process` = `sshd`<br>message contains `session closed for user` | `logoff` | An SSH session ended (sshd "session closed for user") |
 | `journald_ssh_logon_failure` | `process` = `sshd`<br>message contains any of:<br>&bull; `Failed password for`<br>&bull; `Failed publickey for`<br>&bull; `Invalid user`<br>&bull; `maximum authentication attempts exceeded` | `auth_failure` | Failed SSH authentication attempt (sshd "Failed ..."/"Invalid user") |

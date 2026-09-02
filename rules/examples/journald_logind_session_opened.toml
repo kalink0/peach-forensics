@@ -1,0 +1,24 @@
+# journald: a login session was opened — systemd-logind's own message
+# ("New session N of user X."), logged for every session it tracks:
+# console/tty, graphical (gdm/lightdm/sddm), and any su/sudo invocation
+# that goes through pam_systemd. Fills a real gap in this pack: the
+# existing SSH/su rules only cover those two specific paths, nothing
+# tracks local console or graphical desktop logins at all. Deliberately
+# shares the `logon_success` tag with journald_ssh_logon_success.toml and
+# EVTX's evtx_4624_logon_success.toml — same real-world concept (a login
+# session started), different source. Reference: systemd-logind's session
+# lifecycle, documented in systemd's own manual:
+# https://www.freedesktop.org/software/systemd/man/latest/systemd.journal-fields.html
+
+[rule]
+name = "journald_logind_session_opened"
+description = "A login session was opened — console, graphical, or su/sudo (systemd-logind \"New session\")"
+version = "1"
+
+[rule.match]
+sourcetype = "journald"
+process = "systemd-logind"
+message_contains = "New session"
+
+[rule.tag]
+value = "logon_success"

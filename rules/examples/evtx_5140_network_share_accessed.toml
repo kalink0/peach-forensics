@@ -1,0 +1,25 @@
+# EVTX Security-Auditing: a network share object was accessed — logged
+# once per session per share connection (unlike this pack's existing
+# evtx_5145_network_share_access_check.toml, which fires on every
+# individual file/folder access check within that connection and doesn't
+# record file names either). 5140 is the actual "someone connected to
+# \\host\share" event; requires the "Detailed File Share" audit
+# subcategory, same not-on-by-default caveat as 5145. Deliberately shares
+# 5145's `network_share_access` tag — same real-world concept
+# (SMB share access, relevant to lateral movement/tool transfer via
+# ADMIN$/C$), just two different granularities of the same signal.
+# Reference: Microsoft's official Security Auditing event reference,
+# "5140(S, F) A network share object was accessed":
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-5140
+
+[rule]
+name = "evtx_network_share_accessed"
+description = "A network share (SMB) was connected to — once per session (Security-Auditing 5140)"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 5140
+
+[rule.tag]
+value = "network_share_access"

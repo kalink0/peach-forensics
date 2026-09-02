@@ -1,0 +1,22 @@
+# journald: the counterpart to journald_logind_session_opened.toml —
+# systemd-logind's own message when a session ends ("Session N logged out.
+# Waiting for processes to exit."), logged before the session is actually
+# removed. Matched on the full phrase rather than just "logged out." to
+# stay specific to logind's own wording. Deliberately shares the `logoff`
+# tag with journald_ssh_logoff.toml — same real-world concept, different
+# source. Reference: same as the session-opened rule, systemd-logind's
+# session lifecycle:
+# https://www.freedesktop.org/software/systemd/man/latest/systemd.journal-fields.html
+
+[rule]
+name = "journald_logind_session_closed"
+description = "A login session was closed — console, graphical, or su/sudo (systemd-logind \"logged out\")"
+version = "1"
+
+[rule.match]
+sourcetype = "journald"
+process = "systemd-logind"
+message_contains = "logged out. Waiting for processes to exit."
+
+[rule.tag]
+value = "logoff"

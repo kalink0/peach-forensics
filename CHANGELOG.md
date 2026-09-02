@@ -2,6 +2,16 @@
 
 All notable changes to Peach will be documented in this file.
 
+## Unreleased
+
+### New Features
+
+- EVTX rule pack grown from 35 to 41 rules: system time changes (4616, an anti-forensic/timestomping indicator), Kerberos replay attacks (4649), object access attempts (4663), network share connections (5140, complementing the existing 5145), service start type changes (7040, a classic defense-evasion indicator), and PowerShell Module Logging (4103, alongside the existing 4104 Script Block Logging). journald rule pack grown from 15 to 18 rules: generic login-session open/close via `systemd-logind` (console, graphical, or su/sudo — not just SSH), and a generic PAM authentication-failure catch-all for services without a dedicated rule. All sourced from Microsoft's own documentation, the JPCERT/CC lateral-movement report already cited elsewhere in this pack, and systemd's own docs.
+
+### Bug Fixes
+
+- **Built-in rules...** had the same staleness problem v0.4.1's "Rules reference..." fix addressed, just less visibly: the checkbox list always showed the built-in baseline while the enabled/disabled state underneath was already tracking whatever's actually active — so a newly-added baseline rule could appear unchecked (or a rule from an older downloaded pack not appear at all) whenever a downloaded pack was active. Now reads the same live active rule set as Rules reference, and shows which tier is active the same way.
+
 ## v0.4.1 - 2026-08-31
 
 ### Bug Fixes

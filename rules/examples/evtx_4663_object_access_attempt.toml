@@ -1,0 +1,22 @@
+# EVTX Security-Auditing: an attempt was made to access an object (file,
+# registry key, or similar), success or failure. Requires Object Access
+# auditing with a SACL on the specific object — not on by default, same
+# caveat as this pack's other object-access-dependent rules
+# (evtx_5145_network_share_access_check.toml,
+# evtx_4698/4699_scheduled_task_*.toml). Reference: cited directly in
+# JPCERT/CC's own "Detecting Lateral Movement through Tracking Event Logs"
+# research report as the worked example for detecting a credential-dumping
+# tool (PWDumpX's temporary PWHashes.txt output file):
+# https://www.jpcert.or.jp/english/pub/sr/DetectingLateralMovementThroughTrackingEventLogs_version2.pdf
+
+[rule]
+name = "evtx_object_access_attempt"
+description = "An attempt was made to access an object — file/registry/etc., requires SACL (Security-Auditing 4663)"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4663
+
+[rule.tag]
+value = "object_access_attempt"

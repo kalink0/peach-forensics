@@ -1,0 +1,23 @@
+# EVTX: PowerShell Module Logging — records pipeline execution details
+# (command invocations, parameter values) as cmdlets run, complementing
+# this pack's existing evtx_4104_powershell_script_block.toml (which
+# records the full script text instead). Module logging alone won't show
+# obfuscated/dynamically-built code the way script block logging does,
+# but it's often enabled independently and can be the only PowerShell
+# telemetry available. Same channel/provider as 4104:
+# "Microsoft-Windows-PowerShell/Operational" — matching here is still just
+# `event_id`, same reasoning as 4104's own rule file.
+# Reference: PowerShell's own official logging documentation:
+# https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_logging_windows
+
+[rule]
+name = "evtx_powershell_module_logging"
+description = "PowerShell Module Logging — records pipeline execution/command invocations (4103)"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4103
+
+[rule.tag]
+value = "powershell_module_logging"

@@ -1,0 +1,23 @@
+# EVTX: a service's start type was changed — logged to the System log by
+# the Service Control Manager (provider "Service Control Manager", not
+# "Microsoft-Windows-Security-Auditing", same as this pack's existing
+# evtx_7045_service_installed_system_log.toml — always recorded, not gated
+# behind any audit policy). Classic defense-evasion indicator: an attacker
+# disabling a security product's service (e.g. setting it from
+# "auto start" to "disabled") shows up here with the old and new start
+# type. Reference: Service Control Manager's own well-documented message
+# text ("The start type of the %1 service was changed from %2 to %3."),
+# see e.g. Splunk Security Content's data-source reference:
+# https://research.splunk.com/sources/91738e9e-d112-41c9-b91b-e5868d8993d9/
+
+[rule]
+name = "evtx_service_start_type_changed"
+description = "A service's start type was changed, e.g. disabled (System log, Service Control Manager, 7040)"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 7040
+
+[rule.tag]
+value = "service_start_type_changed"

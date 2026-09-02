@@ -218,11 +218,11 @@ mod tests {
     fn embeds_every_evtx_rule_file_and_all_parse() {
         let rules = evtx_security_auditing_rules();
         // Same "loose lower bound" reasoning as the AUL pack's equivalent
-        // test — 35 Security-Auditing event IDs are shipped today, more can
+        // test — 41 Security-Auditing event IDs are shipped today, more can
         // be added later without this test needing an edit.
         assert!(
-            rules.len() >= 35,
-            "expected at least 35 embedded EVTX rules, got {}",
+            rules.len() >= 41,
+            "expected at least 41 embedded EVTX rules, got {}",
             rules.len()
         );
     }
@@ -282,11 +282,11 @@ mod tests {
     fn embeds_every_journald_rule_file_and_all_parse() {
         let rules = journald_login_rules();
         // Same "loose lower bound" reasoning as the other two packs' own
-        // tests — 15 rules shipped today, more can be added later without
+        // tests — 18 rules shipped today, more can be added later without
         // this test needing an edit.
         assert!(
-            rules.len() >= 15,
-            "expected at least 15 embedded journald rules, got {}",
+            rules.len() >= 18,
+            "expected at least 18 embedded journald rules, got {}",
             rules.len()
         );
     }
@@ -330,10 +330,14 @@ mod tests {
     #[test]
     fn embedded_journald_ssh_logon_success_rule_matches_a_realistic_record() {
         let rules = journald_login_rules();
+        // Matched by rule name, not `tag.value == "logon_success"` — that
+        // tag is now shared with journald_logind_session_opened.toml (same
+        // real-world concept, different source), so a tag-value lookup is
+        // no longer unique enough to pick this specific rule.
         let logon_success = rules
             .iter()
-            .find(|r| r.rule.tag.value == "logon_success")
-            .expect("expected an embedded rule tagging logon_success");
+            .find(|r| r.rule.name == "journald_ssh_logon_success")
+            .expect("expected the journald_ssh_logon_success rule to be embedded");
 
         let fields = serde_json::json!({"SYSLOG_IDENTIFIER": "sshd"});
         let message = "Accepted password for alice from 10.0.0.5 port 51000 ssh2";
