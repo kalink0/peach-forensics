@@ -133,12 +133,15 @@ def main():
         "feature (Android 16+, built by Google with [Amnesty International's "
         "Security Lab](https://securitylab.amnesty.org/latest/2026/05/android-intrusion-logging-as-a-new-source-of-data-for-consensual-forensic-analysis/) "
         "for spyware forensics) — one rule per Android SecurityLog tag plus "
-        "`dns_event`/`connect_event`, sourced directly from the [Mobile "
-        "Verification Toolkit](https://github.com/mvt-project/mvt)'s own "
-        "already-verified event catalogue, not re-derived from the Android "
-        "API docs independently — see each rule file's header comment for "
-        "the specific citation. Every rule matches "
-        "`sourcetype = \"intrusion_log\"`."
+        "`dns_event`/`connect_event`. Tag IDs and descriptions sourced from "
+        "Android's own AOSP `SecurityLogTags.logtags`/`SecurityLog.java` "
+        "(Apache-2.0); the JSON format and each event's tag key "
+        "cross-confirmed against two independent tools that parse real "
+        "device exports of the same format — Amnesty's own [Mobile "
+        "Verification Toolkit](https://github.com/mvt-project/mvt) and "
+        "[ALEAPP](https://github.com/abrignoni/ALEAPP) — see each rule "
+        "file's header comment for the specific citation. Every rule "
+        "matches `sourcetype = \"intrusion_log\"`."
     )
     out.append("")
     out.append(build_table(intrusion_log_rules))

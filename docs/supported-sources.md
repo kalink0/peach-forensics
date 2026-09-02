@@ -128,9 +128,9 @@ AUL. Reads Android's **Intrusion Logging** feature (Android 16+, Advanced
 Protection Mode, built by Google with [Amnesty International's Security
 Lab](https://securitylab.amnesty.org/latest/2026/05/android-intrusion-logging-as-a-new-source-of-data-for-consensual-forensic-analysis/)
 specifically for spyware/"consensual" forensic analysis) — newline-delimited
-JSON, one event per line, verified directly against the [Mobile
-Verification Toolkit](https://github.com/mvt-project/mvt)'s own
-`intrusion_logs` module rather than guessed from documentation.
+JSON, one event per line, verified directly against Amnesty's own [Mobile
+Verification Toolkit](https://github.com/mvt-project/mvt) `intrusion_logs`
+module rather than guessed from documentation.
 
 - **Out of scope, deliberately:** the logs themselves are collected once
   daily on-device, end-to-end encrypted, and stored in the user's Google

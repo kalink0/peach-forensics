@@ -254,8 +254,8 @@ MITM/spyware indicator, `adb_shell_cmd`, `wipe_failure`,
 `connect_event`. Tag IDs and descriptions sourced from Android's own AOSP
 `SecurityLogTags.logtags`/`SecurityLog.java`; the JSON format and each
 event's tag key cross-confirmed against two independent tools that parse
-real device exports of the same format — the [Mobile Verification
-Toolkit](https://github.com/mvt-project/mvt) and
+real device exports of the same format — Amnesty's own [Mobile
+Verification Toolkit](https://github.com/mvt-project/mvt) and
 [ALEAPP](https://github.com/abrignoni/ALEAPP) (see each rule file's header
 comment for the specific citation). Every rule
 matches `sourcetype = "intrusion_log"` plus `event_type`/

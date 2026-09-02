@@ -88,7 +88,7 @@
   <text x="178" y="130"
     font-family="'Courier New', Courier, monospace"
     font-size="9.5" fill="#fdba74" opacity="0.75">
-    AUL · EVTX · journald · Syslog · Apache/Nginx · Logcat
+    AUL · EVTX · journald · Android Intrusion Log · Syslog · Apache/Nginx · Logcat
   </text>
 
   <text x="178" y="148"
