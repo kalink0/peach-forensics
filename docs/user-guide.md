@@ -568,6 +568,10 @@ load parallelizes:
   immediately, replacing whatever rule files are currently selected
   (including any picked from elsewhere via **Choose tagging rules...**,
   which itself opens in this folder by default).
+- **Staging directory** — working space for `--ephemeral-session` and
+  Portable Case export/import (see [Portable Case](#portable-case) below);
+  can briefly hold a full copy of the bulk timeline. Defaults to the OS temp
+  directory.
 - **Parse threads for folder loads** — worker threads for parsing a
   multi-file folder load (EVTX/journald/Text) in parallel; automatic by
   default. Irrelevant for AUL, Android Intrusion Log, or a single-file

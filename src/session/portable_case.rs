@@ -120,14 +120,17 @@ pub enum PortableCaseImportOutcome {
 
 /// RAII scratch directory for an in-progress export/import, cleaned up on
 /// drop so an early `?`-propagated failure (bad zip, hash mismatch, ...)
-/// never leaves a half-built case lying around in the OS temp directory.
-/// Same naming/collision-avoidance convention as
-/// `persist::new_ephemeral_sessions_dir`.
+/// never leaves a half-built case lying around. `base` is caller-supplied
+/// (the OS temp directory by default, or `Settings::staging_dir`'s
+/// override) rather than hardcoded, since a full-size case can be as large
+/// as the whole bulk timeline — same reasoning as
+/// `persist::new_ephemeral_sessions_dir`, whose naming/collision-avoidance
+/// convention this mirrors.
 struct ScratchDir(PathBuf);
 
 impl ScratchDir {
-    fn new(prefix: &str) -> anyhow::Result<Self> {
-        let dir = std::env::temp_dir().join(format!(
+    fn new(prefix: &str, base: &Path) -> anyhow::Result<Self> {
+        let dir = base.join(format!(
             "peach-{prefix}-{}-{}",
             std::process::id(),
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
@@ -423,7 +426,10 @@ fn package_zip(
 /// Exports the session's timeline (or, for a non-empty `filter_query_text`,
 /// just the matching subset of it) plus its full session data into a
 /// `.peachcase` ZIP at `out_path`. See the module doc comment for exactly
-/// what is and isn't filtered.
+/// what is and isn't filtered. `staging_base` is where the scratch
+/// `case.duckdb`/`case.sqlite` get built before zipping — see
+/// `Settings::staging_dir`.
+#[allow(clippy::too_many_arguments)]
 pub fn export_portable_case(
     duckdb_conn: &duckdb::Connection,
     session_sqlite_path: &Path,
@@ -431,9 +437,10 @@ pub fn export_portable_case(
     display_name: Option<&str>,
     filter_query_text: &str,
     out_path: &Path,
+    staging_base: &Path,
     progress_tx: &mpsc::Sender<PortableCaseExportOutcome>,
 ) -> anyhow::Result<PortableCaseExportSummary> {
-    let scratch = ScratchDir::new("portable-case-export")?;
+    let scratch = ScratchDir::new("portable-case-export", staging_base)?;
     let case_duckdb_path = scratch.path().join("case.duckdb");
     let case_sqlite_path = scratch.path().join("case.sqlite");
 
@@ -544,13 +551,15 @@ fn move_or_copy(from: &Path, to: &Path) -> anyhow::Result<()> {
 /// `sessions_dir` — never reuses the bundle's `original_session_id` (see
 /// `persist::new_session_dir_for_import`'s doc comment: a portable case must
 /// never be able to clobber an existing local session, even the same bundle
-/// imported twice back to back).
+/// imported twice back to back). `staging_base` is where the bundle gets
+/// extracted before verification — see `Settings::staging_dir`.
 pub fn import_portable_case(
     zip_path: &Path,
     sessions_dir: &Path,
+    staging_base: &Path,
     progress_tx: &mpsc::Sender<PortableCaseImportOutcome>,
 ) -> anyhow::Result<SessionPaths> {
-    let scratch = ScratchDir::new("portable-case-import")?;
+    let scratch = ScratchDir::new("portable-case-import", staging_base)?;
 
     let _ = progress_tx.send(PortableCaseImportOutcome::Progress(
         PortableCaseImportStage::Extracting,
@@ -669,6 +678,26 @@ mod tests {
         ))
     }
 
+    #[test]
+    fn scratch_dir_is_created_under_a_caller_supplied_base_not_only_os_temp() {
+        // Simulates a `Settings::staging_dir` override pointed somewhere
+        // other than the OS temp directory — the whole point of threading
+        // `base` through rather than hardcoding `std::env::temp_dir()`.
+        let base = temp_path("scratch-base", "dir");
+        std::fs::create_dir_all(&base).unwrap();
+
+        let scratch = ScratchDir::new("test-prefix", &base).unwrap();
+
+        assert!(scratch.path().starts_with(&base));
+        assert!(scratch.path().is_dir());
+        drop(scratch);
+        assert!(
+            base.is_dir(),
+            "dropping the scratch dir must not remove its base"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     fn sample_manifest() -> PortableCaseManifest {
         PortableCaseManifest {
             format_version: PORTABLE_CASE_FORMAT_VERSION,
@@ -777,6 +806,7 @@ mod tests {
             Some("Suspect laptop"),
             "",
             &out_path,
+            &std::env::temp_dir(),
             &tx,
         )
         .unwrap();
@@ -786,7 +816,9 @@ mod tests {
         let sessions_dir = temp_path("whole-session-sessions", "dir");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let (import_tx, _import_rx) = mpsc::channel();
-        let session_paths = import_portable_case(&out_path, &sessions_dir, &import_tx).unwrap();
+        let session_paths =
+            import_portable_case(&out_path, &sessions_dir, &std::env::temp_dir(), &import_tx)
+                .unwrap();
 
         let imported_conn = duckdb::Connection::open(&session_paths.duckdb_path).unwrap();
         let entry_count: i64 = imported_conn
@@ -860,6 +892,7 @@ mod tests {
             None,
             "",
             &out_path,
+            &std::env::temp_dir(),
             &tx,
         )
         .unwrap();
@@ -867,7 +900,9 @@ mod tests {
         let sessions_dir = temp_path("pk-sessions", "dir");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let (import_tx, _import_rx) = mpsc::channel();
-        let session_paths = import_portable_case(&out_path, &sessions_dir, &import_tx).unwrap();
+        let session_paths =
+            import_portable_case(&out_path, &sessions_dir, &std::env::temp_dir(), &import_tx)
+                .unwrap();
 
         let imported_conn = duckdb::Connection::open(&session_paths.duckdb_path).unwrap();
         let duplicate = imported_conn.execute(
@@ -918,6 +953,7 @@ mod tests {
             None,
             "hello",
             &out_path,
+            &std::env::temp_dir(),
             &tx,
         )
         .unwrap();
@@ -930,7 +966,9 @@ mod tests {
         let sessions_dir = temp_path("filtered-sessions", "dir");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let (import_tx, _import_rx) = mpsc::channel();
-        let session_paths = import_portable_case(&out_path, &sessions_dir, &import_tx).unwrap();
+        let session_paths =
+            import_portable_case(&out_path, &sessions_dir, &std::env::temp_dir(), &import_tx)
+                .unwrap();
 
         let imported_conn = duckdb::Connection::open(&session_paths.duckdb_path).unwrap();
         let messages: Vec<String> = {
@@ -1003,6 +1041,7 @@ mod tests {
             None,
             "",
             &out_path,
+            &std::env::temp_dir(),
             &tx,
         )
         .unwrap();
@@ -1010,7 +1049,9 @@ mod tests {
         let sessions_dir = temp_path("parser-config-sessions", "dir");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let (import_tx, _import_rx) = mpsc::channel();
-        let session_paths = import_portable_case(&out_path, &sessions_dir, &import_tx).unwrap();
+        let session_paths =
+            import_portable_case(&out_path, &sessions_dir, &std::env::temp_dir(), &import_tx)
+                .unwrap();
 
         let manifest_str = {
             let file = std::fs::File::open(&out_path).unwrap();
@@ -1078,6 +1119,7 @@ mod tests {
             None,
             "",
             &out_path,
+            &std::env::temp_dir(),
             &tx,
         )
         .unwrap();
@@ -1109,7 +1151,12 @@ mod tests {
         let sessions_dir = temp_path("tamper-sessions", "dir");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let (import_tx, _import_rx) = mpsc::channel();
-        let result = import_portable_case(&tampered_path, &sessions_dir, &import_tx);
+        let result = import_portable_case(
+            &tampered_path,
+            &sessions_dir,
+            &std::env::temp_dir(),
+            &import_tx,
+        );
         assert!(result.is_err());
         assert!(
             format!("{:#}", result.unwrap_err()).contains("integrity"),
@@ -1143,7 +1190,7 @@ mod tests {
         let sessions_dir = temp_path("future-version-sessions", "dir");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let (tx, _rx) = mpsc::channel();
-        let result = import_portable_case(&scratch_zip, &sessions_dir, &tx);
+        let result = import_portable_case(&scratch_zip, &sessions_dir, &std::env::temp_dir(), &tx);
         assert!(result.is_err());
         assert!(format!("{:#}", result.unwrap_err()).contains("newer version"));
 
@@ -1166,7 +1213,7 @@ mod tests {
         let sessions_dir = temp_path("no-manifest-sessions", "dir");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let (tx, _rx) = mpsc::channel();
-        let result = import_portable_case(&scratch_zip, &sessions_dir, &tx);
+        let result = import_portable_case(&scratch_zip, &sessions_dir, &std::env::temp_dir(), &tx);
         assert!(result.is_err());
 
         std::fs::remove_file(&scratch_zip).ok();
@@ -1181,7 +1228,7 @@ mod tests {
         let sessions_dir = temp_path("not-a-zip-sessions", "dir");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let (tx, _rx) = mpsc::channel();
-        let result = import_portable_case(&not_a_zip, &sessions_dir, &tx);
+        let result = import_portable_case(&not_a_zip, &sessions_dir, &std::env::temp_dir(), &tx);
         assert!(result.is_err());
 
         std::fs::remove_file(&not_a_zip).ok();
@@ -1209,6 +1256,7 @@ mod tests {
             None,
             "",
             &out_path,
+            &std::env::temp_dir(),
             &tx,
         )
         .unwrap();
@@ -1216,9 +1264,11 @@ mod tests {
         let sessions_dir = temp_path("double-import-sessions", "dir");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let (tx1, _rx1) = mpsc::channel();
-        let first = import_portable_case(&out_path, &sessions_dir, &tx1).unwrap();
+        let first =
+            import_portable_case(&out_path, &sessions_dir, &std::env::temp_dir(), &tx1).unwrap();
         let (tx2, _rx2) = mpsc::channel();
-        let second = import_portable_case(&out_path, &sessions_dir, &tx2).unwrap();
+        let second =
+            import_portable_case(&out_path, &sessions_dir, &std::env::temp_dir(), &tx2).unwrap();
 
         assert_ne!(first.id, second.id);
         assert!(first.duckdb_path.is_file());

@@ -63,10 +63,11 @@ that baseline's own note in `aul_*.toml` header comments generally, and
 | 24 | Recovering a dialed number from the Unified Log | 2026-08-16 | rule added | `aul_dialed_number_recovery.toml` | tested on iOS 26.6 (build 23G71) |
 | 25 | Proximity is not causality | 2026-08-30 | no new rule | | ALR-method essay; contrasts `prewarmCamera` vs. actual auth as a reasoning example, no new predicates. |
 | 26 | Same unlock, three different stories | 2026-08-30 | rule added | `aul_unlock_sessions.toml`, `aul_biometric_sensor_events.toml` | macOS Touch-ID-vs-password disambiguation, verbatim-confirmed against six actual log lines. `"Transition: locked ->"` already covered. Added to `aul_unlock_sessions.toml`: `"matchResult:timestamp: MATCH"`, `"has received no-match"`, `"lockScreenImmediateFromTouchIDPress"`, `"authenticated as user"`, `"right 'system.login.screensaver'"`. Added to `aul_biometric_sensor_events.toml`: `"TouchID button pressed: 1"` (hardware press, macOS counterpart to the existing iOS "Home Button Was Pressed"). `"Attempt #:"` left out as too generic/collision-prone on its own. Tested macOS 26.6.2 (build 25G83), Mac16,8/M4 Pro. |
+| 27 | Backward reasoning from a provable endpoint | 2026-09-04 | no new rule | | ALR-method essay (principle 4); discusses FileVault/Touch ID/session-state reasoning conceptually, no quoted log lines or predicates. |
 
-**Gaps:** none left within #1–26 as of 2026-08-30 — every episode has been reviewed,
+**Gaps:** none left within #1–27 as of 2026-09-04 — every episode has been reviewed,
 and every candidate found in that pass has been resolved one way or another. New
-episodes (#27+) start as `pending` when published.
+episodes (#28+) start as `pending` when published.
 
 **Methodology note on this batch:** the first read of each post used an AI-summarized
 extraction, which surfaced two false positives (#12's two "gaps" both turned out to

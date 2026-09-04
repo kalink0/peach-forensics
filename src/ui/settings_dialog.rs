@@ -44,6 +44,11 @@ pub struct OpenSettingsDialog {
     /// can't open.
     default_sessions_dir: PathBuf,
     default_rules_dir: PathBuf,
+    /// What `staging_dir` resolves to when left unset — the OS temp
+    /// directory. Unlike `default_sessions_dir`/`default_rules_dir` this
+    /// always exists already, so resolving it here doesn't create anything
+    /// as a side effect (see `Settings::staging_dir`'s doc comment).
+    default_staging_dir: PathBuf,
     /// Free-typed text for `draft.default_source_timezone` — kept as a
     /// separate edit buffer rather than binding `egui::TextEdit`
     /// straight to the `Option<String>` field, since a `String` widget
@@ -75,6 +80,7 @@ impl SettingsDialog {
             draft: current,
             default_sessions_dir: persist::default_sessions_dir().unwrap_or_default(),
             default_rules_dir: rule_file::default_user_rules_dir().unwrap_or_default(),
+            default_staging_dir: std::env::temp_dir(),
             default_source_timezone_input,
         }))
     }
@@ -88,6 +94,7 @@ impl SettingsDialog {
                 draft,
                 default_sessions_dir,
                 default_rules_dir,
+                default_staging_dir,
                 default_source_timezone_input,
             } = state.as_mut();
             close = show_dialog_window(
@@ -111,6 +118,15 @@ impl SettingsDialog {
                         "Where new rules get saved, and auto-loaded from on startup.",
                     );
                     directory_row(ui, &mut draft.rules_dir, default_rules_dir);
+
+                    ui.separator();
+                    help_row(
+                        ui,
+                        "Staging directory:",
+                        "Working space for --ephemeral-session and Portable Case export/\
+                         import — can hold a full copy of the bulk timeline.",
+                    );
+                    directory_row(ui, &mut draft.staging_dir, default_staging_dir);
 
                     ui.separator();
                     help_row(

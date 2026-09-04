@@ -2,6 +2,16 @@
 
 All notable changes to Peach will be documented in this file.
 
+## v0.6.0 - 2026-09-04
+
+### New Features
+
+- **Staging directory** (**File → Settings...**) — configurable override for where `--ephemeral-session` and Portable Case export/import build their working files, instead of always using the OS temp directory. Both can briefly hold a full copy of the bulk timeline, unlike the small files (config TOML, a rule-pack ZIP) the OS temp directory was previously used for.
+
+### Documentation
+
+- Credited Amnesty International's Security Lab for MVT where it was missing, and added Android Intrusion Log to the README banner.
+
 ## v0.5.0 - 2026-09-02
 
 ### New Features

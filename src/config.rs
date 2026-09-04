@@ -91,6 +91,16 @@ pub struct Settings {
     /// the exported file outlives the session that produced it.
     #[serde(default)]
     pub display_timezone: Option<String>,
+    /// Overrides where `--ephemeral-session` creates its working directory
+    /// and where a Portable Case export/import builds its scratch files —
+    /// the two spots that can hold a full-size copy of the bulk timeline,
+    /// unlike the small, bounded files (config TOML, a rule-pack ZIP) the OS
+    /// temp directory is normally fine for. `None` (the default) means the
+    /// OS temp directory, same as before this setting existed.
+    /// `#[serde(default)]` for the same backward-compat reason every
+    /// override field here has it.
+    #[serde(default)]
+    pub staging_dir: Option<PathBuf>,
 }
 
 impl Settings {
@@ -114,6 +124,22 @@ impl Settings {
         };
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create rules directory {}", dir.display()))?;
+        Ok(dir.clone())
+    }
+
+    /// Resolves the effective staging base directory — the configured
+    /// override if set, otherwise the OS temp directory. Unlike
+    /// [`Self::sessions_dir`]/[`Self::rules_dir`], the OS default here
+    /// always exists already (it's `std::env::temp_dir()`, not a
+    /// `ProjectDirs`-derived path Peach owns), so there's nothing to create
+    /// on that branch — only a configured override might need creating,
+    /// e.g. right after being chosen in the Settings dialog.
+    pub fn staging_dir(&self) -> anyhow::Result<PathBuf> {
+        let Some(dir) = &self.staging_dir else {
+            return Ok(std::env::temp_dir());
+        };
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create staging directory {}", dir.display()))?;
         Ok(dir.clone())
     }
 
@@ -221,6 +247,7 @@ mod tests {
             rules_dir: Some(PathBuf::from("/tmp/some-case-drive/peach-rules")),
             default_source_timezone: Some("Europe/Berlin".to_string()),
             display_timezone: Some("America/New_York".to_string()),
+            staging_dir: Some(PathBuf::from("/tmp/some-case-drive/peach-staging")),
         };
 
         save_to(&path, &settings).unwrap();
@@ -339,6 +366,52 @@ mod tests {
         assert_eq!(resolved, dir);
         assert!(dir.exists());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn defaults_to_no_staging_dir_override() {
+        assert_eq!(Settings::default().staging_dir, None);
+    }
+
+    #[test]
+    fn staging_dir_with_no_override_returns_the_os_temp_dir_without_creating_anything() {
+        let resolved = Settings::default().staging_dir().unwrap();
+
+        assert_eq!(resolved, std::env::temp_dir());
+    }
+
+    #[test]
+    fn staging_dir_creates_and_returns_the_configured_override() {
+        let dir = std::env::temp_dir().join(format!(
+            "peach-config-test-staging-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!dir.exists());
+        let settings = Settings {
+            staging_dir: Some(dir.clone()),
+            ..Settings::default()
+        };
+
+        let resolved = settings.staging_dir().unwrap();
+
+        assert_eq!(resolved, dir);
+        assert!(dir.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn load_from_a_file_predating_the_staging_dir_field_defaults_to_none() {
+        let path = temp_config_path("no-staging-dir-field");
+        std::fs::write(&path, b"sessions_dir = \"/tmp/some-case-drive\"\n").unwrap();
+
+        let loaded = load_from(&path);
+
+        assert_eq!(loaded.staging_dir, None);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

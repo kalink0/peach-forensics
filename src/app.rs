@@ -527,14 +527,21 @@ impl PeachApp {
     fn new(add_sources: Vec<PathBuf>, cleanup_dirs: Vec<PathBuf>, ephemeral_session: bool) -> Self {
         let settings = config::load();
         // `--ephemeral-session` (crush handing off a temp-extracted or
-        // decrypted source): use a one-off temp directory instead of the
-        // persistent sessions directory, so the unencrypted `.duckdb`/
-        // `.sqlite` never lands there in the first place. Falls back to the
-        // plain OS temp dir if even that can't be created — same
-        // better-a-working-non-persisted-session-than-a-crash reasoning as
-        // the non-ephemeral fallback below.
+        // decrypted source): use a one-off directory under the configured
+        // staging base (OS temp by default, see `Settings::staging_dir`)
+        // instead of the persistent sessions directory, so the unencrypted
+        // `.duckdb`/`.sqlite` never lands there in the first place. Falls
+        // back to the plain OS temp dir if even that can't be created —
+        // same better-a-working-non-persisted-session-than-a-crash
+        // reasoning as the non-ephemeral fallback below.
         let ephemeral_session_dir = if ephemeral_session {
-            Some(persist::new_ephemeral_sessions_dir().unwrap_or_else(|_| std::env::temp_dir()))
+            let staging_base = settings
+                .staging_dir()
+                .unwrap_or_else(|_| std::env::temp_dir());
+            Some(
+                persist::new_ephemeral_sessions_dir(&staging_base)
+                    .unwrap_or_else(|_| std::env::temp_dir()),
+            )
         } else {
             None
         };
@@ -844,6 +851,10 @@ impl PeachApp {
         let original_session_id = self.session_paths.id.clone();
         let display_name = self.session_display_name.clone();
         let filter_query_text = self.filter_bar.text().to_string();
+        let staging_base = self
+            .settings
+            .staging_dir()
+            .unwrap_or_else(|_| std::env::temp_dir());
 
         std::thread::spawn(move || {
             let result = portable_case::export_portable_case(
@@ -853,6 +864,7 @@ impl PeachApp {
                 display_name.as_deref(),
                 &filter_query_text,
                 &out_path,
+                &staging_base,
                 &tx,
             )
             .map_err(|err| format!("{err:#}"));
@@ -873,14 +885,19 @@ impl PeachApp {
                 .sessions_dir()
                 .unwrap_or_else(|_| std::env::temp_dir()),
         };
+        let staging_base = self
+            .settings
+            .staging_dir()
+            .unwrap_or_else(|_| std::env::temp_dir());
         let (tx, rx) = mpsc::channel();
         self.portable_case_import_rx = Some(rx);
         self.portable_case_import_state =
             PortableCaseImportState::Running(PortableCaseImportStage::Extracting);
 
         std::thread::spawn(move || {
-            let result = portable_case::import_portable_case(&zip_path, &sessions_dir, &tx)
-                .map_err(|err| format!("{err:#}"));
+            let result =
+                portable_case::import_portable_case(&zip_path, &sessions_dir, &staging_base, &tx)
+                    .map_err(|err| format!("{err:#}"));
             let _ = tx.send(PortableCaseImportOutcome::Done(result));
         });
     }
@@ -1671,12 +1688,24 @@ impl eframe::App for PeachApp {
                 );
             }
         }
-        // `--ephemeral-session`: remove the whole temp directory
+        // `--ephemeral-session`: remove the whole staging directory
         // unconditionally, unlike the `delete_if_empty` sweep above — a
         // session that has data (the normal case for one actually used
-        // this run) is exactly what must not survive here.
-        if let Some(dir) = &self.ephemeral_session_dir {
-            cleanup_temp_dir(dir);
+        // this run) is exactly what must not survive here. Removed
+        // directly rather than via `cleanup_temp_dir`: that function's
+        // "must be under the OS temp directory" safety net exists for
+        // `cleanup_dirs` below (an externally supplied path from crush, see
+        // its own doc comment), but `ephemeral_session_dir` is a path Peach
+        // minted itself via `persist::new_ephemeral_sessions_dir` — safe to
+        // remove regardless of whether `Settings::staging_dir` points it
+        // somewhere other than OS temp.
+        if let Some(dir) = &self.ephemeral_session_dir
+            && let Err(err) = std::fs::remove_dir_all(dir)
+        {
+            eprintln!(
+                "peach: failed to clean up ephemeral session directory {}: {err}",
+                dir.display()
+            );
         }
         for dir in &self.cleanup_dirs {
             cleanup_temp_dir(dir);
@@ -3890,11 +3919,15 @@ fn insert_source_record(
     Ok(())
 }
 
-/// `cleanup_dirs` is only ever deleted verbatim and only if it resolves
-/// (after following symlinks) to somewhere under the OS temp directory —
-/// crush is expected to pass its own extraction temp dir here, and this is
-/// a safety net against a mistaken or malicious path, not a guess about
-/// what "temporary" means.
+/// Used only for `--cleanup-dir` paths (crush's own extraction temp dir,
+/// externally supplied): `dir` is only ever deleted verbatim and only if it
+/// resolves (after following symlinks) to somewhere under the OS temp
+/// directory — a safety net against a mistaken or malicious path, not a
+/// guess about what "temporary" means. Peach's own self-created scratch
+/// directories (`ephemeral_session_dir`, `portable_case::ScratchDir`) are
+/// removed directly instead, without this check: they may legitimately live
+/// under a configured `Settings::staging_dir` override rather than OS temp,
+/// and Peach already knows it minted that exact path itself.
 fn cleanup_temp_dir(dir: &Path) {
     let os_temp = std::env::temp_dir();
     let (Ok(canonical_dir), Ok(canonical_temp)) = (dir.canonicalize(), os_temp.canonicalize())
