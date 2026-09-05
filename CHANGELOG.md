@@ -2,6 +2,12 @@
 
 All notable changes to Peach will be documented in this file.
 
+## Unreleased
+
+### New Features
+
+- **Timestamp sort direction** — a "Timestamp ▲/▼" toggle next to the Columns picker flips the timeline between oldest-first (the previous, still-default behavior) and newest-first. Deliberately limited to timestamp: it's the one column that doesn't need the wide `fields`/JSON read the timeline's windowed fetch otherwise avoids, so it stays cheap regardless of table size. Ties still resolve deterministically, the same file/sequence order as before, just reversed along with everything else. **Export (current filter)...** always writes chronological order regardless of the toggle, so an exported file's row order never depends on how the timeline happened to be sorted at export time.
+
 ## v0.6.0 - 2026-09-04
 
 ### New Features

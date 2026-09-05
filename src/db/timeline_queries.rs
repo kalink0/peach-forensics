@@ -1128,18 +1128,26 @@ fn category_case_sql(fields_ref: &str, sourcetype_ref: &str) -> String {
 /// filter) from "look up those exact keys" (wide columns, a plain
 /// equality lookup, no filter) keeps both stages proportional to the
 /// window size rather than the table size.
+///
+/// `sort_descending` flips the whole tuple, tie-breaker included, rather
+/// than just `timestamp_utc` — descending is the exact reverse of
+/// ascending, so ties still resolve the same deterministic way instead of
+/// falling back to whatever order DuckDB happens to produce for equal
+/// timestamps.
 fn fetch_window_keys(
     conn: &Connection,
     compiled: &CompiledQuery,
     where_sql: &str,
     offset: usize,
     limit: usize,
+    sort_descending: bool,
 ) -> anyhow::Result<Vec<(String, i64)>> {
+    let direction = if sort_descending { "DESC" } else { "ASC" };
     let sql = format!(
         "SELECT le.event_id_source, le.event_id_seq
          FROM {}
          {where_sql}
-         ORDER BY le.timestamp_utc, le.event_id_source, le.event_id_seq
+         ORDER BY le.timestamp_utc {direction}, le.event_id_source {direction}, le.event_id_seq {direction}
          LIMIT ? OFFSET ?",
         compiled.from
     );
@@ -1160,6 +1168,7 @@ pub fn fetch_window(
     offset: usize,
     limit: usize,
     display_tz: &TimezoneSpec,
+    sort_descending: bool,
 ) -> anyhow::Result<Vec<DisplayRow>> {
     let compiled = query.compile();
     let where_sql = compiled
@@ -1168,7 +1177,7 @@ pub fn fetch_window(
         .map(|w| format!("WHERE {w}"))
         .unwrap_or_default();
 
-    let keys = fetch_window_keys(conn, &compiled, &where_sql, offset, limit)?;
+    let keys = fetch_window_keys(conn, &compiled, &where_sql, offset, limit, sort_descending)?;
     if keys.is_empty() {
         return Ok(Vec::new());
     }
@@ -1187,6 +1196,7 @@ pub fn fetch_window(
     // `log_entries`' primary key) cost under 200MB for the same 200 keys.
     let extracted_field_sql = extracted_field_sql("le.fields", "s.sourcetype");
     let values = keys.iter().map(|_| "(?, ?)").collect::<Vec<_>>().join(", ");
+    let direction = if sort_descending { "DESC" } else { "ASC" };
     let sql = format!(
         "SELECT le.event_id_source, le.event_id_seq, le.timestamp_utc, le.level, le.message,
                 (SELECT string_agg(it.tag_value, ',') FROM import_tags AS it
@@ -1197,7 +1207,7 @@ pub fn fetch_window(
          JOIN log_entries AS le
              ON le.event_id_source = k.source_id AND le.event_id_seq = k.seq
          LEFT JOIN sources AS s ON le.event_id_source = s.source_file_id
-         ORDER BY le.timestamp_utc, le.event_id_source, le.event_id_seq"
+         ORDER BY le.timestamp_utc {direction}, le.event_id_source {direction}, le.event_id_seq {direction}"
     );
 
     let mut params: Vec<Value> = Vec::with_capacity(keys.len() * 2);
@@ -1715,7 +1725,7 @@ mod tests {
 
             let query = Query::parse("refused");
             assert_eq!(count_matching(&conn, &query).unwrap(), 1);
-            let rows = fetch_window(&conn, &query, 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &query, 0, 10, &utc(), false).unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(count_message_contains(&conn, "refused").unwrap(), 1);
             assert_eq!(count_message_contains(&conn, "raw line").unwrap(), 0);
@@ -1758,13 +1768,13 @@ mod tests {
             );
 
             let hide_a = Query::parse(&format!("NOT source_id={source_a}"));
-            let rows = fetch_window(&conn, &hide_a, 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &hide_a, 0, 10, &utc(), false).unwrap();
             assert_eq!(count_matching(&conn, &hide_a).unwrap(), 1);
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].message, "from source b");
 
             let only_a = Query::parse(&format!("source_id={source_a}"));
-            let rows = fetch_window(&conn, &only_a, 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &only_a, 0, 10, &utc(), false).unwrap();
             assert_eq!(count_matching(&conn, &only_a).unwrap(), 1);
             assert_eq!(rows[0].message, "from source a");
         }
@@ -1802,7 +1812,7 @@ mod tests {
             let query = Query::parse(&format!(
                 "NOT source_id={source_a} NOT source_id={source_b}"
             ));
-            let rows = fetch_window(&conn, &query, 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &query, 0, 10, &utc(), false).unwrap();
             assert_eq!(count_matching(&conn, &query).unwrap(), 1);
             assert_eq!(rows[0].message, "from c");
         }
@@ -1826,7 +1836,7 @@ mod tests {
             insert_tag(&conn, tagged, "wifi_status");
             insert_tag(&conn, tagged, "app_launch");
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc(), false).unwrap();
 
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].tags, vec!["app_launch", "wifi_status"]);
@@ -1864,12 +1874,72 @@ mod tests {
                 0,
                 10,
                 &TimezoneSpec::parse("+02:00").unwrap(),
+                false,
             )
             .unwrap();
 
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].timestamp_utc, "2026-07-28 12:00:00.000");
             assert_eq!(rows[0].timestamp_display, "2026-07-28 14:00:00.000 +02:00");
+        }
+
+        #[test]
+        fn fetch_window_sort_descending_reverses_timestamp_order() {
+            let conn = open_test_db();
+            let source_file_id = SourceFileId::new_random();
+            insert_source(&conn, source_file_id, "text_config");
+            let mut counter = SequenceCounter::new();
+            let day = |d: u32| {
+                chrono::NaiveDate::from_ymd_opt(2026, 7, d)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+            };
+            insert_entry_at(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                day(1),
+                "first",
+            );
+            insert_entry_at(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                day(2),
+                "second",
+            );
+            insert_entry_at(
+                &conn,
+                EventId {
+                    source_file_id,
+                    sequence_number: counter.next_sequence_number(),
+                },
+                day(3),
+                "third",
+            );
+
+            let ascending = fetch_window(&conn, &Query::parse(""), 0, 10, &utc(), false).unwrap();
+            assert_eq!(
+                ascending
+                    .iter()
+                    .map(|r| r.message.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["first", "second", "third"]
+            );
+
+            let descending = fetch_window(&conn, &Query::parse(""), 0, 10, &utc(), true).unwrap();
+            assert_eq!(
+                descending
+                    .iter()
+                    .map(|r| r.message.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["third", "second", "first"]
+            );
         }
 
         #[test]
@@ -1982,7 +2052,7 @@ mod tests {
                 "a",
             );
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc(), false).unwrap();
 
             assert_eq!(rows[0].source_path, "/evidence/test.log");
             assert_eq!(rows[0].sourcetype, "journald");
@@ -2006,7 +2076,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc(), false).unwrap();
 
             assert_eq!(rows[0].host, "workstation1");
             assert_eq!(rows[0].process, "sshd");
@@ -2029,7 +2099,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc(), false).unwrap();
 
             assert_eq!(rows[0].process, "systemd");
         }
@@ -2051,7 +2121,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc(), false).unwrap();
 
             assert_eq!(rows[0].process, "/usr/bin/example");
             assert_eq!(
@@ -2088,7 +2158,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc(), false).unwrap();
 
             assert_eq!(rows[0].host, "WORKSTATION1");
             assert_eq!(rows[0].event_code, "4625");
@@ -2135,7 +2205,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc(), false).unwrap();
 
             assert_eq!(rows[0].event_code, "4111");
         }
@@ -2190,7 +2260,8 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse("event_id=4625"), 0, 10, &utc()).unwrap();
+            let rows =
+                fetch_window(&conn, &Query::parse("event_id=4625"), 0, 10, &utc(), false).unwrap();
 
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].message, "a");
@@ -2214,7 +2285,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc(), false).unwrap();
 
             assert_eq!(rows[0].subsystem, "com.apple.mDNSResponder");
             assert_eq!(rows[0].category, "mDNS");
@@ -2257,13 +2328,14 @@ mod tests {
                 0,
                 10,
                 &utc(),
+                false,
             )
             .unwrap();
             assert_eq!(by_subsystem.len(), 1);
             assert_eq!(by_subsystem[0].message, "a");
 
             let by_category =
-                fetch_window(&conn, &Query::parse("category=WiFi"), 0, 10, &utc()).unwrap();
+                fetch_window(&conn, &Query::parse("category=WiFi"), 0, 10, &utc(), false).unwrap();
             assert_eq!(by_category.len(), 1);
             assert_eq!(by_category[0].message, "b");
         }
@@ -2299,12 +2371,13 @@ mod tests {
             )
             .unwrap();
 
-            let by_host = fetch_window(&conn, &Query::parse("host=host-a"), 0, 10, &utc()).unwrap();
+            let by_host =
+                fetch_window(&conn, &Query::parse("host=host-a"), 0, 10, &utc(), false).unwrap();
             assert_eq!(by_host.len(), 1);
             assert_eq!(by_host[0].message, "a");
 
             let by_process =
-                fetch_window(&conn, &Query::parse("process=cron"), 0, 10, &utc()).unwrap();
+                fetch_window(&conn, &Query::parse("process=cron"), 0, 10, &utc(), false).unwrap();
             assert_eq!(by_process.len(), 1);
             assert_eq!(by_process[0].message, "b");
         }
@@ -2325,7 +2398,7 @@ mod tests {
                 "a",
             );
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc(), false).unwrap();
 
             assert_eq!(rows[0].subsystem, "");
             assert_eq!(rows[0].category, "");
@@ -2347,7 +2420,7 @@ mod tests {
                 "a",
             );
 
-            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc()).unwrap();
+            let rows = fetch_window(&conn, &Query::parse(""), 0, 10, &utc(), false).unwrap();
 
             assert_eq!(rows[0].event_code, "");
         }

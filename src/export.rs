@@ -198,8 +198,17 @@ pub fn export_to_file(
     let mut offset = 0usize;
 
     loop {
-        let mut chunk =
-            timeline_queries::fetch_window(conn, query, offset, EXPORT_CHUNK_SIZE, display_tz)?;
+        // Always chronological, regardless of the timeline view's current
+        // ascending/descending toggle — an export is a canonical dump, not
+        // a snapshot of whatever the analyst happened to be looking at.
+        let mut chunk = timeline_queries::fetch_window(
+            conn,
+            query,
+            offset,
+            EXPORT_CHUNK_SIZE,
+            display_tz,
+            false,
+        )?;
         if chunk.is_empty() {
             break;
         }

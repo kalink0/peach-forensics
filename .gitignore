@@ -6,6 +6,8 @@ CLAUDE.md
 # Cargo.lock is committed on purpose (peach is a binary application, not a library).
 /target/
 *.pdb
+# Local build-parallelism cap (this machine only — must not throttle CI runners).
+/.cargo/
 
 # --- Peach runtime artifacts (forensic data, never versioned) ---
 # DuckDB bulk-timeline files

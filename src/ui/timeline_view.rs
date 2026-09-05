@@ -310,6 +310,16 @@ pub struct TimelineView {
     /// another one (see [`reorder_columns`]). Not persisted across
     /// restarts, same as the `show_*_column` visibility flags above.
     column_order: Vec<ColumnKind>,
+    /// Whether the timeline is shown newest-first (`true`) instead of the
+    /// default oldest-first (`false`). Toggled via the button next to
+    /// "Columns"; affects both `fetch_window`'s ordering and, symmetrically,
+    /// its tie-breaker on `(event_id_source, event_id_seq)` — see
+    /// `timeline_queries::fetch_window_keys`'s doc comment on why the whole
+    /// tuple flips together rather than only `timestamp_utc`. Not persisted
+    /// across restarts, same as the `show_*_column` flags above. Export
+    /// (`export.rs`) deliberately ignores this and always writes
+    /// chronological order.
+    sort_descending: bool,
     /// `Settings::display_timezone`, resolved to a `TimezoneSpec` — what
     /// every window/full-entry fetch formats `timestamp_display` in.
     /// Defaults to UTC (same as every display before this setting
@@ -347,6 +357,7 @@ impl TimelineView {
             show_category_column: false,
             show_notes_column: false,
             column_order: DEFAULT_COLUMN_ORDER.to_vec(),
+            sort_descending: false,
             display_tz: TimezoneSpec::Fixed(chrono::FixedOffset::east_opt(0).unwrap()),
         }
     }
@@ -360,6 +371,15 @@ impl TimelineView {
     /// this view.
     pub fn set_display_timezone(&mut self, display_tz: TimezoneSpec) {
         self.display_tz = display_tz;
+    }
+
+    /// Flips newest-first/oldest-first and drops the window cache — the
+    /// filtered row count (`total_rows`) doesn't change, only the order
+    /// `LIMIT`/`OFFSET` walks it in, so this only needs `refresh_window`,
+    /// not a full `recount`.
+    fn toggle_sort_direction(&mut self) {
+        self.sort_descending = !self.sort_descending;
+        self.refresh_window();
     }
 
     /// `column_order`, filtered down to whichever columns are actually
@@ -712,15 +732,21 @@ impl TimelineView {
         let conn = self.try_clone_conn();
         let session_sqlite_path = self.session_sqlite_path.clone();
         let display_tz = self.display_tz;
+        let sort_descending = self.sort_descending;
         let (tx, rx) = mpsc::channel();
         self.window_rx = Some(rx);
         std::thread::spawn(move || {
             let Some(conn) = conn else {
                 return;
             };
-            let Ok(mut rows) =
-                timeline_queries::fetch_window(&conn, &query, offset, WINDOW_SIZE, &display_tz)
-            else {
+            let Ok(mut rows) = timeline_queries::fetch_window(
+                &conn,
+                &query,
+                offset,
+                WINDOW_SIZE,
+                &display_tz,
+                sort_descending,
+            ) else {
                 return;
             };
 
@@ -812,6 +838,19 @@ impl TimelineView {
                 ui.separator();
                 ui.weak("Drag a column header to reorder it.");
             });
+
+            let sort_label = if self.sort_descending {
+                "Timestamp ▼ (newest first)"
+            } else {
+                "Timestamp ▲ (oldest first)"
+            };
+            if ui
+                .button(sort_label)
+                .on_hover_text("Toggle sort direction")
+                .clicked()
+            {
+                self.toggle_sort_direction();
+            }
         });
 
         let mut requested = None;
