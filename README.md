@@ -152,6 +152,8 @@ Special thanks to [@dugeonlady](https://github.com/dugeonlady) for suggesting
 the Rainbow theme in crush — Peach's Rainbow theme (*View → Theme → Rainbow*)
 carries over the same cycle and colors. Forensics tools don't have to be grey.
 
+![Rainbow theme cycling through colors](docs/assets/rainbow-theme.gif)
+
 Parts of this software were developed with assistance from
 [Claude AI / Claude Code](https://claude.ai) by Anthropic.
 
