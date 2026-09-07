@@ -2,6 +2,12 @@
 
 All notable changes to Peach will be documented in this file.
 
+## Unreleased
+
+### New Features
+
+- **Tag row — excl. toggle** — each tag in the Tag dropdown now has an **excl.** button next to its checkbox, writing a `NOT tag=<value>` term to exclude entries that carry that tag even alongside others. Previously only available by typing it into the search box by hand.
+
 ## v0.7.0 - 2026-09-07
 
 ### New Features

@@ -540,6 +540,20 @@ checkbox at the bottom of the Tag dropdown toggles `NOT tag=*` for the same
 reason it isn't just another value: "no tag" isn't a value that could appear
 in the alternation.
 
+The Tag dropdown also has an **excl.** toggle next to each value, for the
+opposite need: an entry that carries several tags where only one of them
+should rule it out. Unchecking that tag's own include checkbox can't do
+this — it only stops *requiring* the tag, it doesn't *reject* entries that
+happen to have it alongside others. **excl.** instead writes an independent
+`NOT tag=<value>` term, so e.g. an entry tagged both `wifi_status` and
+`airplane_mode` is excluded by turning on **excl.** for `airplane_mode`
+even while `wifi_status` stays freely matchable (included or not). It
+combines with everything else the same way a hidden source's `NOT
+source_id=<id>` does: each excluded tag is its own `AND`-ed term, so
+excluding several at once needs no special-casing. Toggling **excl.** for a
+tag that's currently checked clears the checkbox first, since including and
+excluding the same value at once would just fight each other.
+
 **Sources** appears once at least one source is loaded, and works the
 opposite way on purpose: it's an *exclusion* list, not an inclusion one.
 Every source starts checked (visible, no filter applied at all), and

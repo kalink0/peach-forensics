@@ -269,10 +269,17 @@ impl FilterBar {
     /// Same dropdown shape as [`Self::quick_filter_row`] for `tag`, plus an
     /// "Untagged" checkbox for `NOT tag=*` — entries with no tag at all,
     /// which the per-value checkboxes can't express since they only ever
-    /// add positive `tag=...`/`tag~...` conditions. "Untagged" gets no
-    /// count next to it: that would need its own
-    /// `COUNT(*) WHERE NOT EXISTS (...)` query, which nothing here computes
-    /// yet — better no number than a wrong or made-up one.
+    /// add positive `tag=...`/`tag~...` conditions — and an **excl.**
+    /// toggle per value ([`Self::toggle_tag_excluded_term`]) for the
+    /// opposite need: an event that carries several tags where only one of
+    /// them should rule it out. Unchecking that tag's own include checkbox
+    /// can't express that (it just stops *requiring* the tag, it doesn't
+    /// *reject* entries that happen to have it alongside others), so
+    /// exclusion is its own independent `NOT tag=<value>` term rather than
+    /// a state of the include checkbox. "Untagged" gets no count next to
+    /// it: that would need its own `COUNT(*) WHERE NOT EXISTS (...)` query,
+    /// which nothing here computes yet — better no number than a wrong or
+    /// made-up one.
     fn tag_filter_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -284,10 +291,15 @@ impl FilterBar {
         }
         let mut changed = false;
         let selected_count = self.term_values("tag").len() + usize::from(self.has_untagged_term());
-        let button_label = if selected_count == 0 {
-            "Tag".to_string()
-        } else {
-            format!("Tag ({selected_count})")
+        let excluded_count = available_tags
+            .iter()
+            .filter(|value| self.has_tag_excluded_term(value))
+            .count();
+        let button_label = match (selected_count, excluded_count) {
+            (0, 0) => "Tag".to_string(),
+            (selected, 0) => format!("Tag ({selected})"),
+            (0, excluded) => format!("Tag ({excluded} excluded)"),
+            (selected, excluded) => format!("Tag ({selected}, {excluded} excluded)"),
         };
         ui.menu_button(button_label, |ui| {
             ui.weak(Self::COUNTS_ARE_WHOLE_TIMELINE_CAPTION);
@@ -297,8 +309,15 @@ impl FilterBar {
                     for value in available_tags {
                         let count = counts.get(value).copied().unwrap_or(0);
                         ui.horizontal(|ui| {
+                            let excluded = self.has_tag_excluded_term(value);
                             let mut active = self.has_term("tag", value);
-                            if ui.checkbox(&mut active, value.as_str()).changed() {
+                            if ui
+                                .add_enabled(
+                                    !excluded,
+                                    egui::Checkbox::new(&mut active, value.as_str()),
+                                )
+                                .changed()
+                            {
                                 self.toggle_term("tag", value);
                                 changed = true;
                             }
@@ -311,8 +330,25 @@ impl FilterBar {
                                 .clicked()
                             {
                                 self.set_tag_block(std::slice::from_ref(value), false);
+                                if excluded {
+                                    self.toggle_tag_excluded_term(value);
+                                }
                                 changed = true;
                                 ui.close();
+                            }
+                            if ui
+                                .selectable_label(excluded, "excl.")
+                                .on_hover_text(
+                                    "Hide entries that have this tag, even alongside others \
+                                     (NOT tag=<value>) — independent of the checkbox above",
+                                )
+                                .clicked()
+                            {
+                                if active {
+                                    self.toggle_term("tag", value);
+                                }
+                                self.toggle_tag_excluded_term(value);
+                                changed = true;
                             }
                         });
                     }
@@ -328,10 +364,17 @@ impl FilterBar {
                     }
                 });
             // Outside the `ScrollArea`, same reasoning as Level/Sources —
-            // clears both the tag selection and Untagged in one go.
+            // clears the tag selection and Untagged in one go. Excluded
+            // tags are cleared too — "Show all" means "no tag filtering at
+            // all", not "only reset the include half".
             ui.separator();
             if ui.button("Show all").clicked() {
                 self.set_tag_block(&[], false);
+                for value in available_tags {
+                    if self.has_tag_excluded_term(value) {
+                        self.toggle_tag_excluded_term(value);
+                    }
+                }
                 changed = true;
                 ui.close();
             }
@@ -990,6 +1033,52 @@ impl FilterBar {
         block.extend(rest);
         self.text = block.join(" ");
     }
+
+    /// The exact `NOT`-prefixed token pair an excluded tag's term is
+    /// written as — same shape as a hidden source's `NOT source_id=<id>`
+    /// ([`Self::source_hidden_token`]), just for `tag=<value>` instead.
+    /// Deliberately independent of the include block
+    /// ([`Self::set_tag_block`]): an event with two tags where only one is
+    /// unwanted needs "not tag A" regardless of whatever else is or isn't
+    /// in the positive OR-selection, which excluding by *un*checking A
+    /// there can't express (unchecking just means "don't require A", not
+    /// "reject anything that has A"). `find_tag_block_range` never matches
+    /// this token shape, so `set_tag_block` rewrites the include block
+    /// without disturbing it.
+    fn tag_excluded_token(value: &str) -> String {
+        format!("tag={value}")
+    }
+
+    fn has_tag_excluded_term(&self, value: &str) -> bool {
+        let target = Self::tag_excluded_token(value);
+        let tokens: Vec<&str> = self.text.split_whitespace().collect();
+        tokens
+            .windows(2)
+            .any(|w| w[0].eq_ignore_ascii_case("NOT") && w[1] == target)
+    }
+
+    /// Adds or removes exactly this tag's `NOT tag=<value>` term, leaving
+    /// every other term — including any *other* excluded tag's term, and
+    /// the include block — untouched.
+    fn toggle_tag_excluded_term(&mut self, value: &str) {
+        let target = Self::tag_excluded_token(value);
+        let tokens: Vec<&str> = self.text.split_whitespace().collect();
+        let existing = tokens
+            .windows(2)
+            .position(|w| w[0].eq_ignore_ascii_case("NOT") && w[1] == target);
+
+        let mut rebuilt: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+        match existing {
+            Some(idx) => {
+                rebuilt.drain(idx..idx + 2);
+            }
+            None => {
+                rebuilt.push("NOT".to_string());
+                rebuilt.push(target);
+            }
+        }
+        self.text = rebuilt.join(" ");
+    }
 }
 
 impl Default for FilterBar {
@@ -1198,6 +1287,92 @@ mod tests {
         assert!(bar.has_term("tag", "wifi_status"));
         assert!(!bar.has_term("tag", "screen_lock_state"));
         assert!(!bar.has_untagged_term());
+    }
+
+    #[test]
+    fn excluding_a_tag_writes_a_not_tag_equals_term() {
+        let mut bar = FilterBar::new();
+        assert!(!bar.has_tag_excluded_term("noise"));
+
+        bar.toggle_tag_excluded_term("noise");
+
+        assert_eq!(bar.text(), "NOT tag=noise");
+        assert!(bar.has_tag_excluded_term("noise"));
+    }
+
+    #[test]
+    fn un_excluding_a_tag_removes_its_term() {
+        let mut bar = FilterBar::new();
+        bar.toggle_tag_excluded_term("noise");
+
+        bar.toggle_tag_excluded_term("noise");
+
+        assert_eq!(bar.text(), "");
+        assert!(!bar.has_tag_excluded_term("noise"));
+    }
+
+    #[test]
+    fn excluding_two_tags_produces_two_independent_not_terms() {
+        let mut bar = FilterBar::new();
+        bar.toggle_tag_excluded_term("noise");
+        bar.toggle_tag_excluded_term("spam");
+
+        assert_eq!(bar.text(), "NOT tag=noise NOT tag=spam");
+        assert!(bar.has_tag_excluded_term("noise"));
+        assert!(bar.has_tag_excluded_term("spam"));
+    }
+
+    /// The exact use case this feature exists for: an event carries both
+    /// `airplane_mode` and `wifi_status`, the analyst wants everything
+    /// *except* `airplane_mode` regardless of what else is present —
+    /// including it alongside `wifi_status` in the include block. Excluding
+    /// a tag must not disturb the unrelated include selection.
+    #[test]
+    fn excluding_a_tag_leaves_the_include_selection_of_other_tags_alone() {
+        let mut bar = FilterBar::new();
+        bar.toggle_term("tag", "wifi_status");
+
+        bar.toggle_tag_excluded_term("airplane_mode");
+
+        assert!(bar.has_term("tag", "wifi_status"));
+        assert!(bar.has_tag_excluded_term("airplane_mode"));
+        assert_eq!(bar.text(), "tag~^(?:wifi_status)$ NOT tag=airplane_mode");
+    }
+
+    #[test]
+    fn excluding_a_tag_does_not_disturb_untagged_or_other_fields() {
+        let mut bar = FilterBar::new();
+        bar.toggle_term("level", "ERROR");
+        bar.toggle_untagged_term();
+
+        bar.toggle_tag_excluded_term("noise");
+
+        assert!(bar.text().contains("level~^(?:ERROR)$"));
+        assert!(bar.has_untagged_term());
+        assert!(bar.has_tag_excluded_term("noise"));
+
+        bar.toggle_tag_excluded_term("noise");
+        assert!(bar.text().contains("level~^(?:ERROR)$"));
+        assert!(bar.has_untagged_term());
+        assert!(!bar.has_tag_excluded_term("noise"));
+    }
+
+    /// [`FilterBar::set_tag_block`] (driven by "only"/"Show all"/the
+    /// include checkbox) rewrites the tag include block in place — it must
+    /// never mistake an excluded tag's `NOT tag=<value>` term for part of
+    /// that block, since [`FilterBar::find_tag_block_range`] only
+    /// recognizes `tag~^(?:...)$` and the fixed `NOT tag=*` pair.
+    #[test]
+    fn set_tag_block_does_not_disturb_an_excluded_tag() {
+        let mut bar = FilterBar::new();
+        bar.toggle_tag_excluded_term("noise");
+        bar.toggle_term("tag", "wifi_status");
+
+        bar.set_tag_block(&["screen_lock_state".to_string()], false);
+
+        assert!(bar.has_tag_excluded_term("noise"));
+        assert!(bar.has_term("tag", "screen_lock_state"));
+        assert!(!bar.has_term("tag", "wifi_status"));
     }
 
     #[test]
