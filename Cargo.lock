@@ -3487,12 +3487,13 @@ dependencies = [
 
 [[package]]
 name = "peach"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "chrono",
  "chrono-tz",
  "clap",
+ "crc32fast",
  "csv",
  "directories",
  "duckdb",

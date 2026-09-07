@@ -1,0 +1,19 @@
+# Apple Biome/SEGB — _DKEvent.Wifi.Connection: Wi-Fi connection event
+# Stream name + semantics sourced from iLEAPP's biome*.py artifact modules
+# (Apache-2.0, https://github.com/abrignoni/iLEAPP). Envelope format (SEGB
+# v2) from CCL Forensics' ccl_segb project (MIT,
+# https://github.com/cclgroupltd/ccl-segb), ported to Rust in
+# src/parsers/biome/segb.rs — see docs/design/biome-rule-pack-research.md
+# for the full sourcing and scope rationale.
+
+[rule]
+name = "biome_dkevent_wifi_connection"
+description = "Biome stream present: _DKEvent.Wifi.Connection (Wi-Fi connection event)"
+version = "1"
+
+[rule.match]
+sourcetype = "biome"
+stream = "_DKEvent.Wifi.Connection"
+
+[rule.tag]
+value = "wifi_connection"

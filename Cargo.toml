@@ -1,6 +1,6 @@
 [package]
 name = "peach"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/kalink0/peach-forensics"
@@ -10,6 +10,7 @@ anyhow = "1.0.104"
 chrono = { version = "0.4.45", features = ["serde"] }
 chrono-tz = "0.10.4"
 clap = { version = "4.6.4", features = ["derive"] }
+crc32fast = "1.5.0"
 csv = "1.3.1"
 directories = "6.0.0"
 duckdb = { version = "1.10505.0", features = ["bundled", "chrono", "json", "serde_json"] }

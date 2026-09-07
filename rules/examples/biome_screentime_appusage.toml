@@ -1,0 +1,19 @@
+# Apple Biome/SEGB — ScreenTime.AppUsage: Screen Time recorded app usage
+# Stream name + semantics sourced from iLEAPP's biome*.py artifact modules
+# (Apache-2.0, https://github.com/abrignoni/iLEAPP). Envelope format (SEGB
+# v2) from CCL Forensics' ccl_segb project (MIT,
+# https://github.com/cclgroupltd/ccl-segb), ported to Rust in
+# src/parsers/biome/segb.rs — see docs/design/biome-rule-pack-research.md
+# for the full sourcing and scope rationale.
+
+[rule]
+name = "biome_screentime_appusage"
+description = "Biome stream present: ScreenTime.AppUsage (Screen Time recorded app usage)"
+version = "1"
+
+[rule.match]
+sourcetype = "biome"
+stream = "ScreenTime.AppUsage"
+
+[rule.tag]
+value = "app_usage_recorded"

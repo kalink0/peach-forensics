@@ -1,0 +1,19 @@
+# Apple Biome/SEGB — Notification.Usage: notification usage/interaction
+# Stream name + semantics sourced from iLEAPP's biome*.py artifact modules
+# (Apache-2.0, https://github.com/abrignoni/iLEAPP). Envelope format (SEGB
+# v2) from CCL Forensics' ccl_segb project (MIT,
+# https://github.com/cclgroupltd/ccl-segb), ported to Rust in
+# src/parsers/biome/segb.rs — see docs/design/biome-rule-pack-research.md
+# for the full sourcing and scope rationale.
+
+[rule]
+name = "biome_notification_usage"
+description = "Biome stream present: Notification.Usage (notification usage/interaction)"
+version = "1"
+
+[rule.match]
+sourcetype = "biome"
+stream = "Notification.Usage"
+
+[rule.tag]
+value = "notification_activity"

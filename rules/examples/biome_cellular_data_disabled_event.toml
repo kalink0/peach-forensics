@@ -1,0 +1,22 @@
+# Apple Biome/SEGB — Device.Wireless.CellularDataEnabled: cellular data disabled
+# Field mapping sourced from iLEAPP's biome*.py artifact modules
+# (Apache-2.0, https://github.com/abrignoni/iLEAPP) — verified against the
+# actual upstream project source (not just a local checkout snapshot) on
+# 2026-09-07. Envelope format (SEGB v2) from CCL Forensics' ccl_segb
+# project (MIT, https://github.com/cclgroupltd/ccl-segb), ported to Rust
+# in src/parsers/biome/segb.rs — see
+# docs/design/biome-rule-pack-research.md for the full sourcing and scope
+# rationale.
+
+[rule]
+name = "biome_cellular_data_disabled_event"
+description = "Cellular data disabled"
+version = "1"
+
+[rule.match]
+sourcetype = "biome"
+stream = "Device.Wireless.CellularDataEnabled"
+state_raw = 0
+
+[rule.tag]
+value = "cellular_data_disabled_event"

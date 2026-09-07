@@ -55,16 +55,19 @@ def main():
     evtx_files = sorted(RULES_DIR.glob("evtx_*.toml"))
     journald_files = sorted(RULES_DIR.glob("journald_*.toml"))
     intrusion_log_files = sorted(RULES_DIR.glob("intrusion_log_*.toml"))
+    biome_files = sorted(RULES_DIR.glob("biome_*.toml"))
 
     aul_rules = [load_rule(p) for p in aul_files]
     evtx_rules = [load_rule(p) for p in evtx_files]
     journald_rules = [load_rule(p) for p in journald_files]
     intrusion_log_rules = [load_rule(p) for p in intrusion_log_files]
+    biome_rules = [load_rule(p) for p in biome_files]
 
     aul_rules.sort(key=lambda r: r["name"])
     evtx_rules.sort(key=lambda r: r["match"].get("event_id", 0))
     journald_rules.sort(key=lambda r: r["name"])
     intrusion_log_rules.sort(key=lambda r: r["name"])
+    biome_rules.sort(key=lambda r: r["name"])
 
     out = []
     out.append("# Tagging Rule Reference")
@@ -78,7 +81,7 @@ def main():
     )
     out.append("")
     out.append(
-        "All four packs below ship **embedded in the binary itself** "
+        "All five packs below ship **embedded in the binary itself** "
         "(`build.rs` + `src/tagging/builtin.rs`) and every rule in them is "
         "enabled by default — see [user-guide.md](user-guide.md#tagging) "
         "for the \"Built-in rules...\" picker that lets you enable/disable "
@@ -146,12 +149,30 @@ def main():
     out.append("")
     out.append(build_table(intrusion_log_rules))
     out.append("")
+    out.append(f"## Apple Biome rules ({len(biome_rules)})")
+    out.append("")
+    out.append(
+        "Stream names and field semantics sourced from iLEAPP's `biome*.py` "
+        "artifact modules (Apache-2.0). The SEGB v2 envelope format decoded "
+        "underneath these streams is a Rust port of [CCL Forensics' "
+        "ccl_segb project](https://github.com/cclgroupltd/ccl-segb) (MIT) — "
+        "see [docs/design/biome-rule-pack-research.md](design/biome-rule-pack-research.md) "
+        "for the full sourcing and scope rationale, including why SEGB v1 "
+        "isn't supported yet. Every rule matches `sourcetype = \"biome\"`; "
+        "most match on the normalized `stream` field alone (Tier 1 — no "
+        "payload decoding needed), a handful also match on a "
+        "stream-conditioned normalized key like `bundle_id`/`app_id` (Tier "
+        "2 — see [supported-sources.md](supported-sources.md#biome-segb))."
+    )
+    out.append("")
+    out.append(build_table(biome_rules))
+    out.append("")
 
     OUT_PATH.write_text("\n".join(out))
     print(
         f"wrote {OUT_PATH} ({len(aul_rules)} AUL + {len(evtx_rules)} EVTX + "
         f"{len(journald_rules)} journald + {len(intrusion_log_rules)} "
-        f"intrusion_log rules)"
+        f"intrusion_log + {len(biome_rules)} biome rules)"
     )
 
 

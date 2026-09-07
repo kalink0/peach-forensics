@@ -1,0 +1,19 @@
+# Apple Biome/SEGB — Emoji.Engagement: emoji usage/engagement
+# Stream name + semantics sourced from iLEAPP's biome*.py artifact modules
+# (Apache-2.0, https://github.com/abrignoni/iLEAPP). Envelope format (SEGB
+# v2) from CCL Forensics' ccl_segb project (MIT,
+# https://github.com/cclgroupltd/ccl-segb), ported to Rust in
+# src/parsers/biome/segb.rs — see docs/design/biome-rule-pack-research.md
+# for the full sourcing and scope rationale.
+
+[rule]
+name = "biome_emoji_engagement"
+description = "Biome stream present: Emoji.Engagement (emoji usage/engagement)"
+version = "1"
+
+[rule.match]
+sourcetype = "biome"
+stream = "Emoji.Engagement"
+
+[rule.tag]
+value = "emoji_engagement"

@@ -53,7 +53,7 @@ one:
 |---|---|---|
 | journald | Confirmed | Standard syslog `PRIORITY` digits `0`-`7` (`systemd.journal-fields(7)`) -> `emerg`/`alert`/`crit`/`err`/`warning`/`notice`/`info`/`debug` |
 | evtx | Confirmed | Standard Windows Event Level digits `0`-`5` (`winmeta.xml`'s `WINEVENT_LEVEL_*` constants, fixed at the OS/schema level, not per-provider) -> `LogAlways`/`Critical`/`Error`/`Warning`/`Informational`/`Verbose`. `6`-`255` are provider-defined/reserved and deliberately left unmapped |
-| aul / text_config / other | Not mapped | AUL's `LogType` and text-log levels are already human-readable strings, nothing to translate |
+| aul / text_config / biome / other | Not mapped | AUL's `LogType` and text-log levels are already human-readable strings, nothing to translate; biome's SEGB format carries no severity concept at all |
 
 ## Host
 
@@ -62,7 +62,7 @@ one:
 | journald | Confirmed | `_HOSTNAME` (documented systemd field, `systemd.journal-fields(7)`) |
 | evtx | Confirmed | `Event.System.Computer` — verified against the `evtx` crate's own test snapshot (`evtx-0.12.2/tests/snapshots/test_record_samples__event_json_sample_with_separate_json_attributes.snap`), the `separate_json_attributes(true)` shape `parsers::evtx` actually parses with (see its doc comment for why) |
 | aul | Not mapped | AUL is a single-device archive — no host concept |
-| text_config / other | Not mapped | No universal field across arbitrary TOML-configured text formats |
+| text_config / biome / other | Not mapped | No universal field across arbitrary TOML-configured text formats; biome has no equivalent concept either |
 
 ## Process
 
@@ -71,7 +71,7 @@ one:
 | journald | Confirmed | `SYSLOG_IDENTIFIER`, falling back to `_COMM` when a process didn't set its own identifier (both documented systemd fields) |
 | aul | Confirmed | `process` (verified against `parsers::aul`'s own test fixtures) |
 | evtx | Not mapped | The only generically available field is `Event.System.Execution_attributes.ProcessID` — a bare numeric PID, not a process name/path. Mixing "a name" and "a PID" under one "Process" column would misrepresent one of them, so this is deliberately left unmapped rather than shown as a misleading number |
-| text_config / other | Not mapped | No universal field |
+| text_config / biome / other | Not mapped | No universal field |
 
 ## Message (parser-level, not `db::timeline_queries`)
 
@@ -132,7 +132,7 @@ the two can't drift apart on what "Event ID" means).
 | Sourcetype | Status | Field |
 |---|---|---|
 | evtx | Confirmed | `Event.System.EventID` — same snapshot fixture as Host above. Some elements (most commonly `EventID` on older/manifest-free providers like MsiInstaller or the Service Control Manager) carry a `Qualifiers` XML attribute alongside their value; without `separate_json_attributes(true)` this would serialize as a nested `{"#text": ..., "#attributes": {...}}` object instead of a plain number, which is exactly why `parsers::evtx` parses with that setting on |
-| journald / aul / text_config / other | Not mapped | No equivalent concept |
+| journald / aul / text_config / biome / other | Not mapped | No equivalent concept |
 
 ## Subsystem
 
@@ -142,7 +142,7 @@ The logging component: which piece of software emitted the entry.
 |---|---|---|
 | aul | Confirmed | `subsystem` (e.g. `"com.apple.mDNSResponder"`) — verified directly against a real loaded session's `fields` JSON, matching `macos-unifiedlogs`' own `LogData` field name |
 | evtx | Confirmed | `Event.System.Provider_attributes.Name` (e.g. `"Microsoft-Windows-Security-Auditing"`) — same snapshot fixture as Host above; conceptually the closest EVTX equivalent to AUL's subsystem (both identify "which component logged this") |
-| journald / text_config / other | Not mapped | No equivalent concept |
+| journald / text_config / biome / other | Not mapped | No equivalent concept |
 
 ## Category
 
@@ -153,7 +153,7 @@ whoever wrote the logging code.
 |---|---|---|
 | aul | Confirmed | `category` (e.g. `"mDNS"`) — same verification as `subsystem` above |
 | evtx | **Deliberately not mapped** | `Event.System.Channel` (e.g. `"Security"`, `"Application"`) looks similar but is a different kind of thing: which top-level Windows Event Log the entry was routed to, not a developer-set classification the way AUL's `category` is. Mapping it here would misrepresent it as something more fine-grained than it actually is — same reasoning as EVTX's `process` staying unmapped (a PID isn't a process name) |
-| journald / text_config / other | Not mapped | No equivalent concept |
+| journald / text_config / biome / other | Not mapped | No equivalent concept |
 
 ## Adding a new extracted field
 

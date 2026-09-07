@@ -183,6 +183,14 @@ fn acknowledgements_tab(ui: &mut egui::Ui) {
          Verification Toolkit (Amnesty International's Security Lab) and \
          ALEAPP.",
     );
+    ui.add_space(4.0);
+    ui.label(
+        "The built-in Apple Biome (SEGB) tagging rule pack \
+         (rules/examples/biome_*.toml) sources stream names and field \
+         semantics from iLEAPP's biome*.py artifact modules (Apache-2.0). \
+         The SEGB v2 envelope format is a Rust port of CCL Forensics' \
+         ccl_segb project (MIT) \u{2014} github.com/cclgroupltd/ccl-segb.",
+    );
 
     ui.add_space(10.0);
     ui.strong("Special thanks");

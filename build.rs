@@ -82,6 +82,13 @@ fn main() {
     );
     embed_toml_dir(
         &manifest_dir,
+        "rules/examples",
+        "biome_",
+        "BIOME_RULE_TOMLS",
+        "biome_builtin_rules.rs",
+    );
+    embed_toml_dir(
+        &manifest_dir,
         "parsers/examples",
         "",
         "TEXT_PARSER_TOMLS",

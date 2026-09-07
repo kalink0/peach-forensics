@@ -255,6 +255,7 @@ fn build_sections(rules: &[Rule]) -> Vec<Section> {
     let mut evtx = Vec::new();
     let mut journald = Vec::new();
     let mut intrusion_log = Vec::new();
+    let mut biome = Vec::new();
     let mut other = Vec::new();
 
     for rule in rules {
@@ -268,6 +269,7 @@ fn build_sections(rules: &[Rule]) -> Vec<Section> {
             Some("evtx") => evtx.push(rule),
             Some("journald") => journald.push(rule),
             Some("intrusion_log") => intrusion_log.push(rule),
+            Some("biome") => biome.push(rule),
             _ => other.push(rule),
         }
     }
@@ -277,6 +279,7 @@ fn build_sections(rules: &[Rule]) -> Vec<Section> {
         ("EVTX Security-Auditing rules", evtx),
         ("journald rules", journald),
         ("Android Intrusion Log rules", intrusion_log),
+        ("Apple Biome rules", biome),
         ("Other rules", other),
     ]
     .into_iter()
@@ -496,10 +499,10 @@ mod tests {
     /// sections with no empty ones (and no "Other" catch-all, since every
     /// embedded rule declares one of the four known sourcetypes).
     #[test]
-    fn the_embedded_baseline_groups_into_four_non_empty_sections() {
+    fn the_embedded_baseline_groups_into_five_non_empty_sections() {
         let rules = builtin::active_builtin_rules(None);
         let sections = build_sections(&rules);
-        assert_eq!(sections.len(), 4);
+        assert_eq!(sections.len(), 5);
         for section in &sections {
             assert!(!section.rules.is_empty());
             for row in &section.rules {

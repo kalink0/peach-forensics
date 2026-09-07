@@ -2,7 +2,7 @@
 
 Generated from `rules/examples/*.toml` — the actual shipped rule files, not a hand-transcribed summary that can drift from them. Regenerate (`python3 scripts/gen_rules_reference.py`) after adding/editing a rule file rather than hand-editing this doc directly.
 
-All four packs below ship **embedded in the binary itself** (`build.rs` + `src/tagging/builtin.rs`) and every rule in them is enabled by default — see [user-guide.md](user-guide.md#tagging) for the "Built-in rules..." picker that lets you enable/disable individual rules rather than only a whole pack at once.
+All five packs below ship **embedded in the binary itself** (`build.rs` + `src/tagging/builtin.rs`) and every rule in them is enabled by default — see [user-guide.md](user-guide.md#tagging) for the "Built-in rules..." picker that lets you enable/disable individual rules rather than only a whole pack at once.
 
 ## AUL pattern-of-life rules (39)
 
@@ -177,3 +177,68 @@ For Android's Advanced Protection Mode "Intrusion Logging" feature (Android 16+,
 | `intrusion_log_wifi_connection` | `event_type` = `security_event`<br>`security_event_tag` = `wifi_connection` | `wifi_connection` | The device attempted to connect to a Wi-Fi network under management policy (SecurityLog tag 210037) |
 | `intrusion_log_wifi_disconnection` | `event_type` = `security_event`<br>`security_event_tag` = `wifi_disconnection` | `wifi_disconnection` | The device disconnected from a managed Wi-Fi network (SecurityLog tag 210038) |
 | `intrusion_log_wipe_failure` | `event_type` = `security_event`<br>`security_event_tag` = `wipe_failure` | `wipe_failure` | A device or user-data wipe was attempted and failed (SecurityLog tag 210023) |
+
+## Apple Biome rules (58)
+
+Stream names and field semantics sourced from iLEAPP's `biome*.py` artifact modules (Apache-2.0). The SEGB v2 envelope format decoded underneath these streams is a Rust port of [CCL Forensics' ccl_segb project](https://github.com/cclgroupltd/ccl-segb) (MIT) — see [docs/design/biome-rule-pack-research.md](design/biome-rule-pack-research.md) for the full sourcing and scope rationale, including why SEGB v1 isn't supported yet. Every rule matches `sourcetype = "biome"`; most match on the normalized `stream` field alone (Tier 1 — no payload decoding needed), a handful also match on a stream-conditioned normalized key like `bundle_id`/`app_id` (Tier 2 — see [supported-sources.md](supported-sources.md#biome-segb)).
+
+| Rule name | Match | Tag | Description |
+|---|---|---|---|
+| `biome_airplane_mode_off_event` | `stream` = `Device.Wireless.AirplaneMode`<br>`state_raw` = `0` | `airplane_mode_off_event` | Airplane Mode turned off |
+| `biome_airplane_mode_on_event` | `stream` = `Device.Wireless.AirplaneMode`<br>`state_raw` = `1` | `airplane_mode_on_event` | Airplane Mode turned on |
+| `biome_app_activity` | `stream` = `App.Activity` | `app_activity` | Biome stream present: App.Activity (application activity event) |
+| `biome_app_infocus` | `stream` = `App.InFocus` | `app_in_focus` | Biome stream present: App.InFocus (application brought into foreground focus) |
+| `biome_app_installation` | `stream` = `App.Installation` | `app_installed` | Biome stream present: App.Installation (application installed) |
+| `biome_app_intent` | `stream` = `App.Intent` | `app_intent_recorded` | Biome stream present: App.Intent (an app intent/action was recorded) |
+| `biome_app_intent_instagram` | `stream` = `App.Intent`<br>`app_id` = `com.instagram.android` | `app_intent_instagram` | An Instagram app intent/action was recorded |
+| `biome_app_intent_safari` | `stream` = `App.Intent`<br>`app_id` = `com.apple.mobilesafari` | `app_intent_safari` | A Safari app intent/action was recorded |
+| `biome_app_intent_whatsapp` | `stream` = `App.Intent`<br>`app_id` = `com.whatsapp` | `app_intent_whatsapp` | A WhatsApp app intent/action was recorded |
+| `biome_carplay_connected` | `stream` = `CarPlay.Connected` | `carplay_connected` | Biome stream present: CarPlay.Connected (CarPlay connection state change) |
+| `biome_carplay_connected_event` | `stream` = `CarPlay.Connected`<br>`state_raw` = `1` | `carplay_connected_event` | CarPlay connected |
+| `biome_carplay_disconnected_event` | `stream` = `CarPlay.Connected`<br>`state_raw` = `0` | `carplay_disconnected_event` | CarPlay disconnected |
+| `biome_cellular_data_disabled_event` | `stream` = `Device.Wireless.CellularDataEnabled`<br>`state_raw` = `0` | `cellular_data_disabled_event` | Cellular data disabled |
+| `biome_cellular_data_enabled_event` | `stream` = `Device.Wireless.CellularDataEnabled`<br>`state_raw` = `1` | `cellular_data_enabled_event` | Cellular data enabled |
+| `biome_clock_alarm` | `stream` = `Clock.Alarm` | `clock_alarm` | Biome stream present: Clock.Alarm (an alarm was set, fired, or dismissed) |
+| `biome_deleted` | `entry_state` = `deleted` | `deleted` | A Biome/SEGB record marked deleted (entry_state = "deleted") |
+| `biome_device_keybag_locked_event` | `stream` = `Device.KeybagLocked`<br>`state_raw` = `1` | `device_keybag_locked_event` | Device keybag (encryption keys) locked |
+| `biome_device_keybag_unlocked_event` | `stream` = `Device.KeybagLocked`<br>`state_raw` = `0` | `device_keybag_unlocked_event` | Device keybag (encryption keys) unlocked |
+| `biome_device_keybaglocked` | `stream` = `Device.KeybagLocked` | `keybag_locked` | Biome stream present: Device.KeybagLocked (device keybag (encryption keys) locked state) |
+| `biome_device_plugged_in_event` | `stream` = `Device.Power.PluggedIn`<br>`state_raw` = `1` | `device_plugged_in_event` | Device plugged in to power |
+| `biome_device_power_batterylevel` | `stream` = `Device.Power.BatteryLevel` | `battery_level` | Biome stream present: Device.Power.BatteryLevel (battery level change) |
+| `biome_device_power_lowpowermode` | `stream` = `Device.Power.LowPowerMode` | `low_power_mode` | Biome stream present: Device.Power.LowPowerMode (Low Power Mode toggled) |
+| `biome_device_power_pluggedin` | `stream` = `Device.Power.PluggedIn` | `power_plugged_in` | Biome stream present: Device.Power.PluggedIn (device plugged in/unplugged) |
+| `biome_device_screen_locked_event` | `stream` = `Device.ScreenLocked`<br>`state_raw` = `1` | `device_screen_locked_event` | Device screen locked |
+| `biome_device_screen_unlocked_event` | `stream` = `Device.ScreenLocked`<br>`state_raw` = `0` | `device_screen_unlocked_event` | Device screen unlocked |
+| `biome_device_screenlocked` | `stream` = `Device.ScreenLocked` | `screen_locked` | Biome stream present: Device.ScreenLocked (device screen locked/unlocked) |
+| `biome_device_thermals_batterytemperature` | `stream` = `Device.Thermals.BatteryTemperature` | `battery_temperature` | Biome stream present: Device.Thermals.BatteryTemperature (battery temperature reading) |
+| `biome_device_timezone` | `stream` = `Device.TimeZone` | `timezone_change` | Biome stream present: Device.TimeZone (device time zone changed) |
+| `biome_device_unplugged_event` | `stream` = `Device.Power.PluggedIn`<br>`state_raw` = `0` | `device_unplugged_event` | Device unplugged from power |
+| `biome_device_wireless_airplanemode` | `stream` = `Device.Wireless.AirplaneMode` | `airplane_mode` | Biome stream present: Device.Wireless.AirplaneMode (Airplane Mode toggled) |
+| `biome_device_wireless_bluetooth` | `stream` = `Device.Wireless.Bluetooth` | `bluetooth_activity` | Biome stream present: Device.Wireless.Bluetooth (Bluetooth radio state change) |
+| `biome_device_wireless_cellulardataenabled` | `stream` = `Device.Wireless.CellularDataEnabled` | `cellular_toggle` | Biome stream present: Device.Wireless.CellularDataEnabled (cellular data enabled/disabled) |
+| `biome_device_wireless_wifi` | `stream` = `Device.Wireless.WiFi` | `wifi_activity` | Biome stream present: Device.Wireless.WiFi (Wi-Fi radio state change) |
+| `biome_dkevent_app_infocus` | `stream` = `_DKEvent.App.InFocus` | `app_in_focus` | Biome stream present: _DKEvent.App.InFocus (application brought into foreground focus) |
+| `biome_dkevent_app_locationactivity` | `stream` = `_DKEvent.App.LocationActivity` | `app_location_activity` | Biome stream present: _DKEvent.App.LocationActivity (an app's location-related activity) |
+| `biome_dkevent_device_islockedimputed` | `stream` = `_DKEvent.Device.IsLockedImputed` | `device_locked_imputed` | Biome stream present: _DKEvent.Device.IsLockedImputed (inferred device lock state change) |
+| `biome_dkevent_safari_history` | `stream` = `_DKEvent.Safari.History` | `safari_activity` | Biome stream present: _DKEvent.Safari.History (Safari browsing history event) |
+| `biome_dkevent_wifi_connection` | `stream` = `_DKEvent.Wifi.Connection` | `wifi_connection` | Biome stream present: _DKEvent.Wifi.Connection (Wi-Fi connection event) |
+| `biome_emoji_engagement` | `stream` = `Emoji.Engagement` | `emoji_engagement` | Biome stream present: Emoji.Engagement (emoji usage/engagement) |
+| `biome_keyboard_tokenfrequency` | `stream` = `Keyboard.TokenFrequency` | `keyboard_activity_recorded` | Biome stream present: Keyboard.TokenFrequency (keyboard typed-token frequency recorded) |
+| `biome_location_visit` | `stream` = `Location.Visit` | `location_visit` | Biome stream present: Location.Visit (a significant location visit) |
+| `biome_low_power_mode_off_event` | `stream` = `Device.Power.LowPowerMode`<br>`state_raw` = `0` | `low_power_mode_off_event` | Low Power Mode turned off |
+| `biome_low_power_mode_on_event` | `stream` = `Device.Power.LowPowerMode`<br>`state_raw` = `1` | `low_power_mode_on_event` | Low Power Mode turned on |
+| `biome_messages_read` | `stream` = `Messages.Read` | `message_read` | Biome stream present: Messages.Read (a message was read) |
+| `biome_notification` | `stream` = `Notification` | `notification_activity` | Biome stream present: Notification (a notification was posted) |
+| `biome_notification_usage` | `stream` = `Notification.Usage` | `notification_activity` | Biome stream present: Notification.Usage (notification usage/interaction) |
+| `biome_proactiveharvesting_mail` | `stream` = `ProactiveHarvesting.Mail` | `harvested_mail` | Biome stream present: ProactiveHarvesting.Mail (mail content proactively harvested for Siri suggestions) |
+| `biome_proactiveharvesting_messages` | `stream` = `ProactiveHarvesting.Messages` | `harvested_communication` | Biome stream present: ProactiveHarvesting.Messages (message content proactively harvested for Siri suggestions) |
+| `biome_safari_navigations` | `stream` = `Safari.Navigations` | `safari_activity` | Biome stream present: Safari.Navigations (Safari page navigation) |
+| `biome_screentime_appusage` | `stream` = `ScreenTime.AppUsage` | `app_usage_recorded` | Biome stream present: ScreenTime.AppUsage (Screen Time recorded app usage) |
+| `biome_screentime_messages_usage` | `stream` = `ScreenTime.AppUsage`<br>`bundle_id` = `com.apple.MobileSMS` | `screentime_messages_usage` | Screen Time usage of Messages was recorded |
+| `biome_screentime_safari_usage` | `stream` = `ScreenTime.AppUsage`<br>`bundle_id` = `com.apple.mobilesafari` | `screentime_safari_usage` | Screen Time usage of Safari was recorded |
+| `biome_siri_remembers_audiohistory` | `stream` = `Siri.Remembers.AudioHistory` | `siri_remembers_activity` | Biome stream present: Siri.Remembers.AudioHistory (Siri Remembers recorded audio history) |
+| `biome_siri_remembers_callhistory` | `stream` = `Siri.Remembers.CallHistory` | `siri_remembers_activity` | Biome stream present: Siri.Remembers.CallHistory (Siri Remembers recorded call history) |
+| `biome_siri_remembers_messagehistory` | `stream` = `Siri.Remembers.MessageHistory` | `siri_remembers_activity` | Biome stream present: Siri.Remembers.MessageHistory (Siri Remembers recorded message history) |
+| `biome_wallet_transaction` | `stream` = `Wallet.Transaction` | `wallet_transaction` | Biome stream present: Wallet.Transaction (an Apple Wallet transaction) |
+| `biome_wifi_connected_event` | `stream` = `Device.Wireless.WiFi`<br>`state_raw` = `1` | `wifi_connected_event` | Wi-Fi connected |
+| `biome_wifi_disconnected_event` | `stream` = `Device.Wireless.WiFi`<br>`state_raw` = `0` | `wifi_disconnected_event` | Wi-Fi disconnected |

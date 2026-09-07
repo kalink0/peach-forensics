@@ -1,0 +1,22 @@
+# Apple Biome/SEGB — Device.Wireless.WiFi: Wi-Fi connected
+# Field mapping sourced from iLEAPP's biome*.py artifact modules
+# (Apache-2.0, https://github.com/abrignoni/iLEAPP) — verified against the
+# actual upstream project source (not just a local checkout snapshot) on
+# 2026-09-07. Envelope format (SEGB v2) from CCL Forensics' ccl_segb
+# project (MIT, https://github.com/cclgroupltd/ccl-segb), ported to Rust
+# in src/parsers/biome/segb.rs — see
+# docs/design/biome-rule-pack-research.md for the full sourcing and scope
+# rationale.
+
+[rule]
+name = "biome_wifi_connected_event"
+description = "Wi-Fi connected"
+version = "1"
+
+[rule.match]
+sourcetype = "biome"
+stream = "Device.Wireless.WiFi"
+state_raw = 1
+
+[rule.tag]
+value = "wifi_connected_event"

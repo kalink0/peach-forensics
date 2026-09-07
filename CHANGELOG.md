@@ -2,10 +2,11 @@
 
 All notable changes to Peach will be documented in this file.
 
-## Unreleased
+## v0.7.0 - 2026-09-07
 
 ### New Features
 
+- **Apple Biome (SEGB)** support (**Sourcetype → Apple Biome (SEGB)**) — reads Apple's pattern-of-life logs from a `.../biome/streams` folder (auto-detected from crush's "Send Biome Streams to Peach…" hand-off, or opened directly); each SEGB file loads as its own source, so one bad file never blocks the rest. Decodes the SEGB v2 envelope and each record's schema-less protobuf payload (SEGB v1 is detected but not yet supported). The Message column shows real decoded content — a named summary where field semantics are documented (`"Plugged In"`, `"US/Pacific"`), a compact field-by-field rendering otherwise, and a clear note for deleted/zeroed records instead of a misleading decode error.
 - **Timestamp sort direction** — a "Timestamp ▲/▼" toggle next to the Columns picker flips the timeline between oldest-first (the previous, still-default behavior) and newest-first. Deliberately limited to timestamp: it's the one column that doesn't need the wide `fields`/JSON read the timeline's windowed fetch otherwise avoids, so it stays cheap regardless of table size. Ties still resolve deterministically, the same file/sequence order as before, just reversed along with everything else. **Export (current filter)...** always writes chronological order regardless of the toggle, so an exported file's row order never depends on how the timeline happened to be sorted at export time.
 
 ## v0.6.0 - 2026-09-04
