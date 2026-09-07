@@ -1,0 +1,25 @@
+# Apple Biome/SEGB — deleted record. Both reference tools this pack is
+# sourced from surface a record's entry state as their own primary
+# column: crush's SEGB viewer shows "SEGB State" (Written/Deleted/Unknown,
+# read straight from ccl_segb's EntryState), and every iLEAPP biome*.py
+# artifact's data_headers leads with "SEGB State" too. This rule doesn't
+# invent a new category — it just makes that same, already-surfaced value
+# quickly filterable through peach's own tag mechanism (a quick chip to
+# show only deleted records for recovery review, or "NOT tag=deleted" to
+# declutter the timeline — in a real device export the large majority of
+# records are deleted, since a slot's trailer entry outlives its data).
+# Peach still decodes and displays a deleted record's payload fully (see
+# src/parsers/biome/segb.rs) rather than dropping it — this tag is purely
+# about filtering, not about hiding anything.
+
+[rule]
+name = "biome_deleted"
+description = "A Biome/SEGB record marked deleted (entry_state = \"deleted\")"
+version = "1"
+
+[rule.match]
+sourcetype = "biome"
+entry_state = "deleted"
+
+[rule.tag]
+value = "deleted"

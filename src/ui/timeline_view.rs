@@ -224,18 +224,23 @@ fn format_level(level: &str, sourcetype: &str) -> String {
 
 /// Display-only shortening of the Source column: the last path component for
 /// most sourcetypes (a real filename, e.g. `security.evtx`), but the full
-/// path for AUL. AUL's "file" is actually the directory the analyst picked —
-/// a raw extraction's parent folder, or a `.logarchive` bundle — and its last
-/// path component is frequently a generic name (`"db"`, `"extraction"`) that
-/// doesn't distinguish one AUL source from another the way a real filename
-/// does. The full path is always available via hover regardless of which
-/// form is shown here.
+/// path for AUL and Biome. AUL's "file" is actually the directory the analyst
+/// picked — a raw extraction's parent folder, or a `.logarchive` bundle — and
+/// its last path component is frequently a generic name (`"db"`,
+/// `"extraction"`) that doesn't distinguish one AUL source from another the
+/// way a real filename does. Biome's real on-disk filenames are meaningless
+/// numeric IDs (no stream name in them at all — that only lives in the
+/// parent directory, see `parsers::biome::stream_name_from_path`), so a bare
+/// basename would be even less distinctive than AUL's case; the full path at
+/// least keeps the originating stream directory visible in the column
+/// itself, not just on hover. The full path is always available via hover
+/// regardless of which form is shown here.
 ///
 /// `pub(crate)` — also used by `app.rs` to label the per-source visibility
 /// chips (`ui::filter_bar`) with the same short name this column already
 /// shows, rather than a second, separately-maintained shortening rule.
 pub(crate) fn source_display_label<'a>(source_path: &'a str, sourcetype: &str) -> &'a str {
-    if sourcetype == "aul" {
+    if matches!(sourcetype, "aul" | "biome") {
         return source_path;
     }
     std::path::Path::new(source_path)
@@ -1246,6 +1251,21 @@ mod tests {
         assert_eq!(
             source_display_label("/home/kalinko/Documents/temp/db", "aul"),
             "/home/kalinko/Documents/temp/db"
+        );
+    }
+
+    #[test]
+    fn source_display_label_shows_the_full_path_for_biome() {
+        // Real SEGB filenames are meaningless numeric IDs with no stream
+        // name in them — the basename alone would be even less useful
+        // than AUL's directory-name case, so the full path (including the
+        // stream directory) is shown instead.
+        assert_eq!(
+            source_display_label(
+                "/streams/restricted/Device.TimeZone/local/738589867451983",
+                "biome"
+            ),
+            "/streams/restricted/Device.TimeZone/local/738589867451983"
         );
     }
 

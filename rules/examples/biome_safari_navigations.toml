@@ -1,0 +1,19 @@
+# Apple Biome/SEGB — Safari.Navigations: Safari page navigation
+# Stream name + semantics sourced from iLEAPP's biome*.py artifact modules
+# (Apache-2.0, https://github.com/abrignoni/iLEAPP). Envelope format (SEGB
+# v2) from CCL Forensics' ccl_segb project (MIT,
+# https://github.com/cclgroupltd/ccl-segb), ported to Rust in
+# src/parsers/biome/segb.rs — see docs/design/biome-rule-pack-research.md
+# for the full sourcing and scope rationale.
+
+[rule]
+name = "biome_safari_navigations"
+description = "Biome stream present: Safari.Navigations (Safari page navigation)"
+version = "1"
+
+[rule.match]
+sourcetype = "biome"
+stream = "Safari.Navigations"
+
+[rule.tag]
+value = "safari_activity"

@@ -16,6 +16,7 @@ use crate::model::event_id::{EventId, SourceFileId};
 use crate::model::log_entry::LogEntry;
 use crate::model::timezone_spec::TimezoneSpec;
 use crate::parsers::aul::AulParser;
+use crate::parsers::biome::BiomeParser;
 use crate::parsers::evtx::EvtxFileParser;
 use crate::parsers::intrusion_log::IntrusionLogParser;
 use crate::parsers::journald::JournaldFileParser;
@@ -54,6 +55,7 @@ enum SourceKind {
     Journald,
     Text,
     IntrusionLog,
+    Biome,
 }
 
 /// What a background-spawned native file/folder dialog resolved to, sent
@@ -447,10 +449,19 @@ pub struct PeachApp {
 }
 
 /// Pops the first `--add-source` path (if any) to pre-fill, determining its
-/// sourcetype structurally rather than guessing a text format: a directory
-/// can only be AUL (the only directory-based sourcetype), and `.evtx`/
-/// `.journal` are unambiguous, well-known extensions. Everything else
-/// defaults to Text. Keeps the rest queued for after each load succeeds.
+/// sourcetype structurally rather than guessing a text format: `.evtx`/
+/// `.journal` are unambiguous, well-known extensions; a directory whose
+/// path ends in `.../biome/streams` (case-insensitive, matched
+/// component-wise — see [`path_ends_with_case_insensitive`]) is Biome,
+/// mirroring the narrow path-shape scoping crush's own
+/// `is_biome_streams_node` uses for its "Send Biome Streams to Peach…"
+/// hand-off; every other directory defaults to AUL. IntrusionLog is also
+/// directory-based but has no CLI auto-detection branch of its own — its
+/// folder layout (a flat pile of `.txt` files) has no distinguishing path
+/// shape to key off, so it must be picked manually via the Sourcetype
+/// picker after the fact. Everything else (non-directory, non-`.evtx`/
+/// `.journal`) defaults to Text. Keeps the rest queued for after each load
+/// succeeds.
 fn queue_from_cli_sources(
     add_sources: Vec<PathBuf>,
 ) -> (Option<PathBuf>, SourceKind, VecDeque<PathBuf>) {
@@ -464,9 +475,31 @@ fn queue_from_cli_sources(
     }
 }
 
+/// Whether `path`'s components end with `suffix`, case-insensitively —
+/// e.g. a path ending in `.../Biome/Streams` matches `&["biome",
+/// "streams"]`. Component-wise rather than a raw string suffix check so a
+/// path using `\` (Windows) matches the same way one using `/` does, and
+/// so a coincidental substring match (a directory literally named
+/// `"not-biome/streams"`) doesn't falsely qualify.
+fn path_ends_with_case_insensitive(path: &Path, suffix: &[&str]) -> bool {
+    let components: Vec<&str> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    components.len() >= suffix.len()
+        && components[components.len() - suffix.len()..]
+            .iter()
+            .zip(suffix)
+            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+}
+
 fn source_kind_for_path(path: &Path) -> SourceKind {
     if path.is_dir() {
-        SourceKind::Aul
+        if path_ends_with_case_insensitive(path, &["biome", "streams"]) {
+            SourceKind::Biome
+        } else {
+            SourceKind::Aul
+        }
     } else if path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("evtx"))
@@ -498,27 +531,31 @@ fn source_path_and_queue_from_pick(mut picked: Vec<PathBuf>) -> Option<(PathBuf,
 }
 
 /// Whether the "Built-in rules..." button is worth showing at all. Every
-/// built-in rule (any of the four packs) only ever matches AUL, EVTX,
-/// journald, or intrusion_log entries (a hard-coded `sourcetype` condition
-/// on every rule — see `tagging::builtin`), so offering the button while
-/// the analyst is about to load something else, with none of those four
-/// already loaded either, would offer a control that provably cannot
-/// affect anything currently relevant: neither the upcoming load nor a
-/// re-tag of what's already in the timeline. True either when one of those
-/// four kinds of load is about to happen (current `source_kind`) or when
-/// the session already holds at least one loaded source of one of those
-/// four sourcetypes that "Re-tag now" could apply the rules to.
+/// built-in rule (any of the five packs) only ever matches AUL, EVTX,
+/// journald, intrusion_log, or biome entries (a hard-coded `sourcetype`
+/// condition on every rule — see `tagging::builtin`), so offering the
+/// button while the analyst is about to load something else, with none of
+/// those five already loaded either, would offer a control that provably
+/// cannot affect anything currently relevant: neither the upcoming load
+/// nor a re-tag of what's already in the timeline. True either when one of
+/// those five kinds of load is about to happen (current `source_kind`) or
+/// when the session already holds at least one loaded source of one of
+/// those five sourcetypes that "Re-tag now" could apply the rules to.
 fn builtin_rules_button_is_relevant(
     source_kind: SourceKind,
     loaded_sources: &[LoadedSource],
 ) -> bool {
     matches!(
         source_kind,
-        SourceKind::Aul | SourceKind::Evtx | SourceKind::Journald | SourceKind::IntrusionLog
+        SourceKind::Aul
+            | SourceKind::Evtx
+            | SourceKind::Journald
+            | SourceKind::IntrusionLog
+            | SourceKind::Biome
     ) || loaded_sources.iter().any(|source| {
         matches!(
             source.sourcetype.as_str(),
-            "aul" | "evtx" | "journald" | "intrusion_log"
+            "aul" | "evtx" | "journald" | "intrusion_log" | "biome"
         )
     })
 }
@@ -2282,6 +2319,11 @@ impl eframe::App for PeachApp {
                     SourceKind::IntrusionLog,
                     "Android Intrusion Log",
                 );
+                ui.selectable_value(
+                    &mut self.source_kind,
+                    SourceKind::Biome,
+                    "Apple Biome (SEGB)",
+                );
                 if !self.pending_cli_sources.is_empty() {
                     ui.label(format!(
                         "({} more source(s) queued from --add-source)",
@@ -2291,10 +2333,14 @@ impl eframe::App for PeachApp {
             });
 
             ui.horizontal(|ui| {
-                if matches!(self.source_kind, SourceKind::Aul | SourceKind::IntrusionLog) {
+                if matches!(
+                    self.source_kind,
+                    SourceKind::Aul | SourceKind::IntrusionLog | SourceKind::Biome
+                ) {
                     let folder_label = match self.source_kind {
                         SourceKind::Aul => "Choose .logarchive folder...",
                         SourceKind::IntrusionLog => "Choose intrusion-logs folder...",
+                        SourceKind::Biome => "Choose biome/streams folder...",
                         _ => unreachable!("handled by the outer matches! above"),
                     };
                     if ui
@@ -2315,7 +2361,7 @@ impl eframe::App for PeachApp {
                             ("Choose .journal file(s)...", Some(("journald", "journal")))
                         }
                         SourceKind::Text => ("Choose log file(s)...", None),
-                        SourceKind::Aul | SourceKind::IntrusionLog => {
+                        SourceKind::Aul | SourceKind::IntrusionLog | SourceKind::Biome => {
                             unreachable!("handled above")
                         }
                     };
@@ -2816,44 +2862,58 @@ const LOAD_BATCH_SIZE: usize = 10_000;
 /// Resolves `source_path` to the concrete list of files [`run_load`] will
 /// parse, one file = one independent parse run = one `source_file_id`/
 /// `sources` row (see [`load_one_file`]). AUL's `.logarchive` and an
-/// intrusion-log export are always one atomic source each (never split up)
-/// regardless of `source_path` being a directory — both parsers walk their
-/// own directory internally (see [`crate::parsers::aul::AulParser`],
+/// intrusion-log export are always one atomic source each (never split
+/// up) regardless of `source_path` being a directory — both parsers walk
+/// their own directory internally (see [`crate::parsers::aul::AulParser`],
 /// [`crate::parsers::intrusion_log::IntrusionLogParser`]) — and a plain
 /// file pick for any sourcetype is always exactly itself; all three
 /// short-circuit before ever touching the filesystem beyond `source_path`
 /// itself.
 ///
-/// Otherwise (a folder picked for EVTX/journald/Text), walks it
+/// Otherwise (a folder picked for EVTX/journald/Text/Biome), walks it
 /// recursively. EVTX/journald filter by their own canonical,
 /// unambiguous extension (`.evtx`/`.journal`, case-insensitive) — a folder
 /// export commonly has unrelated files sitting alongside the real ones.
-/// Text has no fixed extension (fully TOML-configurable), so every regular
-/// file is attempted — no mandatory auto-detection, the analyst already
-/// chose the parser config, so it isn't this function's place to
-/// second-guess which files "look like" a match; files that don't actually
-/// match end up in [`LoadSummary::skipped`], not silently excluded
-/// upfront. Sorted for deterministic load order — same folder + same
-/// config must always produce the same result.
+/// Biome has no such extension (real device exports use plain numeric
+/// filenames), so it filters structurally instead —
+/// [`crate::parsers::biome::is_segb_candidate`] requires a file's
+/// immediate parent directory be named `local`/`remote`, which is also
+/// what excludes the `lock`/`metadata` housekeeping files every real
+/// stream directory carries (see that function's doc comment). Unlike
+/// AUL/intrusion_log, each individual SEGB file becomes its own
+/// independent source here — there's no cross-file resolution need
+/// forcing the whole folder to be one atomic unit the way AUL's
+/// `dsc`/`uuidtext` lookups do, so one bad/unreadable file (e.g. a
+/// currently-unsupported SEGB v1 file) only takes down that one source,
+/// not the whole load, and multiple files load in parallel like EVTX/
+/// journald. Text has no fixed extension (fully TOML-configurable), so
+/// every regular file is attempted — no mandatory auto-detection, the
+/// analyst already chose the parser config, so it isn't this function's
+/// place to second-guess which files "look like" a match; files that
+/// don't actually match end up in [`LoadSummary::skipped`], not silently
+/// excluded upfront. Sorted for deterministic load order — same folder +
+/// same config must always produce the same result.
 fn collect_source_files(source_kind: SourceKind, source_path: &Path) -> Vec<PathBuf> {
     if matches!(source_kind, SourceKind::Aul | SourceKind::IntrusionLog) || source_path.is_file() {
         return vec![source_path.to_path_buf()];
     }
-    let extension_filter: Option<&str> = match source_kind {
-        SourceKind::Evtx => Some("evtx"),
-        SourceKind::Journald => Some("journal"),
-        SourceKind::Text | SourceKind::Aul | SourceKind::IntrusionLog => None,
-    };
     let mut files: Vec<PathBuf> = walkdir::WalkDir::new(source_path)
         .into_iter()
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path())
-        .filter(|path| match extension_filter {
-            Some(ext) => path
+        .filter(|path| match source_kind {
+            SourceKind::Evtx => path
                 .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case(ext)),
-            None => true,
+                .is_some_and(|e| e.eq_ignore_ascii_case("evtx")),
+            SourceKind::Journald => path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("journal")),
+            SourceKind::Biome => crate::parsers::biome::is_segb_candidate(path),
+            SourceKind::Text => true,
+            SourceKind::Aul | SourceKind::IntrusionLog => {
+                unreachable!("handled by the atomic-directory check above")
+            }
         })
         .collect();
     files.sort();
@@ -2861,22 +2921,24 @@ fn collect_source_files(source_kind: SourceKind, source_path: &Path) -> Vec<Path
 }
 
 /// Real byte size of `path` — if it's a file, its own size; if it's a
-/// directory (AUL's `.logarchive` or an intrusion-log export — the only two
-/// sourcetypes [`collect_source_files`] ever hands a directory to this
-/// function, since every other sourcetype's folder pick resolves to
-/// individual files first), the sum of just the files that sourcetype's
-/// parser actually reads (`.tracev3` for AUL, `.txt` for intrusion_log).
-/// `path.metadata().len()` on a directory returns a small, meaningless
-/// number (just the directory entry itself, not its contents), so that
-/// shortcut can't be used for either. AUL's restriction to `.tracev3`
-/// specifically (not every file under the directory — `dsc`/`uuidtext`/
-/// `timesync` too) matters for a reason intrusion_log doesn't share: it
-/// must match exactly what [`AulParser`]'s own `on_bytes_progress`
-/// reporting sums to (see its doc comment), or the progress bar would stall
-/// short of 100% instead of reaching it cleanly — `IntrusionLogParser` has
-/// no such per-file progress reporting (the default `parse_streaming`
-/// wrapper), so its own `.txt`-only restriction is just "don't count files
-/// this parser doesn't read" rather than a progress-matching requirement.
+/// directory (AUL's `.logarchive` or an intrusion-log export — the only
+/// two sourcetypes [`collect_source_files`] ever hands a directory to
+/// this function, since every other sourcetype's folder pick — Biome
+/// included, since it moved to a one-file-per-source model, see
+/// [`collect_source_files`] — resolves to individual files first), the
+/// sum of just the files that sourcetype's parser actually reads
+/// (`.tracev3` for AUL, `.txt` for intrusion_log). `path.metadata().len()`
+/// on a directory returns a small, meaningless number (just the
+/// directory entry itself, not its contents), so that shortcut can't be
+/// used for either. AUL's restriction to `.tracev3` specifically (not
+/// every file under the directory — `dsc`/`uuidtext`/`timesync` too)
+/// matters for a reason intrusion_log doesn't share: it must match
+/// exactly what [`AulParser`]'s own `on_bytes_progress` reporting sums to
+/// (see its doc comment), or the progress bar would stall short of 100%
+/// instead of reaching it cleanly — `IntrusionLogParser` has no such
+/// per-file progress reporting (the default `parse_streaming` wrapper),
+/// so its own `.txt`-only restriction is just "don't count files this
+/// parser doesn't read" rather than a progress-matching requirement.
 fn path_byte_size(sourcetype: &str, path: &Path) -> u64 {
     if path.is_dir() {
         let extension: &str = if sourcetype == "intrusion_log" {
@@ -2921,11 +2983,11 @@ fn path_byte_size(sourcetype: &str, path: &Path) -> u64 {
 /// setup problems, not a single file's problem.
 ///
 /// `thread_count` only matters when [`collect_source_files`] finds more
-/// than one file (a folder pick for EVTX/journald/Text) — AUL's
-/// `.logarchive` is always exactly one atomic parse unit, and a
-/// single-file pick is also always exactly one, so both run
-/// [`run_sequential`] regardless of `thread_count`: there's nothing to
-/// parallelize across a list of one.
+/// than one file (a folder pick for EVTX/journald/Text/Biome) — AUL's
+/// `.logarchive` and an intrusion-log export are always exactly one
+/// atomic parse unit, and a single-file pick is also always exactly one,
+/// so all of those run [`run_sequential`] regardless of `thread_count`:
+/// there's nothing to parallelize across a list of one.
 /// Which tagging rules a load/re-tag should apply — user-selected files plus
 /// which built-in rules (by name, from either
 /// `tagging::builtin::aul_pattern_of_life_rules` or
@@ -2990,6 +3052,7 @@ fn run_load(
     let evtx_parser = EvtxFileParser;
     let journald_parser = JournaldFileParser;
     let intrusion_log_parser = IntrusionLogParser;
+    let biome_parser = BiomeParser;
     let text_parser = TextConfigParser {
         default_assume_offset: settings.default_source_timezone,
     };
@@ -3014,6 +3077,10 @@ fn run_load(
             ParserConfig::from_toml_str(
                 "[parser]\nname = \"journald\"\nsourcetype = \"journald\"\n",
             )?,
+        ),
+        SourceKind::Biome => (
+            &biome_parser,
+            ParserConfig::from_toml_str("[parser]\nname = \"biome\"\nsourcetype = \"biome\"\n")?,
         ),
         SourceKind::Text => {
             let config_path = parser_config_path
@@ -4270,6 +4337,54 @@ mod tests {
     }
 
     #[test]
+    fn queue_from_cli_sources_picks_biome_for_a_biome_streams_directory() {
+        let dir = std::env::temp_dir()
+            .join(format!("peach-test-cli-biome-{}", uuid::Uuid::new_v4()))
+            .join("biome")
+            .join("streams");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (first, kind, rest) = queue_from_cli_sources(vec![dir.clone()]);
+
+        assert_eq!(first, Some(dir.clone()));
+        assert_eq!(kind, SourceKind::Biome);
+        assert!(rest.is_empty());
+
+        std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn queue_from_cli_sources_picks_biome_for_a_biome_streams_directory_case_insensitively() {
+        let dir = std::env::temp_dir()
+            .join(format!("peach-test-cli-biome-ci-{}", uuid::Uuid::new_v4()))
+            .join("Biome")
+            .join("Streams");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (_, kind, _) = queue_from_cli_sources(vec![dir.clone()]);
+
+        assert_eq!(kind, SourceKind::Biome);
+        std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap()).unwrap();
+    }
+
+    /// A directory that merely *contains* "biome"/"streams" somewhere in
+    /// its name, rather than as the two trailing path components, must not
+    /// falsely qualify — [`path_ends_with_case_insensitive`] is
+    /// component-wise, not a raw string suffix/substring check.
+    #[test]
+    fn queue_from_cli_sources_does_not_match_biome_streams_as_a_mere_substring() {
+        let dir = std::env::temp_dir()
+            .join(format!("peach-test-cli-not-biome-{}", uuid::Uuid::new_v4()))
+            .join("not-biome-streams-related");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (_, kind, _) = queue_from_cli_sources(vec![dir.clone()]);
+
+        assert_eq!(kind, SourceKind::Aul);
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn queue_from_cli_sources_picks_journald_for_a_dot_journal_file() {
         let file = std::env::temp_dir().join(format!(
             "peach-test-cli-journal-{}.journal",
@@ -4491,6 +4606,27 @@ mod tests {
         let files = collect_source_files(SourceKind::IntrusionLog, &dir);
 
         assert_eq!(files, vec![dir.clone()]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn collect_source_files_recurses_and_filters_structurally_for_biome() {
+        // Unlike AUL/intrusion_log, Biome does NOT treat the picked folder
+        // as one atomic source: each real SEGB file (under a
+        // <StreamName>/local or /remote leaf) becomes its own source, and
+        // the lock/metadata housekeeping files every real stream
+        // directory carries are excluded structurally, not by extension
+        // (real SEGB files have none).
+        let dir = temp_test_dir("biome-folder");
+        let local_dir = dir.join("restricted/Device.ScreenLocked/local");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::write(local_dir.join("0"), b"segb-data").unwrap();
+        std::fs::write(dir.join("restricted/Device.ScreenLocked/lock"), b"").unwrap();
+        std::fs::write(dir.join("restricted/Device.ScreenLocked/metadata"), b"").unwrap();
+
+        let files = collect_source_files(SourceKind::Biome, &dir);
+
+        assert_eq!(files, vec![local_dir.join("0")]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

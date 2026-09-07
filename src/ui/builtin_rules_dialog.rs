@@ -62,7 +62,7 @@ impl BuiltinRulesDialog {
                 .and_then(pack_bundle::read_applied_manifest)
                 .map(|manifest| manifest.pack.pack_version);
             let rules = builtin::active_builtin_rules(applied_pack_dir.as_deref());
-            let (aul, evtx, journald, intrusion_log, other) = group_by_sourcetype(&rules);
+            let (aul, evtx, journald, intrusion_log, biome, other) = group_by_sourcetype(&rules);
 
             close = show_dialog_window(
                 ctx,
@@ -119,6 +119,8 @@ impl BuiltinRulesDialog {
                         render_rule_group(ui, "journald", &journald, enabled);
                         ui.separator();
                         render_rule_group(ui, "Android Intrusion Log", &intrusion_log, enabled);
+                        ui.separator();
+                        render_rule_group(ui, "Apple Biome", &biome, enabled);
                         if !other.is_empty() {
                             ui.separator();
                             render_rule_group(ui, "Other", &other, enabled);
@@ -134,21 +136,29 @@ impl BuiltinRulesDialog {
     }
 }
 
-/// Splits `rules` into AUL/EVTX/journald/intrusion_log groups by each
-/// rule's own `sourcetype` match condition, plus a catch-all fifth group
-/// for anything that doesn't declare one of those four — same reasoning as
+/// Splits `rules` into AUL/EVTX/journald/intrusion_log/biome groups by each
+/// rule's own `sourcetype` match condition, plus a catch-all sixth group
+/// for anything that doesn't declare one of those five — same reasoning as
 /// `ui::rules_reference_dialog::build_sections`: a rule this dialog
 /// doesn't recognize (e.g. from a downloaded pack with unexpected content)
 /// is still shown rather than silently dropped, since it would otherwise
 /// stay enabled in `enabled_builtin_rules` with no way to inspect or
 /// disable it from here.
-type SourcetypeGroups = (Vec<Rule>, Vec<Rule>, Vec<Rule>, Vec<Rule>, Vec<Rule>);
+type SourcetypeGroups = (
+    Vec<Rule>,
+    Vec<Rule>,
+    Vec<Rule>,
+    Vec<Rule>,
+    Vec<Rule>,
+    Vec<Rule>,
+);
 
 fn group_by_sourcetype(rules: &[Rule]) -> SourcetypeGroups {
     let mut aul = Vec::new();
     let mut evtx = Vec::new();
     let mut journald = Vec::new();
     let mut intrusion_log = Vec::new();
+    let mut biome = Vec::new();
     let mut other = Vec::new();
 
     for rule in rules {
@@ -162,11 +172,12 @@ fn group_by_sourcetype(rules: &[Rule]) -> SourcetypeGroups {
             Some("evtx") => evtx.push(rule.clone()),
             Some("journald") => journald.push(rule.clone()),
             Some("intrusion_log") => intrusion_log.push(rule.clone()),
+            Some("biome") => biome.push(rule.clone()),
             _ => other.push(rule.clone()),
         }
     }
 
-    (aul, evtx, journald, intrusion_log, other)
+    (aul, evtx, journald, intrusion_log, biome, other)
 }
 
 fn render_rule_group(
@@ -275,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn group_by_sourcetype_splits_into_the_four_known_groups() {
+    fn group_by_sourcetype_splits_into_the_five_known_groups() {
         let rules = vec![
             Rule::from_toml_str(
                 "[rule]\nname = \"aul_a\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"t\"\n",
@@ -293,9 +304,13 @@ mod tests {
                 "[rule]\nname = \"intrusion_log_a\"\n[rule.match]\nsourcetype = \"intrusion_log\"\n[rule.tag]\nvalue = \"t\"\n",
             )
             .unwrap(),
+            Rule::from_toml_str(
+                "[rule]\nname = \"biome_a\"\n[rule.match]\nsourcetype = \"biome\"\n[rule.tag]\nvalue = \"t\"\n",
+            )
+            .unwrap(),
         ];
 
-        let (aul, evtx, journald, intrusion_log, other) = group_by_sourcetype(&rules);
+        let (aul, evtx, journald, intrusion_log, biome, other) = group_by_sourcetype(&rules);
 
         assert_eq!(aul.len(), 1);
         assert_eq!(aul[0].rule.name, "aul_a");
@@ -305,6 +320,8 @@ mod tests {
         assert_eq!(journald[0].rule.name, "journald_a");
         assert_eq!(intrusion_log.len(), 1);
         assert_eq!(intrusion_log[0].rule.name, "intrusion_log_a");
+        assert_eq!(biome.len(), 1);
+        assert_eq!(biome[0].rule.name, "biome_a");
         assert!(other.is_empty());
     }
 
@@ -317,12 +334,13 @@ mod tests {
             .unwrap(),
         ];
 
-        let (aul, evtx, journald, intrusion_log, other) = group_by_sourcetype(&rules);
+        let (aul, evtx, journald, intrusion_log, biome, other) = group_by_sourcetype(&rules);
 
         assert!(aul.is_empty());
         assert!(evtx.is_empty());
         assert!(journald.is_empty());
         assert!(intrusion_log.is_empty());
+        assert!(biome.is_empty());
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].rule.name, "generic");
     }

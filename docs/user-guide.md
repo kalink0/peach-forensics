@@ -17,7 +17,7 @@ own Cancel/Close/OK button, or the small **✕** in its title bar.
 ## Loading a source
 
 1. Pick a **Sourcetype**: `AUL (.logarchive)`, `EVTX`, `journald`,
-   `Text (config-based)`, or `Android Intrusion Log`.
+   `Text (config-based)`, `Android Intrusion Log`, or `Apple Biome (SEGB)`.
 2. Click the picker button:
    - AUL expects a folder — the `.logarchive` bundle itself (it contains
      `Persist`/`Special`/`Signpost`/`HighVolume` subfolders plus `dsc`/`uuidtext`/
@@ -30,6 +30,15 @@ own Cancel/Close/OK button, or the small **✕** in its title bar.
      [supported-sources.md](supported-sources.md) for what this sourcetype
      covers and, importantly, what it doesn't (acquisition/decryption is
      outside Peach's scope).
+   - Apple Biome also expects a folder — the `.../biome/streams` directory
+     itself (searched recursively for real SEGB stream files, skipping the
+     `lock`/`metadata` housekeeping files every stream carries and
+     anything under a `tombstone` folder). Unlike AUL/Android Intrusion
+     Log, the folder is **not** one atomic source: each individual SEGB
+     file becomes its own independent source, so a bad/unsupported file
+     (a SEGB v1 file, currently unimplemented — see
+     [supported-sources.md](supported-sources.md)) only affects that one
+     file, and loading parallelizes across files like EVTX/journald.
    - EVTX/journald/Text's **"Choose ... file(s)..."** button supports
      selecting several files at once (e.g. `Application.evtx` +
      `Security.evtx` + `System.evtx` together) — the first one becomes the
@@ -264,22 +273,43 @@ matches `sourcetype = "intrusion_log"` plus `event_type`/
 rather than fields Android's own JSON carries directly — see
 [supported-sources.md](supported-sources.md) for that derivation.
 
+`rules/examples/biome_*.toml` is the Apple Biome/SEGB rule pack: 58 rules —
+one stream-presence rule per known Biome stream (~36 of them, matching
+just the normalized `stream` field, sourced from iLEAPP's `biome*.py`
+artifact modules), 16 rules forming 8 on/off pairs for binary-state
+streams (screen/keybag lock, CarPlay, Airplane Mode, cellular data, Low
+Power Mode, plugged-in, Wi-Fi — matching a stream-conditioned `state_raw`
+key resolved against the decoded payload), a handful of app/bundle-
+specific rules for streams with documented field semantics
+(`ScreenTime.AppUsage`, `App.Intent`), and one rule tagging any record
+whose `entry_state` is `deleted` (both crush's and iLEAPP's own SEGB
+viewers already surface this as their primary column — a real device
+export is overwhelmingly deleted records, so this tag makes them quickly
+filterable in or out via the **Tag** dropdown below). Every rule traces
+back to something iLEAPP or crush actually surfaces — see
+[rules-reference.md](rules-reference.md#apple-biome-rules) for the full
+table and [supported-sources.md](supported-sources.md#biome-segb) for
+which normalized keys (`stream`, `state_raw`, `bundle_id`, `wifi_ssid`,
+`timezone_name`, …) are reachable for your own custom rules even without
+a matching built-in one.
+
 Unlike other rule files (which load either automatically from the
 configured [rules directory](#settings) or by explicit selection via
-"Choose tagging rules..."), all four packs ship **embedded in the binary
+"Choose tagging rules..."), all five packs ship **embedded in the binary
 itself** (`build.rs` bundles every `rules/examples/aul_*.toml`,
-`rules/examples/evtx_*.toml`, `rules/examples/journald_*.toml`, and
-`rules/examples/intrusion_log_*.toml` file at compile time — see
-`src/tagging/builtin.rs`) and every rule in them is applied automatically
-on every load and re-tag by default — no file to locate or select, works
-the same in a release build with no repo nearby. Every rule matches its
-own `sourcetype` on its own, so an enabled AUL rule never tags an EVTX,
-journald, or intrusion_log row, or vice versa.
+`rules/examples/evtx_*.toml`, `rules/examples/journald_*.toml`,
+`rules/examples/intrusion_log_*.toml`, and `rules/examples/biome_*.toml`
+file at compile time — see `src/tagging/builtin.rs`) and every rule in
+them is applied automatically on every load and re-tag by default — no
+file to locate or select, works the same in a release build with no repo
+nearby. Every rule matches its own `sourcetype` on its own, so an enabled
+AUL rule never tags an EVTX, journald, intrusion_log, or biome row, or
+vice versa.
 
 **Built-in rules...** (next to "Choose tagging rules...", only shown when
 relevant to the current source) opens a picker listing every rule from
-whichever tier is currently active — AUL, EVTX, journald, and Android
-Intrusion Log in their own sections, each rule a checkbox (hover one for
+whichever tier is currently active — AUL, EVTX, journald, Android
+Intrusion Log, and Apple Biome in their own sections, each rule a checkbox (hover one for
 its full match condition, tag, and description), plus **Select
 all**/**Select none** per section. Like
 [Rules reference...](#tagging), this reflects a downloaded pack (see
@@ -295,7 +325,7 @@ static, browsable table generated from the packs embedded at build time
 ### Updating the built-in rule packs
 
 **File → Rule packs...** gets a curated update to the built-in
-AUL/EVTX/journald/intrusion_log packs into a running Peach without waiting
+AUL/EVTX/journald/intrusion_log/biome packs into a running Peach without waiting
 for the next app release — bundles are published separately, at
 [kalink0/peach-rules](https://github.com/kalink0/peach-rules).
 The window shows what's currently active (either the packs embedded in this build, or a
@@ -316,7 +346,7 @@ Either path leads to the same preview before anything changes: which rules are n
 modified, or removed relative to what's currently active, computed from each rule's own
 version rather than a hand-written changelog. Nothing is applied until you click
 **Apply**. A pack is always a complete, self-contained snapshot of every
-AUL/EVTX/journald/intrusion_log rule (never a partial update), verified
+AUL/EVTX/journald/intrusion_log/biome rule (never a partial update), verified
 (SHA-256 per file, checked against the bundle's
 own manifest) before it's ever trusted — a corrupted or tampered download is refused, not
 applied best-effort. After applying, Peach offers to **re-tag** the current session
@@ -353,7 +383,7 @@ Three modes:
 - **View raw/fields...** — same data as "Copy whole event as text", shown in
   a read-only, scrollable, selectable window instead of only going to the
   clipboard: `raw` (the full original record/line) and `fields` (the
-  source-specific JSON — for AUL/EVTX/journald/intrusion_log this largely
+  source-specific JSON — for AUL/EVTX/journald/intrusion_log/biome this largely
   overlaps `raw`, but for a `text_config` source it's genuinely different: `raw` is the
   literal original line, `fields` is what the regex captured out of it).
 - **Filter by...** — a submenu listing whichever of the clicked row's
@@ -438,6 +468,13 @@ language. Filters apply live as you type — there's no separate "search" button
   hostname) needs quoting right after the `=`, e.g. `process="Windows
   Explorer"` — otherwise the space splits it into two tokens. The row
   context menu's **Filter by...** entry always quotes correctly for you.
+  Apple Biome's own fields (`stream`, `entry_state`, and the Tier 2 keys
+  like `bundle_id`/`wifi_ssid` — see
+  [supported-sources.md](supported-sources.md#biome-segb)) aren't part of
+  this fixed field list, so they can't be typed directly into the search
+  box; they're reachable through tagging instead — the built-in `deleted`
+  tag (`tag=deleted`), any other built-in Biome tag, or a custom rule
+  matching on one of those keys via **Tag all matching (advanced)...**.
 - `field!=value` — negated exact match; shorthand for `NOT field=value`
   (identical result, just without the extra word).
 - `field~value` — regex match on that field instead of exact/substring.
@@ -573,10 +610,10 @@ load parallelizes:
   can briefly hold a full copy of the bulk timeline. Defaults to the OS temp
   directory.
 - **Parse threads for folder loads** — worker threads for parsing a
-  multi-file folder load (EVTX/journald/Text) in parallel; automatic by
-  default. Irrelevant for AUL, Android Intrusion Log, or a single-file
-  load — all three are always exactly one parse unit, nothing to spread
-  across threads.
+  multi-file folder load (EVTX/journald/Text/Apple Biome) in parallel;
+  automatic by default. Irrelevant for AUL, Android Intrusion Log, or a
+  single-file load — those are always exactly one parse unit, nothing to
+  spread across threads.
 - **Assume timezone for logs with no timezone of their own** — a session-wide
   fallback for a text source's own `assume_offset` (see
   [Text parser configs](#text-parser-configs) above), used whenever that
@@ -586,7 +623,7 @@ load parallelizes:
   timeline, unlike a fixed offset, which would silently apply the wrong
   number to half a case that spans a DST transition. Blank (the default)
   means every text source still needs its own `assume_offset`; never
-  applies to AUL/EVTX/journald/intrusion_log, whose own timestamps are
+  applies to AUL/EVTX/journald/intrusion_log/biome, whose own timestamps are
   already absolute.
   A source's own `assume_offset` always wins if it sets one. Also directly
   editable in the load controls once **Text (config-based)** is selected
@@ -800,9 +837,14 @@ sources behind the built-in rule packs.
 peach --add-source <path> [--add-source <path> ...] [--cleanup-dir <path> ...] [--ephemeral-session]
 ```
 
-`--add-source` pre-fills the source picker (sourcetype guessed only as
-directory-implies-AUL, never a text-format guess) — you still confirm and click
-**Load** yourself. Multiple `--add-source` flags queue up; after each load
+`--add-source` pre-fills the source picker (sourcetype guessed structurally,
+never a text-format guess): a directory ending in `.../biome/streams`
+(case-insensitive — the shape crush's own "Send Biome Streams to Peach…"
+action hands off) guesses Apple Biome, `.evtx`/`.journal` files guess
+EVTX/journald by extension, and every other directory defaults to AUL
+(Android Intrusion Log has no distinguishing shape of its own to key off,
+so it always needs picking by hand) — you still confirm and click
+**Load** yourself either way. Multiple `--add-source` flags queue up; after each load
 completes, the next one pre-fills automatically. `--cleanup-dir` deletes a
 directory when Peach closes, but only if it's actually under the OS temp
 directory — a safety net, not something to rely on for arbitrary paths.

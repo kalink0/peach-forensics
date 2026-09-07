@@ -169,6 +169,105 @@ module rather than guessed from documentation.
   (`skip_bad_records` applies here too).
 - No config-driven field-mapping, like AUL/EVTX/journald.
 
+### Biome (SEGB)
+
+A `.../biome/streams` directory — Apple's pattern-of-life logging system
+(`private/var/db/biome/streams` on macOS; the per-app `Library/Biome/streams`
+location on iOS is deliberately out of scope, see
+[docs/design/biome-rule-pack-research.md](design/biome-rule-pack-research.md)).
+Unlike AUL/Android Intrusion Log, the whole `streams/` folder is **not**
+one atomic source — each individual SEGB file (under a
+`<StreamName>/local` or `/remote` directory) becomes its own independent
+source, the same "one file = one source" model EVTX/journald use. There's
+no cross-file resolution need for Biome the way AUL's `dsc`/`uuidtext`
+lookups have, so nothing is lost by keeping every file independent, and a
+lot is gained: one bad or unsupported file only takes down that one
+source, the Source column shows each record's actual originating file
+directly, and a multi-file load runs in parallel. The whole `streams/`
+folder is still handed to Peach as one folder pick (including when
+handed off from crush's "Send Biome Streams to Peach…" action, or picked
+directly via **Choose biome/streams folder...**) and walked recursively
+to discover every candidate file — no manual restructuring needed.
+
+- Each stream lives under `<visibility>/<StreamName>/local|remote/<file>` —
+  the stream name is derived purely from this path shape (the directory
+  named after the stream, one level above a `local`/`remote` leaf), never
+  from file content, so it works identically for streams whose semantics
+  aren't documented anywhere. Every stream directory also carries `lock`/
+  `metadata` housekeeping files directly under `<StreamName>/` (normal
+  Biome runtime bookkeeping, never log data) — these are excluded
+  structurally (no `local`/`remote` parent) before ever being opened,
+  never even counted as a skipped source.
+- Each file is a **SEGB** envelope (Segmented Biome) wrapping one or more
+  records. **Only SEGB v2 is currently implemented** — the format variant
+  that has an actively-maintained upstream reference implementation
+  ([`cclgroupltd/ccl-segb`](https://github.com/cclgroupltd/ccl-segb), MIT)
+  with a hardened, tested v2 reader; SEGB v1 predates that hardening pass
+  and has no equivalent fixture/test to verify a Rust port against. A v1
+  file is detected by its signature (so it's never silently misread as v2
+  or silently skipped) and surfaces a clear "SEGB v1 not yet supported"
+  error per file instead. See
+  [docs/design/biome-rule-pack-research.md](design/biome-rule-pack-research.md)
+  for the full rationale and what would need to change to add v1 support
+  later.
+- Each record's protobuf payload is decoded schema-less (no `.proto`
+  definitions exist for these streams) — the output is a JSON object keyed
+  by field number (`"1"`, `"2"`, …), with a length-delimited field's bytes
+  exposed as UTF-8 (`utf8`), a best-effort recursive nested-message
+  reinterpretation (`nested`, only when that reparse cleanly consumes every
+  byte), and raw hex (`hex`) side by side — nothing is ever discarded in
+  favor of one interpretation. A growing set of well-known streams have
+  documented field semantics (sourced from iLEAPP's `biome*.py` artifact
+  modules) exposed as normalized tagging keys: `ScreenTime.AppUsage`,
+  `Keyboard.TokenFrequency`, `App.Intent`, `ProactiveHarvesting.Mail`/
+  `.Messages` (`bundle_id`, `token_text`, `app_id`, `mail_subject`,
+  `harvested_message_content`, …); eight structurally identical
+  binary-state streams (`Device.ScreenLocked`, `Device.KeybagLocked`,
+  `CarPlay.Connected`, `Device.Wireless.AirplaneMode`/
+  `.CellularDataEnabled`/`.WiFi`, `Device.Power.LowPowerMode`/
+  `.PluggedIn`) share one `state_raw` key (a plain 0/1, not a JSON bool —
+  the schema-less decoder never guesses varint semantics) resolving to
+  whichever field number that stream actually uses; and a handful of
+  streams with arbitrary per-record values (`Device.Wireless.WiFi`'s
+  `wifi_ssid`, `Device.TimeZone`'s `timezone_name`,
+  `Safari.Navigations`'s `safari_host`/`safari_url`,
+  `Device.Wireless.Bluetooth`'s `bluetooth_mac`/`bluetooth_name`,
+  `Messages.Read`'s `message_id`) are reachable as normalized keys for
+  ad-hoc/advanced rules even though no specific value is worth a built-in
+  rule. See [rules-reference.md](rules-reference.md#apple-biome-rules)
+  for the full, generated list.
+- `fields` also carries `entry_state` (`"written"`/`"deleted"`) and
+  `crc_valid` (bool) per record. **Deleted-but-still-readable records are
+  surfaced, not dropped** — they retain real forensic recovery value. A CRC
+  mismatch is likewise surfaced as plain data (`crc_valid = false`,
+  filterable via an ad-hoc/advanced rule) rather than treated as a parse
+  failure, since the payload is still structurally intact and readable —
+  matching the reference implementation's own behavior (it exposes the
+  check for inspection, never raises on a mismatch). Note that in a real
+  export almost every `deleted` record also fails this check (deletion
+  zeroes the payload, which no longer matches the CRC computed over its
+  original content) — a mismatch on its own says nothing beyond
+  `entry_state`; only a mismatch on a *written* record is actually
+  unusual. No built-in rule promotes this to its own tag, since neither
+  iLEAPP nor crush treats a CRC mismatch as a notable category.
+- `raw` holds the same serialized structure as `fields` (no separate
+  independent byte dump) — the original payload bytes stay fully
+  recoverable via `fields.payload_hex`/`fields.payload.<N>.hex` either way,
+  same convention as every other binary parser (AUL/EVTX).
+- `level` is always empty — SEGB carries no severity concept.
+- `message` renders actual decoded content, not just the stream name: a
+  named human summary for every stream with documented field semantics
+  (`"[Peach] Device.Power.PluggedIn: Plugged In"`,
+  `"[Peach] Device.TimeZone: US/Pacific"`), and for every other stream a
+  compact, crush-style rendering of every decoded field
+  (`"[Peach] Device.Metadata: 2: \"21D61\"  |  3: 2  |  4: \"21D61\""`) —
+  so something readable always shows even for streams nobody has named a
+  field on, matching crush's own SEGB viewer's single "Payload" column.
+  Falls back to just the stream name only when the payload decoded to
+  nothing at all.
+- No config-driven field-mapping, like AUL/EVTX/journald/Android Intrusion
+  Log.
+
 ## Explicitly out of scope
 
 USN Journal, FSEvents, encrypted containers, and automatic format detection as a

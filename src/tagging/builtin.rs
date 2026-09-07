@@ -12,6 +12,7 @@ include!(concat!(env!("OUT_DIR"), "/aul_builtin_rules.rs"));
 include!(concat!(env!("OUT_DIR"), "/evtx_builtin_rules.rs"));
 include!(concat!(env!("OUT_DIR"), "/journald_builtin_rules.rs"));
 include!(concat!(env!("OUT_DIR"), "/intrusion_log_builtin_rules.rs"));
+include!(concat!(env!("OUT_DIR"), "/biome_builtin_rules.rs"));
 
 /// The AUL pattern-of-life rule pack (`rules/examples/aul_*.toml`),
 /// embedded at compile time by `build.rs` and parsed here. Every file in
@@ -94,10 +95,35 @@ pub fn intrusion_log_rules() -> Vec<Rule> {
         .collect()
 }
 
-/// All four built-in packs together, AUL then EVTX then journald then
-/// intrusion_log — every rule the "Built-in rules..." picker
+/// The Apple Biome/SEGB tagging pack (`rules/examples/biome_*.toml`) — Tier
+/// 1 stream-presence rules (one per known Biome stream, sourced from
+/// iLEAPP's `biome*.py` artifact modules) plus a handful of Tier 2 rules
+/// that rely on `tagging::rule`'s biome-specific stream-conditioned
+/// `normalized_field` resolution. Every rule here traces back to something
+/// iLEAPP or crush actually does — `crc_valid` is surfaced as a plain
+/// field (`parsers::biome`'s decision to treat a CRC mismatch as data, not
+/// a parse failure), but deliberately has no rule of its own, since
+/// neither reference tool treats a CRC mismatch as a notable category (and
+/// in a real export, virtually every `deleted` record fails this check
+/// too — it says nothing beyond `entry_state` on its own). See
+/// `docs/design/biome-rule-pack-research.md` for the full sourcing and
+/// scope rationale (why this pack ships a curated subset of the ~90 known
+/// streams rather than the full list on day one).
+///
+/// Parsing panics on failure for the same reason as
+/// [`aul_pattern_of_life_rules`]: fixed at compile time, not user input,
+/// already covered by `tagging::rule::tests::every_shipped_rule_file_parses_and_is_versioned`.
+pub fn biome_rules() -> Vec<Rule> {
+    BIOME_RULE_TOMLS
+        .iter()
+        .map(|text| Rule::from_toml_str(text).expect("embedded biome rule TOML failed to parse"))
+        .collect()
+}
+
+/// All five built-in packs together, AUL then EVTX then journald then
+/// intrusion_log then biome — every rule the "Built-in rules..." picker
 /// (`ui::builtin_rules_dialog`) can show and `app::load_rules` can filter
-/// by name. A fresh `Vec` on every call, same as the four pack functions it
+/// by name. A fresh `Vec` on every call, same as the five pack functions it
 /// wraps — cheap enough (tens of small TOML parses) that nothing here
 /// caches it.
 pub fn all_builtin_rules() -> Vec<Rule> {
@@ -105,6 +131,7 @@ pub fn all_builtin_rules() -> Vec<Rule> {
     rules.extend(evtx_security_auditing_rules());
     rules.extend(journald_login_rules());
     rules.extend(intrusion_log_rules());
+    rules.extend(biome_rules());
     rules
 }
 
@@ -480,20 +507,133 @@ mod tests {
     }
 
     #[test]
-    fn all_builtin_rules_combines_all_four_packs() {
+    fn all_builtin_rules_combines_all_five_packs() {
         let all = all_builtin_rules();
         let aul_count = aul_pattern_of_life_rules().len();
         let evtx_count = evtx_security_auditing_rules().len();
         let journald_count = journald_login_rules().len();
         let intrusion_log_count = intrusion_log_rules().len();
+        let biome_count = biome_rules().len();
 
         assert_eq!(
             all.len(),
-            aul_count + evtx_count + journald_count + intrusion_log_count
+            aul_count + evtx_count + journald_count + intrusion_log_count + biome_count
         );
         assert!(all.iter().any(|r| r.rule.tag.value == "wifi_status"));
         assert!(all.iter().any(|r| r.rule.tag.value == "logon_success"));
         assert!(all.iter().any(|r| r.rule.tag.value == "dns_event"));
+        assert!(all.iter().any(|r| r.rule.tag.value == "screen_locked"));
+    }
+
+    #[test]
+    fn embeds_every_biome_rule_file_and_all_parse() {
+        let rules = biome_rules();
+        // Loose lower bound, same reasoning as the other packs: 58 rules
+        // shipped today (36 Tier 1 stream-presence + 5 app/bundle-specific
+        // Tier 2 + 16 state_raw on/off pairs + 1 "deleted" entry-state
+        // tag), more can be added later without this test needing an edit
+        // — see docs/design/biome-rule-pack-research.md for why this is a
+        // curated subset of the ~90 known streams, not the full list.
+        assert!(
+            rules.len() >= 25,
+            "expected at least 25 embedded biome rules, got {}",
+            rules.len()
+        );
+    }
+
+    #[test]
+    fn all_embedded_biome_rules_match_sourcetype_biome() {
+        for rule in biome_rules() {
+            assert_eq!(
+                rule.rule
+                    .match_fields
+                    .get("sourcetype")
+                    .and_then(|v| v.as_str()),
+                Some("biome"),
+                "rule {} does not match sourcetype = \"biome\"",
+                rule.rule.name
+            );
+        }
+    }
+
+    #[test]
+    fn biome_known_tag_values_are_present() {
+        let tags: Vec<String> = biome_rules()
+            .iter()
+            .map(|r| r.rule.tag.value.clone())
+            .collect();
+        for expected in [
+            "screen_locked",
+            "bluetooth_activity",
+            "app_intent_instagram",
+            "deleted",
+        ] {
+            assert!(
+                tags.iter().any(|t| t == expected),
+                "expected tag {expected} among embedded biome rules, got {tags:?}"
+            );
+        }
+    }
+
+    /// Regression guard for the same class of bug the EVTX/journald packs'
+    /// own nested-field tests guard against, and the closest analogue to
+    /// [`embedded_intrusion_log_keyguard_dismiss_auth_attempt_rule_matches_a_realistic_record`]:
+    /// a rule can parse and declare the right `sourcetype` while still
+    /// never matching real data if its match keys aren't actually resolved
+    /// against a realistic `fields` shape — exercises both the Tier 1
+    /// plain-flat-`stream`-key path and the Tier 2 stream-conditioned
+    /// `normalized_field` path end to end.
+    #[test]
+    fn embedded_biome_screen_locked_rule_matches_a_realistic_record() {
+        let rules = biome_rules();
+        let rule = rules
+            .iter()
+            .find(|r| r.rule.tag.value == "screen_locked")
+            .expect("expected an embedded rule tagging screen_locked");
+
+        let fields = serde_json::json!({"stream": "Device.ScreenLocked", "entry_state": "written"});
+        assert!(rule.matches("biome", None, None, &fields));
+
+        let wrong_stream = serde_json::json!({"stream": "Device.Wireless.Bluetooth"});
+        assert!(!rule.matches("biome", None, None, &wrong_stream));
+    }
+
+    #[test]
+    fn embedded_biome_app_intent_instagram_rule_matches_a_realistic_record() {
+        let rules = biome_rules();
+        let rule = rules
+            .iter()
+            .find(|r| r.rule.tag.value == "app_intent_instagram")
+            .expect("expected an embedded rule tagging app_intent_instagram");
+
+        let matching = serde_json::json!({
+            "stream": "App.Intent",
+            "payload": {"2": {"utf8": "com.instagram.android", "nested": null, "hex": "..."}}
+        });
+        assert!(rule.matches("biome", None, None, &matching));
+
+        let other_app = serde_json::json!({
+            "stream": "App.Intent",
+            "payload": {"2": {"utf8": "com.whatsapp", "nested": null, "hex": "..."}}
+        });
+        assert!(!rule.matches("biome", None, None, &other_app));
+    }
+
+    #[test]
+    fn embedded_biome_deleted_rule_matches_any_stream_with_that_entry_state() {
+        let rules = biome_rules();
+        let rule = rules
+            .iter()
+            .find(|r| r.rule.tag.value == "deleted")
+            .expect("expected an embedded rule tagging deleted");
+
+        let deleted =
+            serde_json::json!({"stream": "Device.ScreenLocked", "entry_state": "deleted"});
+        assert!(rule.matches("biome", None, None, &deleted));
+
+        let written =
+            serde_json::json!({"stream": "Device.ScreenLocked", "entry_state": "written"});
+        assert!(!rule.matches("biome", None, None, &written));
     }
 
     #[test]
