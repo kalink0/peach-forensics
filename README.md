@@ -52,8 +52,17 @@ scoop bucket add forensics https://github.com/kalink0/scoop-forensics
 scoop install forensics/peach-forensics
 ```
 
+**Windows (winget)** — pending initial review, not yet published.
+
 No native package for Linux yet — grab the binary from
 [Releases](https://github.com/kalink0/peach-forensics/releases).
+
+### Windows runtime requirement
+
+Needs the [Microsoft Visual C++ Redistributable 2015-2022
+(x64)](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist)
+installed (bundled DuckDB/SQLite link against it) — install it manually if
+peach fails to start with a missing DLL error.
 
 ## Building and running
 
