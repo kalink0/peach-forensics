@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -34,11 +33,14 @@ use walkdir::WalkDir;
 /// and `/private/var/db/uuidtext` for reading a *live* macOS system: same
 /// split, just parameterized on an arbitrary root instead of an absolute
 /// live-system path, so it works against an offline extraction too.
+///
+/// Unlike before 0.7, this provider does no uuidtext/dsc caching of its own —
+/// `FileProvider` dropped the `cached_*`/`update_*` methods that hook used to
+/// exist for, in favor of the crate's own pluggable `StringCache`. See
+/// `super::bounded_cache` for where that caching now lives.
 pub struct RawExtractionProvider {
     diagnostics_root: PathBuf,
     uuidtext_root: PathBuf,
-    uuidtext_cache: HashMap<String, UUIDText>,
-    dsc_cache: HashMap<String, SharedCacheStrings>,
 }
 
 impl RawExtractionProvider {
@@ -46,8 +48,6 @@ impl RawExtractionProvider {
         Self {
             diagnostics_root,
             uuidtext_root,
-            uuidtext_cache: HashMap::new(),
-            dsc_cache: HashMap::new(),
         }
     }
 }
@@ -67,8 +67,8 @@ impl LocalSourceFile {
 }
 
 impl SourceFile for LocalSourceFile {
-    fn reader(&mut self) -> Box<&mut dyn Read> {
-        Box::new(&mut self.reader)
+    fn reader(&mut self) -> impl Read {
+        &mut self.reader
     }
 
     fn source_path(&self) -> &str {
@@ -76,20 +76,13 @@ impl SourceFile for LocalSourceFile {
     }
 }
 
-fn walk_matching(
-    root: &Path,
-    wanted: LogFileType,
-) -> Box<dyn Iterator<Item = Box<dyn SourceFile>>> {
-    Box::new(
-        WalkDir::new(root)
-            .sort_by(|a, b| a.file_name().cmp(b.file_name()))
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-            .filter(move |entry| LogFileType::from(entry.path()) == wanted)
-            .filter_map(|entry| {
-                Some(Box::new(LocalSourceFile::open(entry.path()).ok()?) as Box<dyn SourceFile>)
-            }),
-    )
+fn walk_matching(root: &Path, wanted: LogFileType) -> impl Iterator<Item = LocalSourceFile> {
+    WalkDir::new(root)
+        .sort_by(|a, b| a.file_name().cmp(b.file_name()))
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(move |entry| LogFileType::from(entry.path()) == wanted)
+        .filter_map(|entry| LocalSourceFile::open(entry.path()).ok())
 }
 
 /// UUIDs may arrive missing a leading `0` (or two) — same normalization
@@ -107,38 +100,12 @@ fn normalize_uuid(uuid: &str) -> Result<String, Error> {
     }
 }
 
-/// Evicts one entry that isn't `keep_a` or `keep_b` once `cache` grows past
-/// `capacity`, so both `update_uuid`/`update_dsc` stay a bounded cache
-/// instead of growing forever — deliberately not the eviction loop
-/// `LogarchiveProvider::update_dsc` uses upstream (`while len() > cap { if
-/// let Some(key) = keys().next() { if key == a || key == b { continue } ...
-/// } }`): if the very first key iterated is always the protected one, that
-/// `continue` never removes anything and never terminates. `find` here
-/// looks past the protected keys instead of retrying the same one.
-fn evict_one_unprotected<V>(
-    cache: &mut HashMap<String, V>,
-    capacity: usize,
-    keep_a: &str,
-    keep_b: &str,
-) {
-    if cache.len() <= capacity {
-        return;
-    }
-    if let Some(key) = cache
-        .keys()
-        .find(|key| key.as_str() != keep_a && key.as_str() != keep_b)
-        .cloned()
-    {
-        cache.remove(&key);
-    }
-}
-
 impl FileProvider for RawExtractionProvider {
-    fn tracev3_files(&self) -> Box<dyn Iterator<Item = Box<dyn SourceFile>>> {
+    fn tracev3_files(&self) -> impl Iterator<Item = impl SourceFile> {
         walk_matching(&self.diagnostics_root, LogFileType::TraceV3)
     }
 
-    fn uuidtext_files(&self) -> Box<dyn Iterator<Item = Box<dyn SourceFile>>> {
+    fn uuidtext_files(&self) -> impl Iterator<Item = impl SourceFile> {
         walk_matching(&self.uuidtext_root, LogFileType::UUIDText)
     }
 
@@ -161,19 +128,7 @@ impl FileProvider for RawExtractionProvider {
             })
     }
 
-    fn cached_uuidtext(&self, uuid: &str) -> Option<&UUIDText> {
-        self.uuidtext_cache.get(uuid)
-    }
-
-    fn update_uuid(&mut self, uuid: &str, uuid2: &str) {
-        let Ok(result) = self.read_uuidtext(uuid) else {
-            return;
-        };
-        evict_one_unprotected(&mut self.uuidtext_cache, 30, uuid, uuid2);
-        self.uuidtext_cache.insert(uuid.to_string(), result);
-    }
-
-    fn dsc_files(&self) -> Box<dyn Iterator<Item = Box<dyn SourceFile>>> {
+    fn dsc_files(&self) -> impl Iterator<Item = impl SourceFile> {
         walk_matching(&self.uuidtext_root, LogFileType::Dsc)
     }
 
@@ -196,19 +151,7 @@ impl FileProvider for RawExtractionProvider {
             })
     }
 
-    fn cached_dsc(&self, uuid: &str) -> Option<&SharedCacheStrings> {
-        self.dsc_cache.get(uuid)
-    }
-
-    fn update_dsc(&mut self, uuid: &str, uuid2: &str) {
-        let Ok(result) = self.read_dsc_uuid(uuid) else {
-            return;
-        };
-        evict_one_unprotected(&mut self.dsc_cache, 2, uuid, uuid2);
-        self.dsc_cache.insert(uuid.to_string(), result);
-    }
-
-    fn timesync_files(&self) -> Box<dyn Iterator<Item = Box<dyn SourceFile>>> {
+    fn timesync_files(&self) -> impl Iterator<Item = impl SourceFile> {
         walk_matching(&self.diagnostics_root, LogFileType::Timesync)
     }
 }
@@ -284,29 +227,5 @@ mod tests {
             format!("00{}", "A".repeat(30))
         );
         assert!(normalize_uuid("too-short").is_err());
-    }
-
-    #[test]
-    fn evict_one_unprotected_never_removes_a_protected_key_and_terminates() {
-        let mut cache: HashMap<String, ()> = HashMap::new();
-        cache.insert("keep-a".to_string(), ());
-        cache.insert("keep-b".to_string(), ());
-        cache.insert("evictable".to_string(), ());
-
-        evict_one_unprotected(&mut cache, 2, "keep-a", "keep-b");
-
-        assert_eq!(cache.len(), 2);
-        assert!(cache.contains_key("keep-a"));
-        assert!(cache.contains_key("keep-b"));
-    }
-
-    #[test]
-    fn evict_one_unprotected_is_a_no_op_under_capacity() {
-        let mut cache: HashMap<String, ()> = HashMap::new();
-        cache.insert("a".to_string(), ());
-
-        evict_one_unprotected(&mut cache, 2, "x", "y");
-
-        assert_eq!(cache.len(), 1);
     }
 }

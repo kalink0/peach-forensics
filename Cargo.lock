@@ -2827,30 +2827,24 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "lz4_flex"
-version = "0.13.1"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
+checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
 dependencies = [
  "twox-hash",
 ]
 
 [[package]]
-name = "lz4_flex"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
-
-[[package]]
 name = "macos-unifiedlogs"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "952059912c280ad2433c572e6b9de72c17cb63c5df6259acdce77743ebbf6e64"
+checksum = "f7b182e0d0eaa7e4b92df8f67a565981c5533b4658b6f41719ed311ec3d6467d"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "byteorder",
  "chrono",
  "log",
- "lz4_flex 0.13.1",
+ "lz4_flex",
  "nom",
  "plist",
  "regex",
@@ -3503,7 +3497,7 @@ dependencies = [
  "egui_extras",
  "evtx",
  "jiff",
- "lz4_flex 0.14.0",
+ "lz4_flex",
  "macos-unifiedlogs",
  "pollster",
  "rayon",

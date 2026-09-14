@@ -2,15 +2,18 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Utc};
+use macos_unifiedlogs::cache::MemoryStringCache;
 use macos_unifiedlogs::filesystem::LogarchiveProvider;
 use macos_unifiedlogs::parser::{build_log, collect_timesync, parse_log};
-use macos_unifiedlogs::traits::FileProvider;
+use macos_unifiedlogs::traits::{FileProvider, SourceFile};
 use macos_unifiedlogs::unified_log::LogData;
 
 use crate::model::log_entry::ParsedRecord;
 use crate::parsers::{LogParser, ParserConfig, SkippedRecord, StreamingProgress};
 
+mod bounded_cache;
 mod raw_extraction_provider;
+use bounded_cache::BoundedCache;
 use raw_extraction_provider::RawExtractionProvider;
 
 /// Wraps the `macos-unifiedlogs` crate to parse Apple Unified Log
@@ -125,72 +128,14 @@ impl LogParser for AulParser {
             );
         }
 
-        let mut provider = select_provider(path)?;
-        let timesync_data =
-            collect_timesync(provider.as_dyn()).context("failed to read AUL timesync data")?;
-
-        let tracev3_files: Vec<_> = provider.as_dyn().tracev3_files().collect();
-        if tracev3_files.is_empty() {
-            bail!("no .tracev3 files found under {}", path.display());
-        }
-
-        let mut collected: Vec<(f64, String, usize, LogData)> = Vec::new();
-        let mut skipped = Vec::new();
-        for mut file in tracev3_files {
-            let source_path = file.source_path().to_string();
-            // A malformed `.tracev3` file within the archive — every other
-            // file in the `.logarchive` is independently readable, so skip
-            // mode just moves on to the next one rather than losing
-            // everything in the whole directory over one bad sub-file.
-            let unified_log_data = match parse_log(file.reader(), &source_path)
-                .with_context(|| format!("failed to parse tracev3 file {source_path}"))
-            {
-                Ok(data) => data,
-                Err(err) if skip_bad_records => {
-                    skipped.push(SkippedRecord {
-                        location: source_path.clone(),
-                        reason: format!("{err:#}"),
-                    });
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-
-            let (log_data, _unresolved_oversize) = build_log(
-                &unified_log_data,
-                provider.as_dyn_mut(),
-                &timesync_data,
-                false,
-            );
-            for (index, entry) in log_data.into_iter().enumerate() {
-                collected.push((entry.time, source_path.clone(), index, entry));
+        match select_provider(path)? {
+            AulProvider::Bundle(provider) => {
+                parse_with_provider(provider, path, sink, progress, skip_bad_records)
             }
-            let file_bytes = std::fs::metadata(&source_path)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
-            (progress.on_bytes)(file_bytes);
-        }
-
-        (progress.on_total_known)(collected.len());
-        for entry in order_entries(collected) {
-            // Each `entry` already came out of a successfully-parsed
-            // tracev3 file above — a failure here is `to_parsed_record`'s
-            // own JSON-serialization step on one already-resolved entry,
-            // fully independent of every other entry, so it's always safe
-            // to skip and continue (unlike journald's structural case).
-            // `entry.time` is captured before the entry is consumed, since
-            // `to_parsed_record` takes it by value.
-            let time = entry.time;
-            match to_parsed_record(entry) {
-                Ok(record) => sink(record)?,
-                Err(err) if skip_bad_records => skipped.push(SkippedRecord {
-                    location: format!("entry at raw timestamp {time}"),
-                    reason: format!("{err:#}"),
-                }),
-                Err(err) => return Err(err),
+            AulProvider::RawExtraction(provider) => {
+                parse_with_provider(provider, path, sink, progress, skip_bad_records)
             }
         }
-        Ok(skipped)
     }
 }
 
@@ -207,20 +152,94 @@ enum AulProvider {
     RawExtraction(RawExtractionProvider),
 }
 
-impl AulProvider {
-    fn as_dyn(&self) -> &dyn FileProvider {
-        match self {
-            AulProvider::Bundle(provider) => provider,
-            AulProvider::RawExtraction(provider) => provider,
-        }
+/// Shared body of [`AulParser::parse_streaming`], generic over which concrete
+/// [`AulProvider`] variant is in play.
+///
+/// `macos-unifiedlogs` 0.7 made `FileProvider`/`SourceFile` return `impl
+/// Trait` from their iterator/reader methods, which means neither trait is
+/// object-safe any more — the `&dyn FileProvider` indirection this used
+/// before (`AulProvider::as_dyn`/`as_dyn_mut`) no longer compiles. Generics
+/// are the replacement: this function gets monomorphized once per concrete
+/// provider type instead, which is also why `provider` no longer needs to be
+/// `&mut` — `build_log` takes it by shared reference now that per-provider
+/// uuidtext/dsc caching has moved to the `cache` parameter below.
+fn parse_with_provider(
+    provider: impl FileProvider,
+    path: &Path,
+    sink: &mut dyn FnMut(ParsedRecord) -> anyhow::Result<()>,
+    progress: &mut StreamingProgress,
+    skip_bad_records: bool,
+) -> anyhow::Result<Vec<SkippedRecord>> {
+    let timesync_data = collect_timesync(&provider).context("failed to read AUL timesync data")?;
+
+    let tracev3_files: Vec<_> = provider.tracev3_files().collect();
+    if tracev3_files.is_empty() {
+        bail!("no .tracev3 files found under {}", path.display());
     }
 
-    fn as_dyn_mut(&mut self) -> &mut dyn FileProvider {
-        match self {
-            AulProvider::Bundle(provider) => provider,
-            AulProvider::RawExtraction(provider) => provider,
+    // Bounded rather than `MemoryStringCache::default()`'s plain unbounded
+    // `HashMap` — `dsc` (shared-cache-strings) files alone run 30-150MB
+    // each, and letting this grow without a cap across a whole
+    // `.logarchive` parse is exactly the failure mode behind a real earlier
+    // AUL memory-blowup incident (see this module's doc comment). Caps
+    // match what this module's own hand-rolled eviction used before 0.7
+    // removed the `FileProvider::update_uuid`/`update_dsc` methods that
+    // eviction hooked into.
+    let cache = MemoryStringCache::new(BoundedCache::new(30), BoundedCache::new(2));
+
+    let mut collected: Vec<(f64, String, usize, LogData)> = Vec::new();
+    let mut skipped = Vec::new();
+    for mut file in tracev3_files {
+        let source_path = file.source_path().to_string();
+        // A malformed `.tracev3` file within the archive — every other
+        // file in the `.logarchive` is independently readable, so skip
+        // mode just moves on to the next one rather than losing
+        // everything in the whole directory over one bad sub-file.
+        let unified_log_data = match parse_log(file.reader(), &source_path)
+            .with_context(|| format!("failed to parse tracev3 file {source_path}"))
+        {
+            Ok(data) => data,
+            Err(err) if skip_bad_records => {
+                skipped.push(SkippedRecord {
+                    location: source_path.clone(),
+                    reason: format!("{err:#}"),
+                });
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+
+        let (log_data, _unresolved_oversize) =
+            build_log(&unified_log_data, &provider, &cache, &timesync_data, false);
+        for (index, entry) in log_data.into_iter().enumerate() {
+            collected.push((entry.time, source_path.clone(), index, entry));
+        }
+        let file_bytes = std::fs::metadata(&source_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        (progress.on_bytes)(file_bytes);
+    }
+
+    (progress.on_total_known)(collected.len());
+    for entry in order_entries(collected) {
+        // Each `entry` already came out of a successfully-parsed
+        // tracev3 file above — a failure here is `to_parsed_record`'s
+        // own JSON-serialization step on one already-resolved entry,
+        // fully independent of every other entry, so it's always safe
+        // to skip and continue (unlike journald's structural case).
+        // `entry.time` is captured before the entry is consumed, since
+        // `to_parsed_record` takes it by value.
+        let time = entry.time;
+        match to_parsed_record(entry) {
+            Ok(record) => sink(record)?,
+            Err(err) if skip_bad_records => skipped.push(SkippedRecord {
+                location: format!("entry at raw timestamp {time}"),
+                reason: format!("{err:#}"),
+            }),
+            Err(err) => return Err(err),
         }
     }
+    Ok(skipped)
 }
 
 /// Names of the `diagnostics` subfolders that hold `.tracev3` files.
