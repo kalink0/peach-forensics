@@ -2,7 +2,7 @@
 
 All notable changes to Peach will be documented in this file.
 
-## Unreleased
+## v0.8.0 - 2026-09-18
 
 ### New Features
 
