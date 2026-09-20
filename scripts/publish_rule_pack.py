@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Builds peach-rules-v{N}.zip — the downloadable rule-pack bundle described
 in docs/design/rule-pack-updates.md — from the current rules/examples/*.toml
-files (AUL + EVTX + journald + intrusion_log together; every bundle is a
-full snapshot of all four families, never a delta).
+files (AUL + EVTX + journald + intrusion_log + biome together; every bundle
+is a full snapshot of all five families, never a delta). Peach replaces its
+embedded rules wholesale with an applied bundle's, so a family left out here
+would silently vanish for everyone who applies the pack — which is why
+`rule_files` refuses to build when a rule file belongs to no listed family.
 
 Published from a separate repo, kalink0/peach-rules — not this one — so a
 rule-pack release never gets mixed into peach-forensics' own app-release
@@ -47,20 +50,30 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RULES_DIR = REPO_ROOT / "rules" / "examples"
 DIST_DIR = REPO_ROOT / "dist"
 
-FAMILY_PREFIXES = ("aul_", "evtx_", "journald_", "intrusion_log_")
+FAMILY_PREFIXES = ("aul_", "evtx_", "journald_", "intrusion_log_", "biome_")
 TAG_PATTERN = re.compile(r"^peach-rules-v(\d+)$")
 
 
 def rule_files() -> list[Path]:
-    """Every AUL/EVTX/journald/intrusion_log rule file — sorted for a
+    """Every rule file of every family in [`FAMILY_PREFIXES`] — sorted for a
     deterministic zip (same inputs, same bundle, every time), matching the
-    same principle build.rs already applies to the embedded packs."""
-    files = [
-        path
-        for path in RULES_DIR.glob("*.toml")
-        if path.name.startswith(FAMILY_PREFIXES)
-    ]
-    files.sort(key=lambda p: p.name)
+    same principle build.rs already applies to the embedded packs.
+
+    Refuses to build if any `*.toml` under `rules/examples/` belongs to none
+    of the families: a bundle replaces Peach's embedded rules entirely, so a
+    new family added to the app but not to `FAMILY_PREFIXES` would be dropped
+    from every machine that applies the pack, with no error anywhere."""
+    all_files = sorted(RULES_DIR.glob("*.toml"), key=lambda p: p.name)
+    unbundled = [p.name for p in all_files if not p.name.startswith(FAMILY_PREFIXES)]
+    if unbundled:
+        raise SystemExit(
+            f"{len(unbundled)} rule file(s) in {RULES_DIR} belong to no family in "
+            f"FAMILY_PREFIXES {FAMILY_PREFIXES} and would be missing from the "
+            f"bundle (and, once applied, from Peach): {', '.join(unbundled[:5])}"
+            + (" ..." if len(unbundled) > 5 else "")
+            + " — add the family to FAMILY_PREFIXES."
+        )
+    files = list(all_files)
     if not files:
         raise SystemExit(f"no rule files found under {RULES_DIR}")
     return files

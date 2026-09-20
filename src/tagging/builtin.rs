@@ -517,6 +517,43 @@ mod tests {
         assert!(!rule.matches("intrusion_log", None, None, &wrong_tag));
     }
 
+    /// A downloaded rule pack replaces the embedded rules wholesale
+    /// (`active_builtin_rules`), so a family that `scripts/publish_rule_pack.py`
+    /// doesn't bundle would vanish for everyone who applies a pack. Every
+    /// shipped rule file must start with one of the script's
+    /// `FAMILY_PREFIXES` — this is what caught `biome_` missing from it.
+    #[test]
+    fn every_shipped_rule_file_belongs_to_a_family_the_rule_pack_script_bundles() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let script = std::fs::read_to_string(root.join("scripts/publish_rule_pack.py")).unwrap();
+        let tuple = script
+            .split("FAMILY_PREFIXES = (")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .expect("FAMILY_PREFIXES tuple not found in publish_rule_pack.py");
+        let prefixes: Vec<&str> = tuple
+            .split('"')
+            .enumerate()
+            .filter_map(|(i, part)| (i % 2 == 1).then_some(part))
+            .collect();
+        assert!(
+            prefixes.len() >= 5,
+            "expected the five rule families, parsed {prefixes:?}"
+        );
+
+        let mut unbundled = Vec::new();
+        for entry in std::fs::read_dir(root.join("rules/examples")).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            if name.ends_with(".toml") && !prefixes.iter().any(|p| name.starts_with(p)) {
+                unbundled.push(name);
+            }
+        }
+        assert!(
+            unbundled.is_empty(),
+            "rule files the pack script would leave out of a bundle: {unbundled:?}"
+        );
+    }
+
     #[test]
     fn all_builtin_rules_combines_all_five_packs() {
         let all = all_builtin_rules();

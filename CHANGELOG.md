@@ -2,7 +2,7 @@
 
 All notable changes to Peach will be documented in this file.
 
-## Unreleased
+## v0.9.0 - 2026-09-20
 
 ### New Features
 
@@ -22,6 +22,7 @@ All notable changes to Peach will be documented in this file.
 
 ### Bug Fixes
 
+- **Rule pack bundles left out the Apple Biome rules** — `scripts/publish_rule_pack.py` only bundled AUL, EVTX, journald and Android Intrusion Log rules. Because an applied pack replaces Peach's embedded rules wholesale, applying a pack built from a checkout with Biome would have removed all 58 Biome rules. Biome is bundled now, and the script refuses to build when a rule file belongs to no known family; a test checks the same for every shipped rule file. The packs published so far (v1-v3) predate Biome and are unaffected.
 - **EVTX logon type in messages** — the built-in 4624/4625/4634 messages showed a literal `{LogonType}` on real records, because the field arrives as a number and the template lookup only accepted strings. It now renders (`logon type 2`).
 
 ## v0.8.0 - 2026-09-18
