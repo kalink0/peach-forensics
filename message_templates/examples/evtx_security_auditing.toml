@@ -57,12 +57,12 @@ message = "An attempt was made to reset an account's password. Target: {TargetUs
 [[template]]
 provider = "Microsoft-Windows-Security-Auditing"
 event_id = 4728
-message = "A member was added to a security-enabled global group. Member: {MemberName}, group: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName}"
+message = "A member was added to a security-enabled global group. Member: {MemberName} ({MemberSid}), group: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName}"
 
 [[template]]
 provider = "Microsoft-Windows-Security-Auditing"
 event_id = 4732
-message = "A member was added to a security-enabled local group. Member: {MemberName}, group: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName}"
+message = "A member was added to a security-enabled local group. Member: {MemberName} ({MemberSid}), group: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName}"
 
 [[template]]
 provider = "Microsoft-Windows-Security-Auditing"
@@ -77,9 +77,34 @@ message = "A user account was locked out. Account: {TargetUserName} (domain {Tar
 [[template]]
 provider = "Microsoft-Windows-Security-Auditing"
 event_id = 4756
-message = "A member was added to a security-enabled universal group. Member: {MemberName}, group: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName}"
+message = "A member was added to a security-enabled universal group. Member: {MemberName} ({MemberSid}), group: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName}"
 
 [[template]]
 provider = "Microsoft-Windows-Security-Auditing"
 event_id = 4776
 message = "The domain controller attempted to validate credentials for an account. Account: {TargetUserName}, workstation: {Workstation}, package: {PackageName}, status: {Status}"
+
+# Removal counterparts of 4728/4732/4756 and the user-initiated logoff. Field
+# names cross-checked against real records: `MemberName` is "-" for local
+# accounts and the member is identified by `MemberSid`, which is why every
+# group template carries both.
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4647
+message = "User initiated logoff. Account: {TargetUserName} (domain {TargetDomainName}), logon ID {TargetLogonId}"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4729
+message = "A member was removed from a security-enabled global group. Member: {MemberName} ({MemberSid}), group: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName}"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4733
+message = "A member was removed from a security-enabled local group. Member: {MemberName} ({MemberSid}), group: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName}"
+
+[[template]]
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4757
+message = "A member was removed from a security-enabled universal group. Member: {MemberName} ({MemberSid}), group: {TargetUserName} (domain {TargetDomainName}), by: {SubjectUserName}"

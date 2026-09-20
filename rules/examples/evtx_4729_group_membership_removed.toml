@@ -1,0 +1,22 @@
+# EVTX Security-Auditing 4729, "A member was removed from a
+# security-enabled global group" - the removal counterpart of 4728. Same
+# tag as the additions (group_membership_change): a group change in either
+# direction is the signal, and the direction is in the message and event
+# ID. Microsoft notes 4729 and 4757 are generated only for domain groups.
+#
+# https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/audit-security-group-management
+#
+# Checked against a real record: MemberSid identifies the member,
+# MemberName is "-" for local accounts.
+
+[rule]
+name = "evtx_group_membership_removed_global"
+description = "Member removed from a security-enabled global group (Security-Auditing 4729)"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4729
+
+[rule.tag]
+value = "group_membership_change"

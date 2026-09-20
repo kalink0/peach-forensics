@@ -162,8 +162,8 @@ fn template_rendered_message(data: &serde_json::Value) -> Option<String> {
     let event_id = data
         .pointer("/Event/System/EventID")
         .and_then(|v| v.as_u64())? as u32;
-    let event_data = data.pointer("/Event/EventData");
-    evtx_templates::render_for_event(provider, event_id, event_data)
+    let payload = data.get("Event").and_then(evtx_templates::event_payload);
+    evtx_templates::render_for_event(provider, event_id, payload)
 }
 
 /// EVTX timestamps are already absolute (UTC) — unlike the text parser,

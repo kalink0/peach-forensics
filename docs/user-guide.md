@@ -194,7 +194,39 @@ sourcetype = "aul"
 message_contains = ["Screen did lock", "screen is unlocked"]
 ```
 
-`rules/examples/aul_*.toml` is a pattern-of-life rule pack for AUL (39 rule
+`subsystem_prefix` does the same for the normalized `subsystem` (AUL's
+subsystem, EVTX's provider name): a string or array of strings, matching if
+the subsystem *starts with* any of them — exact case, anchored at the start,
+so `com.apple.corenavigation` does not match `com.apple.Navigation`. Use it
+for a family of subsystems that differ only by suffix, where an exact match
+would need one entry per member:
+
+```toml
+[rule.match]
+sourcetype = "aul"
+subsystem_prefix = ["com.apple.Navigation", "com.apple.navigation.VirtualGarage"]
+```
+
+An empty prefix never matches (it would otherwise match every entry that has
+a subsystem at all).
+
+`event_data` matches fields of an EVTX record's payload — its `EventData`, or
+the single `UserData` element for providers that log there (Terminal Services
+does) — with an inline table whose pairs must all be equal:
+
+```toml
+[rule.match]
+sourcetype = "evtx"
+event_id = 4624
+event_data = { LogonType = 10 }
+```
+
+Values compare by type, so the TOML has to use the type the record carries:
+`LogonType` is a number (`10`), `Address` a string (`"LOCAL"`). Use it together
+with `event_id`/`provider`, since field names repeat across events. An empty
+table never matches, and it never matches a non-EVTX entry.
+
+`rules/examples/aul_*.toml` is a pattern-of-life rule pack for AUL (41 rule
 files covering human presence/handling, communication and input, application
 activity, connectivity, device state and power, media/audio/camera, motion
 and vehicle, and emergency SOS) — most predicates are sourced from "Apple
@@ -212,7 +244,7 @@ is covered directly from Unified Log predicates.
 
 `rules/examples/evtx_*.toml` is the tagging companion to the built-in EVTX
 message templates (see [field-extraction.md](field-extraction.md#message-templates-evtx)):
-41 rule files covering Security-Auditing event IDs those templates render or
+59 rule files covering Security-Auditing event IDs those templates render or
 otherwise high forensic value — logon/logoff (4624/4625/4634/4648/4672),
 process creation and exit (4688/4689), service install (4697, and 7045 from
 the System log, not gated behind a special audit subcategory the way 4697
@@ -220,19 +252,32 @@ is), service start type changed (7040, defense-evasion indicator), account
 lifecycle
 (created/enabled/disabled/deleted/locked/unlocked: 4720/4722/4725/4726/4740/4767),
 self vs. admin password changes (4723/4724), group management
-(4728/4732/4756), credential validation (4776), Kerberos TGT/service ticket
+(4728/4732/4756 added, 4729/4733/4757 removed), credential validation (4776), Kerberos TGT/service ticket
 requests and replay attacks (4768/4769/4649 — domain-controller-only, base
 signal for Kerberoasting/Golden Ticket detection), SMB share connections and
 access checks (5140/5145), object access attempts (4663, requires a SACL),
 scheduled task creation/deletion (4698/4699), RDP session reconnect/
-disconnect (4778/4779), PowerShell Script Block Logging and Module Logging
+disconnect (4778/4779), Remote Desktop / Terminal Services (below),
+PowerShell Script Block Logging and Module Logging
 (4104/4103, a different channel/provider than the rest of this pack — see
 those rule files' header comments), system time changes (4616, an
 anti-forensic/timestomping indicator, always logged regardless of audit
-policy), boot/shutdown (6005/6008/41/1074), and the audit log being cleared
-(1102) — cross-checked against Microsoft's official Security Auditing event
+policy), boot/shutdown/sleep (6005/6008/41/1074, and the kernel's own
+Kernel-General 12/13 and Kernel-Power 109/42), user-initiated logoff (4647),
+and the audit log being cleared (1102) — cross-checked against Microsoft's official Security Auditing event
 reference (or, for 4104/4103/7045/boot-shutdown, other primary sources — see
 each rule file's header comment for its specific citation).
+Remote Desktop / Terminal Services has its own set: the RDP network
+connection (`RemoteConnectionManager` 1149, `RdpCoreTS` 131), the session
+lifecycle (`LocalSessionManager` 21 logon, 22 shell start, 23 logoff,
+24 disconnect, 25 reconnect — the last two share their tags with 4779/4778),
+outbound RDP from this machine (`ClientActiveXCore` 1024), and RDP logons and
+failed logons by logon type (4624/4625 with `LogonType` 10). Two cautions
+that are also in the rule files: `LocalSessionManager` events cover console
+sessions too (`Address` is `LOCAL`), and 1149 is logged for a successful
+network connection, before credentials are entered, so it does not by itself
+show a logon.
+
 `event_id`/`provider` are normalized match keys resolved against EVTX's
 actual nested `Event.System.*` JSON shape, not a flat top-level lookup —
 see `tagging::rule::normalized_field`'s doc comment if writing a custom
@@ -308,11 +353,24 @@ vice versa.
 
 **Built-in rules...** (next to "Choose tagging rules...", only shown when
 relevant to the current source) opens a picker listing every rule from
-whichever tier is currently active — AUL, EVTX, journald, Android
-Intrusion Log, and Apple Biome in their own sections, each rule a checkbox (hover one for
-its full match condition, tag, and description), plus **Select
-all**/**Select none** per section. Like
-[Rules reference...](#tagging), this reflects a downloaded pack (see
+whichever tier is currently active in one table — a checkbox to enable it,
+its source (AUL, EVTX, journald, Android Intrusion Log, Apple Biome), name,
+tag and description; hover a row for its full match condition. Click a
+column header to sort by it (click again to reverse). To find rules:
+
+- **Search** looks through each rule's name, tag, description, source and
+  its complete match condition — every phrase it matches, so searching for a
+  message fragment finds the rule that tags it. Several words must all be
+  present.
+- **Source** is a dropdown in the same shape as the timeline's filters:
+  a checkbox and a count per source, **only** to keep just that one, and
+  **Show all**.
+- **Show:** All / Enabled / Disabled.
+- **Enable shown** / **Disable shown** act on exactly the rules the table
+  lists at that moment, so after a search they enable or disable just the
+  matches; **Reset filters** clears the search and the filters again.
+
+Like [Rules reference...](#tagging), this reflects a downloaded pack (see
 "Updating the built-in rule packs" below) if one is currently applied,
 not just the version embedded in this build. This is exact, per-rule
 control, not just a whole-pack on/off switch: enable only the three or four
@@ -837,8 +895,13 @@ formatted for reading rather than for enabling/disabling — reflects
 whichever tier is currently active (built-in baseline or a downloaded
 pack, see "Updating the built-in rule packs" under Tagging), works fully
 offline either way (no browser, no network, nothing extra to carry to an
-airgapped analysis machine). Has its own filter field for jumping to a
-rule/tag by name instead of scrolling, plus an **Open on GitHub...**
+airgapped analysis machine). Like the picker it is one table for every rule,
+with the same **Search** (name, tag, description, source and the complete
+match condition), **Source** dropdown and sortable **Source/Rule/Tag**
+column headers — but read-only. Every row is one line, with a short summary
+in the Match column; click a rule to see its complete match condition and
+description in the panel below the table (the tooltip has the full match
+condition too). Also has an **Open on GitHub...**
 button for the same table rendered on GitHub — only enabled while the
 built-in baseline is active, since a downloaded pack has no single
 matching page there.

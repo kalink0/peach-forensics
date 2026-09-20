@@ -73,12 +73,14 @@ Single `.evtx` file. Wraps the `evtx` crate.
   machine's message-resource DLLs/templates, which this crate deliberately
   doesn't ship or emulate.
   - When `RenderingInfo.Message` is absent, Peach falls back to a built-in
-    message template for a curated set of common Security-auditing events
-    (logons, process creation, service installs, account/group management,
-    audit log clearing, PowerShell ScriptBlock logging — see
+    message template for a curated set of common events (Security-auditing
+    logons, process creation, service installs, account/group management,
+    audit log clearing, PowerShell ScriptBlock logging, Remote Desktop /
+    Terminal Services sessions, kernel boot/shutdown — see
     [field-extraction.md](field-extraction.md#message-templates-evtx) for
     the exact list and how placeholders resolve). A template-rendered
-    message is Peach's own reconstruction from `EventData`, not text the
+    message is Peach's own reconstruction from the record's `EventData` or
+    `UserData`, not text the
     source embedded, so it's always prefixed `[Peach] ` — never mistake it
     for something Windows itself wrote. Anything outside that curated set
     still leaves `message` empty, same as before this existed.

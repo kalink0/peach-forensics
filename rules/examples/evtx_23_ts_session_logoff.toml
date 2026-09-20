@@ -1,0 +1,29 @@
+# EVTX: LocalSessionManager 23, "Remote Desktop Services: Session logoff
+# succeeded" - the session was ended. A disconnect (24) with no later 23
+# is a session left running, not ended.
+#
+# Microsoft-Windows-TerminalServices-LocalSessionManager/Operational logs
+# console sessions as well as Remote Desktop sessions. `Address` is LOCAL
+# for a console session and a network address for a remote one, so a match
+# alone is not proof of a remote connection. The fields are in
+# UserData/EventXML, not EventData. DLEAPP's `windowsRdpSessions` reports
+# the same five events (21-25).
+#
+# Checked against real records (fields User, SessionID; this event has no
+# Address). Rests on the provider's manifest message text and field names
+# (the OS message resources, as listed in nasbench's EVTX-ETW-Resources,
+# ETWProvidersCSVs/Internal/Microsoft-Windows-TerminalServices-LocalSessionManager.csv)
+# and on EricZimmerman's EvtxECmd map for this event (MIT).
+
+[rule]
+name = "evtx_ts_session_logoff"
+description = "Terminal Services session logoff succeeded (LocalSessionManager 23) - the session ended, not merely disconnected"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+provider = "Microsoft-Windows-TerminalServices-LocalSessionManager"
+event_id = 23
+
+[rule.tag]
+value = "ts_session_logoff"

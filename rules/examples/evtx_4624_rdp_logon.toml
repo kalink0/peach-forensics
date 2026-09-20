@@ -1,0 +1,30 @@
+# EVTX Security-Auditing 4624 (successful logon) narrowed to LogonType 10.
+# Microsoft's 4624 reference defines the logon types; 10 is
+# RemoteInteractive: "A user logged on to this computer remotely using
+# Terminal Services or Remote Desktop."
+#
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4624
+#
+# LogonType arrives in the record as a JSON integer, so the match is
+# `LogonType = 10`, not "10". Type 12 (CachedRemoteInteractive, "same as
+# RemoteInteractive ... used for internal auditing") and type 7 (Unlock)
+# are separate values and are not matched here; every 4624 is still tagged
+# logon_success by evtx_4624_logon_success.toml. A reconnect to an
+# existing session is recorded by 4778 and LocalSessionManager 25 instead.
+#
+# No type-10 logon exists in the local logs (types 0, 2 and 5 only); the
+# field path and integer type were checked against real 4624 records.
+
+[rule]
+name = "evtx_rdp_logon_success"
+description = "Successful logon of type RemoteInteractive (Security-Auditing 4624, LogonType 10) - a Terminal Services / Remote Desktop logon"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4624
+event_data = { LogonType = 10 }
+
+[rule.tag]
+value = "rdp_logon"

@@ -1,0 +1,22 @@
+# EVTX Security-Auditing 4733, "A member was removed from a
+# security-enabled local group" - the removal counterpart of 4732. Same
+# tag as the additions (group_membership_change): a group change in either
+# direction is the signal, and the direction is in the message and event
+# ID.
+#
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4733
+#
+# Checked against a real record: MemberSid identifies the member,
+# MemberName is "-" for local accounts.
+
+[rule]
+name = "evtx_group_membership_removed_local"
+description = "Member removed from a security-enabled local group (Security-Auditing 4733)"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4733
+
+[rule.tag]
+value = "group_membership_change"

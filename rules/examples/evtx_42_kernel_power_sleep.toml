@@ -1,0 +1,23 @@
+# EVTX System log, Microsoft-Windows-Kernel-Power 42, "The system is
+# entering sleep." (recent builds add "Sleep Reason: {Reason}"). Marks the
+# start of a sleep interval - a gap in on-device activity that is not a
+# shutdown. DLEAPP's `windowsSystemPowerEvents` reports the same event.
+#
+# Not present in the local logs. Rests on the provider's manifest message
+# text and field names (the OS message resources, as listed in nasbench's
+# EVTX-ETW-Resources,
+# ETWProvidersCSVs/Internal/Microsoft-Windows-Kernel-Power.csv) and on
+# EricZimmerman's EvtxECmd map for this event (MIT).
+
+[rule]
+name = "evtx_kernel_power_sleep"
+description = "The system is entering sleep (Kernel-Power 42)"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+provider = "Microsoft-Windows-Kernel-Power"
+event_id = 42
+
+[rule.tag]
+value = "system_sleep"

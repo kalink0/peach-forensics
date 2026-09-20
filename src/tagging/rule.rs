@@ -18,9 +18,37 @@ use thiserror::Error;
 /// messages, not off exact equality or structured fields — matching the
 /// approach forensic tools like iLEAPP use for the same Apple Unified Log
 /// data.
+///
+/// `subsystem_prefix` is the same idea for the normalized `subsystem`
+/// field (AUL's flat `subsystem`, EVTX's provider name): a string or array
+/// of strings, matching if the subsystem *starts with* any of them. A
+/// prefix rather than a substring test on purpose — a family such as AUL's
+/// `com.apple.Navigation` has members that only differ by suffix, while an
+/// unrelated `com.apple.corenavigation` (thousands of records on a real
+/// image) must not be swept in. Case-sensitive, like every other match key:
+/// a family that spells its members with different capitalization lists
+/// each spelling explicitly instead of relying on a silent case fold.
+///
+/// `event_data` is an inline table of field/value pairs that must all equal
+/// the same-named field of an EVTX record's payload — its `EventData`, or the
+/// `UserData` element for providers that log there (see
+/// [`crate::parsers::evtx_templates::event_payload`]), e.g.
+/// `event_data = { LogonType = 10 }`. Values compare by type: an integer
+/// against a JSON number, a string against a JSON string, so the TOML has to
+/// use the type the record actually carries (`LogonType` is a number,
+/// `Address` a string). It exists because a field like the logon type is what
+/// tells an RDP logon from any other 4624, and it is not at a flat top-level
+/// key the way AUL's are. An empty table, a non-table value, a non-EVTX entry
+/// or a record without a payload never matches.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Rule {
     pub rule: RuleBody,
+    /// `subsystem_prefix` values, precomputed at parse time for the same
+    /// reason as `message_contains_needles`. Empty strings are dropped: an
+    /// empty prefix would match every entry that has a subsystem at all, so
+    /// a rule whose only prefix is `""` must match nothing instead.
+    #[serde(skip)]
+    subsystem_prefixes: Vec<String>,
     /// `message_contains` needles, precomputed once from
     /// `rule.match_fields` here at parse time rather than rebuilt on every
     /// [`Rule::matches`] call. Import-time tagging runs `matches()` once per
@@ -64,17 +92,11 @@ pub struct RuleParseError(#[from] toml::de::Error);
 impl Rule {
     pub fn from_toml_str(s: &str) -> Result<Self, RuleParseError> {
         let mut rule: Rule = toml::from_str(s)?;
-        rule.message_contains_needles = rule
-            .rule
-            .match_fields
-            .get("message_contains")
-            .map(|value| {
-                toml_value_as_strings(value)
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
+        rule.message_contains_needles = match_strings(&rule.rule.match_fields, "message_contains");
+        rule.subsystem_prefixes = match_strings(&rule.rule.match_fields, "subsystem_prefix")
+            .into_iter()
+            .filter(|prefix| !prefix.is_empty())
+            .collect();
         Ok(rule)
     }
 
@@ -100,6 +122,27 @@ impl Rule {
                     self.message_contains_needles
                         .iter()
                         .any(|needle| actual.contains(needle.as_str()))
+                }),
+                "subsystem_prefix" => normalized_field("subsystem", sourcetype, fields)
+                    .or_else(|| fields.get("subsystem"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|actual| {
+                        self.subsystem_prefixes
+                            .iter()
+                            .any(|prefix| actual.starts_with(prefix.as_str()))
+                    }),
+                "event_data" => expected.as_table().is_some_and(|wanted| {
+                    !wanted.is_empty()
+                        && fields
+                            .get("Event")
+                            .and_then(crate::parsers::evtx_templates::event_payload)
+                            .is_some_and(|payload| {
+                                wanted.iter().all(|(name, value)| {
+                                    payload
+                                        .get(name)
+                                        .is_some_and(|actual| toml_matches_json(value, actual))
+                                })
+                            })
                 }),
                 "event_id"
                 | "provider"
@@ -261,10 +304,24 @@ fn normalized_field<'a>(
     }
 }
 
-/// Reads `message_contains`'s value as a list of substrings to search for,
-/// accepting either a bare string or an array of strings. Any other shape
-/// (e.g. an integer) yields an empty list, so a malformed rule simply never
-/// matches rather than panicking.
+/// Owned copy of one `match` key's string list (see
+/// [`toml_value_as_strings`]) — empty when the key is absent or malformed.
+fn match_strings(match_fields: &toml::Table, key: &str) -> Vec<String> {
+    match_fields
+        .get(key)
+        .map(|value| {
+            toml_value_as_strings(value)
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Reads a `match` value (`message_contains`, `subsystem_prefix`) as a list
+/// of strings to search for, accepting either a bare string or an array of
+/// strings. Any other shape (e.g. an integer) yields an empty list, so a
+/// malformed rule simply never matches rather than panicking.
 fn toml_value_as_strings(value: &toml::Value) -> Vec<&str> {
     match value {
         toml::Value::String(s) => vec![s.as_str()],
@@ -320,6 +377,260 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 0, "no rule files found in {}", dir.display());
+    }
+
+    /// Loads one shipped rule file by name, so the tests below exercise the
+    /// rule as actually released rather than a copy of it.
+    fn shipped_rule(file_name: &str) -> Rule {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("rules/examples")
+            .join(file_name);
+        let text = std::fs::read_to_string(&path).unwrap();
+        Rule::from_toml_str(&text).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+    }
+
+    fn aul(rule: &Rule, category: &str, message: &str) -> bool {
+        rule.matches(
+            "aul",
+            None,
+            Some(message),
+            &serde_json::json!({ "category": category }),
+        )
+    }
+
+    /// `kPhoneNumber` is also a substring of an emergency-contact
+    /// notification (category `Emergency`); on a real load all ten matches
+    /// of the bare substring were that notification and none a dialed number.
+    #[test]
+    fn shipped_dialed_number_rule_is_scoped_to_call_provider() {
+        let rule = shipped_rule("aul_dialed_number_recovery.toml");
+        let setup = "#I {\n\t\"kActionId\": \"49B8935B\",\n\t\"kActionType\": 0,\n\t\"kUuid\": \"2FCB034A\",\n\t\"kPhoneNumber\": \"065244****\"\n}";
+        let teardown = "#I {\n\t\"kActionType\": 2,\n\t\"kUuid\": \"2FCB034A\"\n}";
+        let emergency = "#EmergCon,EMERGENCY:notification,kPhoneNumberStatusNotification";
+
+        assert!(aul(&rule, "call.provider", setup));
+        assert!(aul(&rule, "call.provider", teardown));
+        assert!(!aul(&rule, "Emergency", emergency));
+        assert!(!aul(&rule, "call.provider", "#I Updating config for CSD"));
+        assert!(!aul(&rule, "Emergency", setup));
+    }
+
+    #[test]
+    fn shipped_call_status_rule_requires_category_call() {
+        let rule = shipped_rule("aul_call_status_update.toml");
+        let status = "Call(StatusUpdate) InitializingMedia -> Dialing for call <private>";
+
+        assert!(aul(&rule, "call", status));
+        assert!(!aul(&rule, "call.provider", status));
+        assert!(!aul(&rule, "call", "#I isEmergencyWiFiAllowed is false"));
+    }
+
+    #[test]
+    fn shipped_dialpad_rule_requires_the_contact_search_category() {
+        let rule = shipped_rule("aul_dialpad_entry.toml");
+
+        assert!(aul(
+            &rule,
+            "ContactSearchManager",
+            "Searching for 065244****"
+        ));
+        assert!(aul(
+            &rule,
+            "ContactSearchManager",
+            "Search cancelled for 06"
+        ));
+        assert!(!aul(
+            &rule,
+            "ContactSearchManager",
+            "Unrelated search state"
+        ));
+        // A bare "Searching for" outside the category is far too generic.
+        assert!(!aul(&rule, "Spotlight", "Searching for photos"));
+    }
+
+    #[test]
+    fn shipped_carplay_rule_matches_the_wired_marker_and_only_the_activated_handshake() {
+        let rule = shipped_rule("aul_carplay_connection.toml");
+        let any = |message: &str| aul(&rule, "General", message);
+
+        assert!(any("Found USB DirectLink on the network interface en3"));
+        assert!(any("Found USB DirectLink on the network interface en2"));
+        assert!(!any("Interface en3 is not a DirectLink interface"));
+        assert!(any("session isAuthenticated:1, isActivated:1"));
+        assert!(!any("session isAuthenticated:0, isActivated:0"));
+        assert!(any(
+            "WiFiDeviceManagerSetCarPlaySessionState: CarPlay session vehicle inform: model EC40, manufacturer VolvoCars, hardware version qcom 5.0, isSessionActive Y"
+        ));
+    }
+
+    /// The bare ` presence:` fragment used to also tag CommCenter modem
+    /// lines as touch activity (100 of 281 matches on a real load).
+    #[test]
+    fn shipped_touchscreen_rule_needs_a_contact_index_before_presence() {
+        let rule = shipped_rule("aul_touchscreen_events.toml");
+        let any = |message: &str| aul(&rule, "TouchEvents", message);
+
+        assert!(any("contact 0 presence: touching"));
+        assert!(any("contact 6 presence: withinRange"));
+        assert!(any("received tapToWake"));
+        assert!(!any("#I Local emergency numbers presence: 1"));
+        assert!(!any("#I SIM card emergency numbers presence: 0"));
+    }
+
+    /// An EVTX record shaped like the ones the parser produces: provider and
+    /// event ID under `Event.System`, plus whatever payload the caller gives.
+    fn evtx_entry(provider: &str, event_id: u32, payload: serde_json::Value) -> serde_json::Value {
+        let mut event = serde_json::json!({
+            "System": {
+                "EventID": event_id,
+                "Provider_attributes": {"Name": provider},
+            }
+        });
+        for (key, value) in payload.as_object().unwrap() {
+            event[key] = value.clone();
+        }
+        serde_json::json!({ "Event": event })
+    }
+
+    fn evtx_matches(rule: &Rule, entry: &serde_json::Value) -> bool {
+        rule.matches("evtx", None, None, entry)
+    }
+
+    /// `LogonType` is an integer in real records (seen as 0, 2 and 5), and
+    /// only type 10 — RemoteInteractive — is a Remote Desktop logon.
+    #[test]
+    fn shipped_rdp_logon_rules_match_logon_type_10_only() {
+        let security = "Microsoft-Windows-Security-Auditing";
+        for (file, event_id) in [
+            ("evtx_4624_rdp_logon.toml", 4624),
+            ("evtx_4625_rdp_logon_failure.toml", 4625),
+        ] {
+            let rule = shipped_rule(file);
+            let logon = |logon_type: u32| {
+                evtx_entry(
+                    security,
+                    event_id,
+                    serde_json::json!({"EventData": {"LogonType": logon_type}}),
+                )
+            };
+            assert!(evtx_matches(&rule, &logon(10)), "{file}: type 10");
+            for other in [0, 2, 3, 5, 7, 12] {
+                assert!(!evtx_matches(&rule, &logon(other)), "{file}: type {other}");
+            }
+        }
+        // 4624's rule must not fire for a 4625 with type 10, and vice versa.
+        let failure_with_type_10 = evtx_entry(
+            security,
+            4625,
+            serde_json::json!({"EventData": {"LogonType": 10}}),
+        );
+        assert!(!evtx_matches(
+            &shipped_rule("evtx_4624_rdp_logon.toml"),
+            &failure_with_type_10
+        ));
+    }
+
+    /// Terminal Services events reuse small event IDs (21, 22, ... 1024), so
+    /// each rule is tied to its provider; the same ID from another provider
+    /// must not be tagged.
+    #[test]
+    fn shipped_terminal_services_rules_are_scoped_to_their_provider() {
+        let lsm = "Microsoft-Windows-TerminalServices-LocalSessionManager";
+        let cases = [
+            ("evtx_21_ts_session_logon.toml", lsm, 21),
+            ("evtx_22_ts_shell_start.toml", lsm, 22),
+            ("evtx_23_ts_session_logoff.toml", lsm, 23),
+            ("evtx_24_ts_session_disconnect.toml", lsm, 24),
+            ("evtx_25_ts_session_reconnect.toml", lsm, 25),
+            (
+                "evtx_1149_rdp_connection_established.toml",
+                "Microsoft-Windows-TerminalServices-RemoteConnectionManager",
+                1149,
+            ),
+            (
+                "evtx_131_rdp_connection_accepted.toml",
+                "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS",
+                131,
+            ),
+            (
+                "evtx_1024_rdp_client_connect.toml",
+                "Microsoft-Windows-TerminalServices-ClientActiveXCore",
+                1024,
+            ),
+        ];
+        for (file, provider, event_id) in cases {
+            let rule = shipped_rule(file);
+            let record = |provider: &str, id: u32| {
+                evtx_entry(
+                    provider,
+                    id,
+                    serde_json::json!({"UserData": {"EventXML": {"User": "HOST\\alice"}}}),
+                )
+            };
+            assert!(evtx_matches(&rule, &record(provider, event_id)), "{file}");
+            assert!(
+                !evtx_matches(&rule, &record("Some Other Provider", event_id)),
+                "{file}: same ID, other provider"
+            );
+            assert!(
+                !evtx_matches(&rule, &record(provider, event_id + 1000)),
+                "{file}: same provider, other ID"
+            );
+        }
+    }
+
+    /// Event 12 is also logged by `Microsoft-Windows-UserModePowerService`
+    /// on the same machines; only the kernel's own record is a boot marker.
+    #[test]
+    fn shipped_kernel_boot_rule_ignores_the_other_provider_using_event_id_12() {
+        let rule = shipped_rule("evtx_12_kernel_general_os_started.toml");
+        let record = |provider: &str| evtx_entry(provider, 12, serde_json::json!({}));
+
+        assert!(evtx_matches(
+            &rule,
+            &record("Microsoft-Windows-Kernel-General")
+        ));
+        assert!(!evtx_matches(
+            &rule,
+            &record("Microsoft-Windows-UserModePowerService")
+        ));
+    }
+
+    /// A rule that shares a tag with an existing one is meant to: the same
+    /// real-world event, logged by a different provider.
+    #[test]
+    fn shipped_terminal_services_and_security_session_events_share_their_tags() {
+        let tag = |file: &str| shipped_rule(file).rule.tag.value;
+        assert_eq!(
+            tag("evtx_24_ts_session_disconnect.toml"),
+            tag("evtx_4779_session_disconnected.toml")
+        );
+        assert_eq!(
+            tag("evtx_25_ts_session_reconnect.toml"),
+            tag("evtx_4778_session_reconnected.toml")
+        );
+        assert_eq!(
+            tag("evtx_4647_logoff_user_initiated.toml"),
+            tag("evtx_4634_logoff.toml")
+        );
+        assert_eq!(
+            tag("evtx_4733_group_membership_removed.toml"),
+            tag("evtx_4732_group_membership_change.toml")
+        );
+    }
+
+    /// `com.apple.corenavigation` is a different framework (5,239 records
+    /// on a real load, versus 77 for `com.apple.Navigation`).
+    #[test]
+    fn shipped_navigation_rule_matches_the_maps_framework_subsystem_only() {
+        let rule = shipped_rule("aul_navigation.toml");
+        let sub =
+            |name: &str| rule.matches("aul", None, None, &serde_json::json!({"subsystem": name}));
+
+        assert!(sub("com.apple.Navigation"));
+        assert!(sub("com.apple.navigation.VirtualGarage"));
+        assert!(!sub("com.apple.corenavigation"));
+        assert!(!sub("com.apple.Maps"));
     }
 
     #[test]
@@ -784,6 +1095,202 @@ value = "airplane_mode"
         .unwrap();
 
         assert!(!rule.matches("aul", None, Some("anything"), &serde_json::Value::Null));
+    }
+
+    /// The real motivating family: AUL's MapsNavigation framework logs under
+    /// `com.apple.Navigation` (categories and process vary per OS release),
+    /// plus a member spelled with a lowercase `n`. An unrelated
+    /// `com.apple.corenavigation` shares a case-insensitive *substring* with
+    /// both but is not part of the family.
+    #[test]
+    fn subsystem_prefix_matches_a_string_or_any_array_entry_on_aul() {
+        let single = Rule::from_toml_str(
+            "[rule]\nname = \"nav\"\n[rule.match]\nsourcetype = \"aul\"\nsubsystem_prefix = \"com.apple.Navigation\"\n[rule.tag]\nvalue = \"navigation\"\n",
+        )
+        .unwrap();
+        let list = Rule::from_toml_str(
+            "[rule]\nname = \"nav\"\n[rule.match]\nsourcetype = \"aul\"\nsubsystem_prefix = [\"com.apple.Navigation\", \"com.apple.navigation.VirtualGarage\"]\n[rule.tag]\nvalue = \"navigation\"\n",
+        )
+        .unwrap();
+        let sub = |name: &str| serde_json::json!({ "subsystem": name });
+
+        assert!(single.matches("aul", None, None, &sub("com.apple.Navigation")));
+        assert!(single.matches("aul", None, None, &sub("com.apple.Navigation.Extra")));
+        assert!(!single.matches(
+            "aul",
+            None,
+            None,
+            &sub("com.apple.navigation.VirtualGarage")
+        ));
+
+        assert!(list.matches("aul", None, None, &sub("com.apple.Navigation")));
+        assert!(list.matches(
+            "aul",
+            None,
+            None,
+            &sub("com.apple.navigation.VirtualGarage")
+        ));
+        assert!(!list.matches("aul", None, None, &sub("com.apple.corenavigation")));
+        assert!(!list.matches("aul", None, None, &sub("com.apple.navigation")));
+        assert!(!list.matches("aul", None, None, &sub("Other.com.apple.Navigation")));
+    }
+
+    #[test]
+    fn subsystem_prefix_never_matches_a_missing_or_non_string_subsystem() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"nav\"\n[rule.match]\nsubsystem_prefix = \"com.apple.Navigation\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+
+        assert!(!rule.matches("aul", None, None, &serde_json::Value::Null));
+        assert!(!rule.matches("aul", None, None, &serde_json::json!({})));
+        assert!(!rule.matches("aul", None, None, &serde_json::json!({"subsystem": 7})));
+    }
+
+    /// An empty prefix would match every entry that has a subsystem — a
+    /// rule like that must match nothing rather than tag the whole timeline.
+    #[test]
+    fn subsystem_prefix_with_only_empty_or_malformed_values_never_matches() {
+        let with_subsystem = serde_json::json!({"subsystem": "com.apple.Navigation"});
+        for value in ["\"\"", "[\"\"]", "[]", "42"] {
+            let rule = Rule::from_toml_str(&format!(
+                "[rule]\nname = \"bad\"\n[rule.match]\nsubsystem_prefix = {value}\n[rule.tag]\nvalue = \"t\"\n"
+            ))
+            .unwrap();
+            assert!(
+                !rule.matches("aul", None, None, &with_subsystem),
+                "subsystem_prefix = {value} must not match"
+            );
+        }
+
+        let mixed = Rule::from_toml_str(
+            "[rule]\nname = \"mixed\"\n[rule.match]\nsubsystem_prefix = [\"\", \"com.apple.Navigation\"]\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        assert_eq!(mixed.subsystem_prefixes, vec!["com.apple.Navigation"]);
+        assert!(!mixed.matches(
+            "aul",
+            None,
+            None,
+            &serde_json::json!({"subsystem": "unrelated"})
+        ));
+    }
+
+    /// `subsystem` resolves EVTX's provider name the same way the plain
+    /// `provider`/`subsystem` keys do, so a whole provider family
+    /// (`Microsoft-Windows-TerminalServices-*`) can be matched by prefix.
+    #[test]
+    fn subsystem_prefix_resolves_the_evtx_provider_name() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"ts\"\n[rule.match]\nsourcetype = \"evtx\"\nsubsystem_prefix = \"Microsoft-Windows-TerminalServices\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        let provider = |name: &str| serde_json::json!({"Event": {"System": {"Provider_attributes": {"Name": name}}}});
+
+        assert!(rule.matches(
+            "evtx",
+            None,
+            None,
+            &provider("Microsoft-Windows-TerminalServices-LocalSessionManager")
+        ));
+        assert!(!rule.matches(
+            "evtx",
+            None,
+            None,
+            &provider("Microsoft-Windows-Security-Auditing")
+        ));
+        // Still ANDed with the other conditions, including sourcetype.
+        assert!(!rule.matches(
+            "aul",
+            None,
+            None,
+            &provider("Microsoft-Windows-TerminalServices-LocalSessionManager")
+        ));
+    }
+
+    fn evtx_record(event: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "Event": event })
+    }
+
+    /// `LogonType` reaches the JSON as an integer, so the rule value is an
+    /// integer too; a string `"10"` is a different type and does not match.
+    #[test]
+    fn event_data_matches_an_event_data_field_by_type() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"rdp\"\n[rule.match]\nsourcetype = \"evtx\"\nevent_id = 4624\nevent_data = { LogonType = 10 }\n[rule.tag]\nvalue = \"rdp_logon\"\n",
+        )
+        .unwrap();
+        let logon = |logon_type: serde_json::Value| {
+            evtx_record(serde_json::json!({
+                "System": {"EventID": 4624},
+                "EventData": {"LogonType": logon_type, "TargetUserName": "alice"}
+            }))
+        };
+
+        assert!(rule.matches("evtx", None, None, &logon(serde_json::json!(10))));
+        assert!(!rule.matches("evtx", None, None, &logon(serde_json::json!(5))));
+        assert!(!rule.matches("evtx", None, None, &logon(serde_json::json!("10"))));
+        // Still ANDed with `event_id`.
+        let other_event = evtx_record(serde_json::json!({
+            "System": {"EventID": 4625},
+            "EventData": {"LogonType": 10}
+        }));
+        assert!(!rule.matches("evtx", None, None, &other_event));
+    }
+
+    /// Terminal Services logs into `UserData/EventXML`, not `EventData`.
+    #[test]
+    fn event_data_also_reads_the_user_data_element_and_requires_every_pair() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"local\"\n[rule.match]\nsourcetype = \"evtx\"\nevent_data = { Address = \"LOCAL\", SessionID = 1 }\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        let record = |address: &str, session: u64| {
+            evtx_record(serde_json::json!({
+                "UserData": {
+                    "EventXML_attributes": {"xmlns": "Event_NS"},
+                    "EventXML": {"User": "HOST\\alice", "SessionID": session, "Address": address}
+                }
+            }))
+        };
+
+        assert!(rule.matches("evtx", None, None, &record("LOCAL", 1)));
+        assert!(!rule.matches("evtx", None, None, &record("10.0.0.5", 1)));
+        assert!(!rule.matches("evtx", None, None, &record("LOCAL", 2)));
+    }
+
+    #[test]
+    fn event_data_never_matches_a_malformed_condition_or_a_record_without_payload() {
+        let with_event_data = evtx_record(serde_json::json!({"EventData": {"LogonType": 10}}));
+        for value in ["{}", "10", "\"LogonType\"", "[10]"] {
+            let rule = Rule::from_toml_str(&format!(
+                "[rule]\nname = \"bad\"\n[rule.match]\nevent_data = {value}\n[rule.tag]\nvalue = \"t\"\n"
+            ))
+            .unwrap();
+            assert!(
+                !rule.matches("evtx", None, None, &with_event_data),
+                "event_data = {value} must not match"
+            );
+        }
+
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"r\"\n[rule.match]\nevent_data = { LogonType = 10 }\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        // No EventData/UserData, EventData null, and a non-EVTX entry.
+        assert!(!rule.matches("evtx", None, None, &evtx_record(serde_json::json!({}))));
+        assert!(!rule.matches(
+            "evtx",
+            None,
+            None,
+            &evtx_record(serde_json::json!({"EventData": null}))
+        ));
+        assert!(!rule.matches(
+            "aul",
+            None,
+            None,
+            &serde_json::json!({"LogonType": 10, "subsystem": "x"})
+        ));
     }
 
     #[test]

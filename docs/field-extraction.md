@@ -93,14 +93,19 @@ JSON shape," the same category of decision as everything else on this page.
 (`build.rs`, same mechanism as the AUL rule pack — see
 `parsers::evtx_templates`'s module doc comment). Each entry maps one
 `(provider, event_id)` to a template string; `{FieldName}` placeholders are
-resolved against this record's `Event.EventData` object (the `evtx`
-crate's flattened form for named `<Data Name="...">` elements — confirmed
-against `evtx-0.12.2/tests/snapshots/test_record_samples__event_json_sample_with_event_data.snap`).
-An unresolved placeholder (field genuinely absent, or `EventData` isn't a
-named-field object at all — e.g. a legacy provider using the positional
-`%1`/`%2` scheme) is left as literal `{FieldName}` text rather than dropped
-or blanked, so a bad or mismatched template shows itself immediately
-instead of rendering something plausible-looking but wrong.
+resolved against the record's payload: its `Event.EventData` object (the
+`evtx` crate's flattened form for named `<Data Name="...">` elements —
+confirmed against `evtx-0.12.2/tests/snapshots/test_record_samples__event_json_sample_with_event_data.snap`),
+or, for providers that log there instead (Terminal Services), the one element
+under `Event.UserData` (`EventXML`). A string is used as is; a JSON number or
+bool is rendered as its plain text — real records carry `LogonType` and
+`SessionID` as integers, which an earlier string-only lookup left as literal
+`{LogonType}`. An unresolved placeholder (field genuinely absent, a `null`,
+or a payload that isn't a named-field object at all — e.g. a legacy provider
+using the positional `%1`/`%2` scheme, or a `UserData` with more than one
+element) is left as literal `{FieldName}` text rather than dropped or
+blanked, so a bad or mismatched template shows itself immediately instead of
+rendering something plausible-looking but wrong.
 
 **This is Peach's own reconstruction, not source-provided text** —
 qualitatively different provenance from a real `RenderingInfo.Message`, so
@@ -110,13 +115,19 @@ every template-rendered message is prefixed with
 only ever fires in its absence.
 
 Current coverage (Security-auditing-first, the events an IR analyst reaches
-for before anything else): logon/logoff (4624/4625/4634/4648/4672),
+for before anything else): logon/logoff (4624/4625/4634/4647/4648/4672),
 process creation (4688), service install (4697, and Service Control
-Manager's 7045), account/group management (4720/4724/4728/4732/4738/4740/4756),
-credential validation (4776), audit log clearing (1102), and PowerShell
-ScriptBlock logging (4104). Field names come from Microsoft's published
-Security-Auditing event reference, not guesswork; anything outside this set
-falls through to empty, same as before this feature existed.
+Manager's 7045), account/group management
+(4720/4724/4728/4729/4732/4733/4738/4740/4756/4757), credential validation
+(4776), audit log clearing (1102), PowerShell ScriptBlock logging (4104),
+Remote Desktop / Terminal Services (`LocalSessionManager` 21-25/39/40,
+`RemoteConnectionManager` 1149, `RdpCoreTS` 131, `ClientActiveXCore` 1024),
+and the kernel's own boot/shutdown markers (Kernel-General 12/13,
+Kernel-Power 109). Field names come from Microsoft's published
+Security-Auditing event reference and, for the other providers, their own
+manifests (confirmed against real records where available — see the rule
+and template file headers for which), not guesswork; anything outside this
+set falls through to empty, same as before this feature existed.
 
 ## Event ID
 

@@ -1,30 +1,50 @@
 # AUL pattern-of-life: recovering a dialed phone number in plain text.
 # Distinct from — and more direct than — aul_call_events.toml's keypad-tone
 # actionID tracking (which only lets a number be reconstructed digit by
-# digit from sound requests): CommCenter's own call-provider subsystem logs
-# the actual number via a "kPhoneNumber" field. A separate tag from
-# call_events on purpose, so an analyst can filter specifically for entries
-# that may carry a recoverable number rather than generic call start/end
-# noise.
+# digit from sound requests): CommCenter's own call-provider category
+# (`com.apple.CommCenter:call.provider`) logs a transaction block per call
+# attempt, and the setup block carries the number in plain text in a
+# "kPhoneNumber" field. A separate tag from call_events on purpose, so an
+# analyst can filter specifically for entries that may carry a recoverable
+# number rather than generic call start/end noise.
 #
-# The article also documents a ContactSearchManager "Searching for <number>"
-# entry that distinguishes on-device keypad entry from CarPlay input — not
-# included here as its own condition: "Searching for" alone is far too
-# generic a phrase (Spotlight, in-app search, etc.) to trust without also
-# scoping to its subsystem, and this rule pack's convention is plain
-# message-substring matching, not per-field scoping.
+# "kActionType" is 0 on the setup block and 2 on the hang-up block, and both
+# carry the same "kUuid". A setup block with no matching teardown is a
+# dialed attempt, not proof of a connected call — which is why the teardown
+# block is tagged too. The call state chain that says whether it actually
+# connected is aul_call_status_update.toml.
+#
+# Scoped to category `call.provider`. "kPhoneNumber" alone is not specific
+# enough: it is also a substring of
+# "#EmergCon,EMERGENCY:notification,kPhoneNumberStatusNotification"
+# (category `Emergency`), and all 10 "kPhoneNumber" matches in one
+# 6.4M-record iOS load were that notification, none a dialed number. Version
+# 1 matched the bare substring and tagged those. The same scoping is what
+# iLEAPP's `logarchive_dialed_numbers` uses
+# (`category = 'call.provider'`). On that load the scoped rule matches
+# nothing (no setup/teardown blocks occur in it).
+#
+# Observed by the sources on iOS 26.5.2 (iLEAPP) and iOS 26.6 (Thesis
+# Friday), each a single device; neither block family has been seen on
+# other releases here, which is not evidence it is absent there.
 #
 # Source: Thesis Friday #24 (Tim Korver), tested on iOS 26.6 (build 23G71):
 # https://thesisfriday.com/thesis-friday-24-recovering-a-dialed-number-from-the-unified-log/
+# Scoping and the `kActionType` predicate: iLEAPP `logarchive_dialed_numbers`
+# (https://github.com/abrignoni/iLEAPP).
 
 [rule]
 name = "aul_dialed_number_recovery"
-description = "CommCenter entries that may carry a dialed number in plain text (kPhoneNumber)"
-version = "1"
+description = "CommCenter call.provider transaction blocks: the setup block carries a dialed number in plain text (kPhoneNumber), the hang-up block shares its kUuid (kActionType) — a setup without a matching hang-up is an attempt, not a connected call"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
-message_contains = "kPhoneNumber"
+category = "call.provider"
+message_contains = [
+    "kPhoneNumber",
+    "kActionType",
+]
 
 [rule.tag]
 value = "dialed_number_recovery"

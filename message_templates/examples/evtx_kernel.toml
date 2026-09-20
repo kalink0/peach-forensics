@@ -1,0 +1,26 @@
+# Message templates for the kernel's own boot/shutdown markers. Wording
+# follows the providers' manifest message texts (nasbench's
+# EVTX-ETW-Resources); field names were confirmed against real records.
+#
+# Kernel-Power 109 has three manifest variants: build-dependent field sets
+# (`ShutdownActionType`/`ShutdownEventCode`/`ShutdownReason` on recent Windows
+# 11, `ShutdownReason` alone on Windows 10 and earlier Windows 11). Only
+# `ShutdownReason`, present in both, is used here, so the template never leaves
+# an unresolved placeholder on either; the other fields stay in the raw record.
+# Kernel-Power 42 has two variants (with and without `Reason`) and gets no
+# template for the same reason.
+
+[[template]]
+provider = "Microsoft-Windows-Kernel-General"
+event_id = 12
+message = "The operating system started at system time {StartTime}"
+
+[[template]]
+provider = "Microsoft-Windows-Kernel-General"
+event_id = 13
+message = "The operating system is shutting down at system time {StopTime}"
+
+[[template]]
+provider = "Microsoft-Windows-Kernel-Power"
+event_id = 109
+message = "The kernel power manager has initiated a shutdown transition. Shutdown reason: {ShutdownReason}"

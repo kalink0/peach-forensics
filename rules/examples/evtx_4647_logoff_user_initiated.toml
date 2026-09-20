@@ -1,0 +1,23 @@
+# EVTX Security-Auditing 4647, "User initiated logoff". Microsoft:
+# generated when a logoff is initiated by the account using the logoff
+# function, "more typical for Interactive and RemoteInteractive logon
+# types"; 4634 instead shows that the session was terminated and no longer
+# exists, and both are normally seen for a user-initiated logoff. Carries
+# the same tag as 4634 (evtx_4634_logoff.toml).
+#
+# https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4647
+#
+# Checked against real records (fields TargetUserName, TargetDomainName,
+# TargetLogonId).
+
+[rule]
+name = "evtx_logoff_user_initiated"
+description = "User initiated logoff (Security-Auditing 4647) - companion to 4634"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4647
+
+[rule.tag]
+value = "logoff"

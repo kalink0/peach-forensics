@@ -1,0 +1,49 @@
+# AUL pattern-of-life: the Phone app's dial-field contact search
+# (`com.apple.calls.mobilephone:ContactSearchManager`). On every change to
+# the dial field the app searches contacts for the current text and logs it
+# unredacted ("Searching for 0", "Search cancelled for 0", "Searching for
+# 06", ...), so the sequence reconstructs the digits typed on the handset.
+# The last "Searching for" line without a later cancellation is the field at
+# the moment of the call and matches the number in the call.provider block
+# (aul_dialed_number_recovery.toml).
+#
+# Scoped to category `ContactSearchManager` AND the two documented message
+# forms. iLEAPP matches the whole category (752 entries on one iOS 18.7
+# image, 301 of them these two forms) because a bare "Searching for" alone
+# matched 808 unrelated records on an iOS 26.5.2 image; the extra phrase
+# condition here keeps the tag to the documented, number-bearing lines. Any
+# other message in the category stays reachable through the Category filter.
+#
+# Reading caveats, from the source: the search is throttled, so fast typing
+# skips intermediate states while the final state is always complete; a
+# run can open with a cancellation for a search never started in it
+# (residue from the previous field). Presence of the chain places typing on
+# the handset. Its absence only rules out the on-device keypad: a number
+# entered on a CarPlay screen produced no chain, and entry via Contacts,
+# Recents or Siri was not tested.
+#
+# Observed by iLEAPP on an iOS 18.7 image and by Thesis Friday on iOS 26.6
+# (six runs, one device). The category does not occur in the 6.4M-record
+# iOS load the other AUL rules were re-checked against, so this is a
+# documented predicate, not one validated on local data.
+#
+# Source: Thesis Friday #24 (Tim Korver):
+# https://thesisfriday.com/thesis-friday-24-recovering-a-dialed-number-from-the-unified-log/
+# Category scoping and counts: iLEAPP `logarchive_dialed_numbers`
+# (https://github.com/abrignoni/iLEAPP).
+
+[rule]
+name = "aul_dialpad_entry"
+description = "Phone app dial-field contact search (ContactSearchManager) — the digits typed on the handset, step by step; absence does not rule out other entry surfaces"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+category = "ContactSearchManager"
+message_contains = [
+    "Searching for",
+    "Search cancelled for",
+]
+
+[rule.tag]
+value = "dialpad_entry"

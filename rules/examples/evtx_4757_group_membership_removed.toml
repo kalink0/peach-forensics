@@ -1,0 +1,22 @@
+# EVTX Security-Auditing 4757, "A member was removed from a
+# security-enabled universal group" - the removal counterpart of 4756.
+# Same tag as the additions (group_membership_change): a group change in
+# either direction is the signal, and the direction is in the message and
+# event ID. Microsoft notes 4729 and 4757 are generated only for domain
+# groups.
+#
+# https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/audit-security-group-management
+#
+# Not present in the local logs; same schema as 4729/4733.
+
+[rule]
+name = "evtx_group_membership_removed_universal"
+description = "Member removed from a security-enabled universal group (Security-Auditing 4757)"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+event_id = 4757
+
+[rule.tag]
+value = "group_membership_change"

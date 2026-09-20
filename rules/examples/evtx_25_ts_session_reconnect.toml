@@ -1,0 +1,31 @@
+# EVTX: LocalSessionManager 25, "Remote Desktop Services: Session
+# reconnection succeeded" - a client reattached to a disconnected session.
+# The same real-world event as Security 4778
+# (evtx_4778_session_reconnected.toml), so it carries the same tag.
+#
+# Microsoft-Windows-TerminalServices-LocalSessionManager/Operational logs
+# console sessions as well as Remote Desktop sessions. `Address` is LOCAL
+# for a console session and a network address for a remote one, so a match
+# alone is not proof of a remote connection. The fields are in
+# UserData/EventXML, not EventData. DLEAPP's `windowsRdpSessions` reports
+# the same five events (21-25).
+#
+# Not present in the local logs; the schema is the same as events 21/22/24
+# per the manifest and the EvtxECmd map. Rests on the provider's manifest
+# message text and field names (the OS message resources, as listed in
+# nasbench's EVTX-ETW-Resources,
+# ETWProvidersCSVs/Internal/Microsoft-Windows-TerminalServices-LocalSessionManager.csv)
+# and on EricZimmerman's EvtxECmd map for this event (MIT).
+
+[rule]
+name = "evtx_ts_session_reconnected"
+description = "Terminal Services session reconnection succeeded (LocalSessionManager 25) - the same event Security 4778 records"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+provider = "Microsoft-Windows-TerminalServices-LocalSessionManager"
+event_id = 25
+
+[rule.tag]
+value = "session_reconnected"

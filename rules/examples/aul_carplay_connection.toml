@@ -1,24 +1,51 @@
 # AUL pattern-of-life: CarPlay connection handshake — accessory capability
-# negotiation (iAP2), CarKit session authentication, and per-vehicle widget
-# state persistence. The initial USB power-present step of this handshake
+# negotiation (iAP2), the wired-session marker, CarKit session
+# authentication, and per-vehicle widget state persistence. The initial USB
+# power-present step of this handshake
 # ("IOAccessoryUSBConnectShim: USB Power (VBUS) Present: 1") is already
 # covered generically by aul_usb_power_connections.toml; this rule is the
 # CarPlay-specific continuation of that handshake, not a replacement for it.
 # Complements the existing driving_state/motion_state pattern-of-life rules
 # for vehicle-context analysis.
 #
+# "Found USB DirectLink" is airplayd's "Found USB DirectLink on the network
+# interface enN" line, which Thesis Friday #20 calls the discriminator for a
+# wired session (it reproduced in all three runs). It is matched without the
+# interface name on purpose — the name is not fixed (the post saw en3 in its
+# runs, en1 and en2 elsewhere in the same logs, and expects other names on
+# devices with a different network history). The related negative control,
+# "Interface enN is not a DirectLink interface", does not contain this string
+# and is not matched.
+#
+# "WiFiDeviceManagerSetCarPlaySessionState" is wifid's line
+# "...: CarPlay session vehicle inform: model ..., manufacturer ...,
+# isSessionActive Y" — model, manufacturer and session boundaries in one
+# entry, so iLEAPP's separate "CarPlay session vehicle inform" predicate is
+# the same line and needs no second needle here.
+#
+# "session isAuthenticated:1, isActivated:1" is deliberately the full
+# 1,1 form: the 0,0 variant fires about seventy times per run in the same
+# window before the session authenticates, and the message is emitted by
+# dozens of processes, so read the booleans, not the message name.
+#
+# None of these markers occurs in the 6.4M-record iOS load the other AUL
+# rules were re-checked against (it holds no CarPlay session), and the
+# source is three runs on one handset, one iOS build (26.6) and one head
+# unit: these are documented predicates, not locally validated ones.
+#
 # Source: Thesis Friday #20, "Project Stark" (Tim Korver):
 # https://thesisfriday.com/thesis-friday-20-project-stark-forensic-reconstruction-of-the-carplay-handshake/
 
 [rule]
 name = "aul_carplay_connection"
-description = "CarPlay accessory handshake, CarKit session auth, and per-vehicle state"
-version = "1"
+description = "CarPlay accessory handshake, wired-session marker (USB DirectLink), CarKit session auth, and per-vehicle state"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
 message_contains = [
     "carPlayCapable = 1",
+    "Found USB DirectLink",
     "session isAuthenticated:1, isActivated:1",
     "Persisting widget state for vehicle ID",
     "WiFiDeviceManagerSetCarPlaySessionState",

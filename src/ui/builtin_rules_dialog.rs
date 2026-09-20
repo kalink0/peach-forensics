@@ -1,49 +1,81 @@
 //! "Built-in Rules" picker — lets the analyst see every currently active
-//! AUL/EVTX/journald/intrusion_log tagging rule (match condition, tag,
-//! description) and choose exactly which ones are enabled, rather than only
-//! an all-or-nothing pack switch. Doubles as the in-app rule reference — the
-//! same information [docs/rules-reference.md](../../docs/rules-reference.md)
-//! documents, generated from the same `rules/examples/*.toml` files.
+//! tagging rule (match condition, tag, description) and choose exactly which
+//! ones are enabled, rather than only an all-or-nothing pack switch. Doubles
+//! as the in-app rule reference — the same information
+//! [docs/rules-reference.md](../../docs/rules-reference.md) documents,
+//! generated from the same `rules/examples/*.toml` files.
 //!
-//! Holds no rule data itself — `PeachApp::enabled_builtin_rules` (a
+//! One table for every rule, with a search box, a Source dropdown, an
+//! enabled/disabled filter and sortable column headers — the model and
+//! controls it shares with the read-only reference dialog live in
+//! [`crate::ui::rule_list`].
+//!
+//! Holds no rule *enablement* itself — `PeachApp::enabled_builtin_rules` (a
 //! `BTreeSet` of rule names) is the single source of truth for which rules
-//! are active, mutated directly through the `&mut` this dialog is handed;
-//! [`crate::tagging::builtin::active_builtin_rules`] is re-resolved fresh
-//! each render (cheap: tens of small embedded-string TOML parses plus a
-//! directory read), so there's nothing here that can go stale.
-//!
-//! Reads the live active rule set the same way `ui::rules_reference_dialog`
-//! does, for the same reason: this dialog used to call the three embedded
-//! tier-1 functions directly
-//! (`aul_pattern_of_life_rules`/`evtx_security_auditing_rules`/
-//! `journald_login_rules`), which is exactly the *baseline*, not necessarily
-//! what's actually tagging entries — a downloaded (tier 2) pack wholesale-
-//! replaces tier 1 (see `tagging::builtin`'s doc comment) and can name a
-//! completely different set of rules, including ones from an older release
-//! that predate a rule this dialog would otherwise show as available. That
-//! mismatch is exactly what produced the bug this fixed: a newly-added
-//! tier-1 rule appeared unchecked (or a stale tier-2 name didn't appear at
-//! all) because the checkbox list and `enabled_builtin_rules` were being
-//! read from two different rule sets.
+//! are active, mutated directly through the `&mut` this dialog is handed.
+//! The rule list is resolved once when the dialog opens, from
+//! [`crate::tagging::builtin::active_builtin_rules`] — the live active set
+//! (the same one `ui::rules_reference_dialog` shows), not the embedded
+//! baseline: a downloaded (tier 2) pack wholesale-replaces tier 1 (see
+//! `tagging::builtin`'s doc comment) and can name a completely different
+//! set of rules, so listing the baseline here would show rules that aren't
+//! actually tagging anything and hide ones that are. A pack applied while
+//! this dialog is already open shows up after reopening it.
 
 use std::collections::BTreeSet;
 
 use eframe::egui;
+use egui_extras::{Column, TableBuilder};
 
 use crate::tagging::builtin;
 use crate::tagging::pack_bundle;
-use crate::tagging::rule::Rule;
 use crate::tagging::rule_file;
 use crate::ui::dialog_window::show_dialog_window;
+use crate::ui::rule_list::{
+    RuleRow, SortColumn, StatusFilter, ViewState, search_row, sort_header, source_dropdown,
+    visible_indices,
+};
+
+/// Enables or disables exactly the rules at `indices` (what the table
+/// currently shows), leaving every other rule as it was.
+fn set_enabled(enabled: &mut BTreeSet<String>, rows: &[RuleRow], indices: &[usize], on: bool) {
+    for &i in indices {
+        if on {
+            enabled.insert(rows[i].name.clone());
+        } else {
+            enabled.remove(&rows[i].name);
+        }
+    }
+}
 
 pub enum BuiltinRulesDialog {
     Closed,
-    Open,
+    Open {
+        /// `None` — the embedded baseline is what's listed; `Some` — a
+        /// downloaded pack's own version is.
+        active_pack_version: Option<u32>,
+        rows: Vec<RuleRow>,
+        view: ViewState,
+        /// Set on open so the search box has the keyboard straight away;
+        /// cleared after the first frame.
+        focus_search: bool,
+    },
 }
 
 impl BuiltinRulesDialog {
     pub fn open() -> Self {
-        Self::Open
+        let applied_pack_dir = rule_file::default_applied_pack_dir().ok();
+        let active_pack_version = applied_pack_dir
+            .as_deref()
+            .and_then(pack_bundle::read_applied_manifest)
+            .map(|manifest| manifest.pack.pack_version);
+        let rules = builtin::active_builtin_rules(applied_pack_dir.as_deref());
+        Self::Open {
+            active_pack_version,
+            rows: rules.iter().map(RuleRow::from_rule).collect(),
+            view: ViewState::default(),
+            focus_search: true,
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -55,37 +87,27 @@ impl BuiltinRulesDialog {
     pub fn ui(&mut self, ctx: &egui::Context, enabled: &mut BTreeSet<String>) {
         let mut close = false;
 
-        if matches!(self, Self::Open) {
-            let applied_pack_dir = rule_file::default_applied_pack_dir().ok();
-            let active_pack_version = applied_pack_dir
-                .as_deref()
-                .and_then(pack_bundle::read_applied_manifest)
-                .map(|manifest| manifest.pack.pack_version);
-            let rules = builtin::active_builtin_rules(applied_pack_dir.as_deref());
-            let (aul, evtx, journald, intrusion_log, biome, other) = group_by_sourcetype(&rules);
-
+        if let Self::Open {
+            active_pack_version,
+            rows,
+            view,
+            focus_search,
+        } = self
+        {
             close = show_dialog_window(
                 ctx,
                 "peach_builtin_rules_dialog",
                 "Built-in Rules",
-                [720.0, 560.0],
+                [900.0, 640.0],
                 true,
                 |ui, close| {
-                    // Pinned to the bottom *before* the scroll area below —
-                    // same reasoning as `activity_log_dialog`/
-                    // `rules_reference_dialog`'s bottom bars: an unbounded
-                    // `ScrollArea` claims all remaining space in its parent
-                    // `Ui` first, which for this dialog's five stacked
-                    // sections (each already individually scrollable up to
-                    // 180px, but with no outer scroll area to move
-                    // *between* them) meant shrinking the window small
-                    // enough made the lower sections — and the Close
-                    // button — completely unreachable, not just
-                    // inconvenient to scroll to. `Panel::bottom` reserves
-                    // its own space up front regardless of source order, so
-                    // the button stays visible and the scroll area gets
-                    // exactly what's left of the window's actual (bounded)
-                    // height.
+                    // Pinned to the bottom *before* the table below, same
+                    // reasoning as `activity_log_dialog`/
+                    // `rules_reference_dialog`'s bottom bars: a scrolling
+                    // region claims all remaining space in its parent `Ui`
+                    // first, which would push a Close button placed after
+                    // it out of the window. `Panel::bottom` reserves its
+                    // own space up front regardless of source order.
                     egui::Panel::bottom("peach_builtin_rules_dialog_bottom_bar").show(ui, |ui| {
                         ui.add_space(4.0);
                         if ui.button("Close").clicked() {
@@ -94,38 +116,34 @@ impl BuiltinRulesDialog {
                         ui.add_space(4.0);
                     });
 
-                    ui.label(
-                        "Which built-in rules apply on every load/re-tag. Hover a rule for \
-                         its full match condition and description.",
-                    );
                     match active_pack_version {
-                        Some(version) => {
-                            ui.label(format!(
-                                "Showing rule pack version {version} (downloaded via \
-                                 File \u{2192} Rule packs...)."
-                            ));
-                        }
-                        None => {
-                            ui.label("Showing the built-in baseline.");
-                        }
-                    }
+                        Some(version) => ui.label(format!(
+                            "Rule pack version {version} (downloaded via File \u{2192} Rule \
+                             packs...). Checked rules apply on every load and re-tag."
+                        )),
+                        None => ui.label(
+                            "Built-in baseline. Checked rules apply on every load and re-tag.",
+                        ),
+                    };
+
+                    search_row(ui, view, focus_search);
+                    ui.horizontal(|ui| {
+                        source_dropdown(ui, rows, view);
+                        ui.label("Show:");
+                        ui.selectable_value(&mut view.status, StatusFilter::All, "All");
+                        ui.selectable_value(&mut view.status, StatusFilter::Enabled, "Enabled");
+                        ui.selectable_value(&mut view.status, StatusFilter::Disabled, "Disabled");
+                    });
+                    let visible = visible_indices(rows, Some(enabled), view);
+                    bulk_toolbar(ui, rows, &visible, enabled);
                     ui.separator();
 
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        render_rule_group(ui, "AUL", &aul, enabled);
-                        ui.separator();
-                        render_rule_group(ui, "EVTX", &evtx, enabled);
-                        ui.separator();
-                        render_rule_group(ui, "journald", &journald, enabled);
-                        ui.separator();
-                        render_rule_group(ui, "Android Intrusion Log", &intrusion_log, enabled);
-                        ui.separator();
-                        render_rule_group(ui, "Apple Biome", &biome, enabled);
-                        if !other.is_empty() {
-                            ui.separator();
-                            render_rule_group(ui, "Other", &other, enabled);
-                        }
-                    });
+                    if visible.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label("No rules match the current filters.");
+                    } else {
+                        rule_table(ui, rows, &visible, enabled, view);
+                    }
                 },
             );
         }
@@ -136,144 +154,138 @@ impl BuiltinRulesDialog {
     }
 }
 
-/// Splits `rules` into AUL/EVTX/journald/intrusion_log/biome groups by each
-/// rule's own `sourcetype` match condition, plus a catch-all sixth group
-/// for anything that doesn't declare one of those five — same reasoning as
-/// `ui::rules_reference_dialog::build_sections`: a rule this dialog
-/// doesn't recognize (e.g. from a downloaded pack with unexpected content)
-/// is still shown rather than silently dropped, since it would otherwise
-/// stay enabled in `enabled_builtin_rules` with no way to inspect or
-/// disable it from here.
-type SourcetypeGroups = (
-    Vec<Rule>,
-    Vec<Rule>,
-    Vec<Rule>,
-    Vec<Rule>,
-    Vec<Rule>,
-    Vec<Rule>,
-);
-
-fn group_by_sourcetype(rules: &[Rule]) -> SourcetypeGroups {
-    let mut aul = Vec::new();
-    let mut evtx = Vec::new();
-    let mut journald = Vec::new();
-    let mut intrusion_log = Vec::new();
-    let mut biome = Vec::new();
-    let mut other = Vec::new();
-
-    for rule in rules {
-        let sourcetype = rule
-            .rule
-            .match_fields
-            .get("sourcetype")
-            .and_then(|v| v.as_str());
-        match sourcetype {
-            Some("aul") => aul.push(rule.clone()),
-            Some("evtx") => evtx.push(rule.clone()),
-            Some("journald") => journald.push(rule.clone()),
-            Some("intrusion_log") => intrusion_log.push(rule.clone()),
-            Some("biome") => biome.push(rule.clone()),
-            _ => other.push(rule.clone()),
-        }
-    }
-
-    (aul, evtx, journald, intrusion_log, biome, other)
-}
-
-fn render_rule_group(
+/// The shown-count line and the bulk buttons. They act on the rules the
+/// table lists right now, so "Enable shown" after a search enables just the
+/// matches.
+fn bulk_toolbar(
     ui: &mut egui::Ui,
-    heading: &str,
-    rules: &[Rule],
+    rows: &[RuleRow],
+    visible: &[usize],
     enabled: &mut BTreeSet<String>,
 ) {
     ui.horizontal(|ui| {
-        ui.strong(format!("{heading} ({})", rules.len()));
-        if ui.small_button("Select all").clicked() {
-            for rule in rules {
-                enabled.insert(rule.rule.name.clone());
-            }
+        if ui
+            .add_enabled(
+                !visible.is_empty(),
+                egui::Button::new(format!("Enable shown ({})", visible.len())),
+            )
+            .on_hover_text("Enable every rule the table currently lists")
+            .clicked()
+        {
+            set_enabled(enabled, rows, visible, true);
         }
-        if ui.small_button("Select none").clicked() {
-            for rule in rules {
-                enabled.remove(&rule.rule.name);
-            }
+        if ui
+            .add_enabled(
+                !visible.is_empty(),
+                egui::Button::new(format!("Disable shown ({})", visible.len())),
+            )
+            .on_hover_text("Disable every rule the table currently lists")
+            .clicked()
+        {
+            set_enabled(enabled, rows, visible, false);
         }
+        let enabled_total = rows.iter().filter(|r| enabled.contains(&r.name)).count();
+        ui.weak(format!(
+            "{} of {} rules shown \u{00B7} {} enabled",
+            visible.len(),
+            rows.len(),
+            enabled_total
+        ));
     });
-    egui::ScrollArea::vertical()
-        .id_salt(heading)
-        .max_height(180.0)
-        .show(ui, |ui| {
-            for rule in rules {
-                let mut checked = enabled.contains(&rule.rule.name);
-                let hover = format!(
-                    "{}\n\nMatch: {}\nTag: {}",
-                    rule.rule
-                        .description
-                        .as_deref()
-                        .unwrap_or("(no description)"),
-                    format_match_fields(&rule.rule.match_fields),
-                    rule.rule.tag.value,
-                );
-                if ui
-                    .checkbox(
-                        &mut checked,
-                        format!("{} \u{2192} {}", rule.rule.name, rule.rule.tag.value),
-                    )
-                    .on_hover_text(hover)
-                    .changed()
-                {
-                    if checked {
-                        enabled.insert(rule.rule.name.clone());
-                    } else {
-                        enabled.remove(&rule.rule.name);
-                    }
-                }
-            }
-        });
 }
 
-/// Short, human-readable summary of a rule's `[rule.match]` table for the
-/// hover tooltip — `sourcetype` omitted (implied by which section the rule
-/// is in), `message_contains` lists truncated to avoid a wall of text for
-/// AUL rules with 20+ substrings (the full list is always in
-/// `rules/examples/*.toml`/docs/rules-reference.md, this is a lookup aid,
-/// not a rule editor).
-fn format_match_fields(match_fields: &toml::Table) -> String {
-    let mut parts = Vec::new();
-    for (key, value) in match_fields {
-        if key == "sourcetype" {
-            continue;
-        }
-        let rendered = match value {
-            toml::Value::Array(items) => {
-                let strings: Vec<&str> = items.iter().filter_map(|v| v.as_str()).collect();
-                if strings.len() > 3 {
-                    format!(
-                        "{}, {}, {}, (+{} more)",
-                        strings[0],
-                        strings[1],
-                        strings[2],
-                        strings.len() - 3
-                    )
-                } else {
-                    strings.join(", ")
-                }
-            }
-            toml::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        parts.push(format!("{key} = {rendered}"));
-    }
-    if parts.is_empty() {
-        "(sourcetype only)".to_string()
-    } else {
-        parts.join("; ")
-    }
+/// The rule table. It is the dialog's only scrolling region (no outer
+/// `ScrollArea`), so `TableBuilder`'s own vertical scrollbar is the right
+/// one — the nested-scroll problem the old per-source layout had doesn't
+/// arise here.
+fn rule_table(
+    ui: &mut egui::Ui,
+    rows: &[RuleRow],
+    visible: &[usize],
+    enabled: &mut BTreeSet<String>,
+    view: &mut ViewState,
+) {
+    TableBuilder::new(ui)
+        .striped(true)
+        .resizable(true)
+        .min_scrolled_height(0.0)
+        .column(Column::exact(28.0))
+        .column(Column::initial(130.0).at_least(60.0).clip(true))
+        .column(Column::initial(300.0).at_least(120.0).clip(true))
+        .column(Column::initial(190.0).at_least(80.0).clip(true))
+        .column(Column::remainder().at_least(160.0).clip(true))
+        .header(22.0, |mut header| {
+            header.col(|ui| {
+                sort_header(ui, "\u{2713}", SortColumn::Enabled, view);
+            });
+            header.col(|ui| {
+                sort_header(ui, "Source", SortColumn::Source, view);
+            });
+            header.col(|ui| {
+                sort_header(ui, "Rule", SortColumn::Rule, view);
+            });
+            header.col(|ui| {
+                sort_header(ui, "Tag", SortColumn::Tag, view);
+            });
+            header.col(|ui| {
+                ui.strong("Description");
+            });
+        })
+        .body(|body| {
+            body.rows(20.0, visible.len(), |mut row| {
+                let rule = &rows[visible[row.index()]];
+                let is_enabled = enabled.contains(&rule.name);
+
+                row.col(|ui| {
+                    let mut checked = is_enabled;
+                    if ui.checkbox(&mut checked, "").changed() {
+                        if checked {
+                            enabled.insert(rule.name.clone());
+                        } else {
+                            enabled.remove(&rule.name);
+                        }
+                    }
+                });
+                row.col(|ui| {
+                    ui.add(egui::Label::new(rule.source.label()).truncate())
+                        .on_hover_text(&rule.hover);
+                });
+                row.col(|ui| {
+                    let text = egui::RichText::new(&rule.display_name).monospace();
+                    let text = if is_enabled { text } else { text.weak() };
+                    ui.add(egui::Label::new(text).truncate())
+                        .on_hover_text(&rule.hover);
+                });
+                row.col(|ui| {
+                    let text = egui::RichText::new(&rule.tag).monospace();
+                    let text = if is_enabled { text } else { text.weak() };
+                    ui.add(egui::Label::new(text).truncate())
+                        .on_hover_text(&rule.hover);
+                });
+                row.col(|ui| {
+                    ui.add(egui::Label::new(&rule.description).truncate())
+                        .on_hover_text(&rule.hover);
+                });
+            });
+        });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tagging::rule::Rule;
+    use crate::ui::rule_list::Source;
+
+    fn rule(name: &str, sourcetype: &str) -> Rule {
+        Rule::from_toml_str(&format!(
+            "[rule]\nname = \"{name}\"\n[rule.match]\nsourcetype = \"{sourcetype}\"\n[rule.tag]\nvalue = \"t\"\n"
+        ))
+        .unwrap()
+    }
+
+    fn enabled_of(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
 
     #[test]
     fn open_is_open() {
@@ -286,108 +298,134 @@ mod tests {
     }
 
     #[test]
-    fn group_by_sourcetype_splits_into_the_five_known_groups() {
-        let rules = vec![
-            Rule::from_toml_str(
-                "[rule]\nname = \"aul_a\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"t\"\n",
-            )
-            .unwrap(),
-            Rule::from_toml_str(
-                "[rule]\nname = \"evtx_a\"\n[rule.match]\nsourcetype = \"evtx\"\n[rule.tag]\nvalue = \"t\"\n",
-            )
-            .unwrap(),
-            Rule::from_toml_str(
-                "[rule]\nname = \"journald_a\"\n[rule.match]\nsourcetype = \"journald\"\n[rule.tag]\nvalue = \"t\"\n",
-            )
-            .unwrap(),
-            Rule::from_toml_str(
-                "[rule]\nname = \"intrusion_log_a\"\n[rule.match]\nsourcetype = \"intrusion_log\"\n[rule.tag]\nvalue = \"t\"\n",
-            )
-            .unwrap(),
-            Rule::from_toml_str(
-                "[rule]\nname = \"biome_a\"\n[rule.match]\nsourcetype = \"biome\"\n[rule.tag]\nvalue = \"t\"\n",
-            )
-            .unwrap(),
+    fn bulk_enable_and_disable_only_touch_the_shown_rules() {
+        let rows: Vec<RuleRow> = [
+            rule("evtx_logon", "evtx"),
+            rule("aul_wifi", "aul"),
+            rule("aul_airplane", "aul"),
+        ]
+        .iter()
+        .map(RuleRow::from_rule)
+        .collect();
+        let mut enabled = enabled_of(&["evtx_logon"]);
+        let view = ViewState {
+            search: "aul".into(),
+            ..ViewState::default()
+        };
+        let shown = visible_indices(&rows, Some(&enabled), &view);
+
+        set_enabled(&mut enabled, &rows, &shown, true);
+        assert_eq!(
+            enabled,
+            enabled_of(&["aul_airplane", "aul_wifi", "evtx_logon"])
+        );
+
+        set_enabled(&mut enabled, &rows, &shown, false);
+        // The hidden rule that was already enabled is untouched.
+        assert_eq!(enabled, enabled_of(&["evtx_logon"]));
+    }
+
+    /// Runs `frames` frames of the dialog in a headless egui context — no
+    /// window, so this catches a panic in the layout/table code, not how it
+    /// looks. The screen is large enough that the window is not squeezed.
+    fn render(dialog: &mut BuiltinRulesDialog, enabled: &mut BTreeSet<String>, frames: usize) {
+        let ctx = egui::Context::default();
+        for _ in 0..frames {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 900.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(input, |ui| dialog.ui(ui.ctx(), enabled));
+        }
+    }
+
+    fn dialog_with(view: ViewState) -> BuiltinRulesDialog {
+        let mut dialog = BuiltinRulesDialog::open();
+        if let BuiltinRulesDialog::Open { view: v, .. } = &mut dialog {
+            *v = view;
+        }
+        dialog
+    }
+
+    #[test]
+    fn the_dialog_renders_the_shipped_rules_in_every_view_without_panicking() {
+        let all_names: BTreeSet<String> = builtin::all_builtin_rules()
+            .iter()
+            .map(|r| r.rule.name.clone())
+            .collect();
+        let searching = |text: &str| ViewState {
+            search: text.into(),
+            ..ViewState::default()
+        };
+        let mut views = vec![
+            ViewState::default(),
+            // A search with hits, and one with none (the empty-table branch).
+            searching("airplane"),
+            searching("no rule contains this text 9f3a"),
+            ViewState {
+                status: StatusFilter::Enabled,
+                ..ViewState::default()
+            },
+            ViewState {
+                status: StatusFilter::Disabled,
+                ..ViewState::default()
+            },
         ];
+        let mut hide_aul = ViewState::default();
+        hide_aul.toggle_source(Source::Aul);
+        views.push(hide_aul);
+        for column in [
+            SortColumn::Enabled,
+            SortColumn::Source,
+            SortColumn::Rule,
+            SortColumn::Tag,
+        ] {
+            for ascending in [true, false] {
+                views.push(ViewState {
+                    sort_column: column,
+                    ascending,
+                    ..ViewState::default()
+                });
+            }
+        }
 
-        let (aul, evtx, journald, intrusion_log, biome, other) = group_by_sourcetype(&rules);
-
-        assert_eq!(aul.len(), 1);
-        assert_eq!(aul[0].rule.name, "aul_a");
-        assert_eq!(evtx.len(), 1);
-        assert_eq!(evtx[0].rule.name, "evtx_a");
-        assert_eq!(journald.len(), 1);
-        assert_eq!(journald[0].rule.name, "journald_a");
-        assert_eq!(intrusion_log.len(), 1);
-        assert_eq!(intrusion_log[0].rule.name, "intrusion_log_a");
-        assert_eq!(biome.len(), 1);
-        assert_eq!(biome[0].rule.name, "biome_a");
-        assert!(other.is_empty());
+        for view in views {
+            // Once with everything enabled, once with nothing.
+            for enabled in [all_names.clone(), BTreeSet::new()] {
+                let mut enabled = enabled;
+                let mut dialog = dialog_with(view.clone());
+                render(&mut dialog, &mut enabled, 3);
+                assert!(dialog.is_open());
+            }
+        }
     }
 
     #[test]
-    fn group_by_sourcetype_puts_unrecognized_sourcetypes_in_other() {
-        let rules = vec![
-            Rule::from_toml_str(
-                "[rule]\nname = \"generic\"\n[rule.match]\nlevel = \"ERROR\"\n[rule.tag]\nvalue = \"t\"\n",
-            )
-            .unwrap(),
-        ];
+    fn the_search_box_is_focused_on_the_first_frame_only() {
+        let mut dialog = BuiltinRulesDialog::open();
+        let mut enabled = BTreeSet::new();
+        let focus = |d: &BuiltinRulesDialog| match d {
+            BuiltinRulesDialog::Open { focus_search, .. } => *focus_search,
+            BuiltinRulesDialog::Closed => panic!("dialog closed"),
+        };
 
-        let (aul, evtx, journald, intrusion_log, biome, other) = group_by_sourcetype(&rules);
-
-        assert!(aul.is_empty());
-        assert!(evtx.is_empty());
-        assert!(journald.is_empty());
-        assert!(intrusion_log.is_empty());
-        assert!(biome.is_empty());
-        assert_eq!(other.len(), 1);
-        assert_eq!(other[0].rule.name, "generic");
+        assert!(focus(&dialog));
+        render(&mut dialog, &mut enabled, 1);
+        assert!(!focus(&dialog));
     }
 
     #[test]
-    fn format_match_fields_with_only_sourcetype_says_so() {
-        let mut table = toml::Table::new();
-        table.insert(
-            "sourcetype".to_string(),
-            toml::Value::String("evtx".to_string()),
-        );
-        assert_eq!(format_match_fields(&table), "(sourcetype only)");
-    }
-
-    #[test]
-    fn format_match_fields_truncates_long_arrays() {
-        let mut table = toml::Table::new();
-        table.insert(
-            "message_contains".to_string(),
-            toml::Value::Array(
-                ["a", "b", "c", "d", "e"]
-                    .iter()
-                    .map(|s| toml::Value::String(s.to_string()))
-                    .collect(),
-            ),
-        );
-        let formatted = format_match_fields(&table);
-        assert!(formatted.contains("a, b, c, (+2 more)"), "{formatted}");
-    }
-
-    #[test]
-    fn format_match_fields_shows_short_arrays_in_full() {
-        let mut table = toml::Table::new();
-        table.insert(
-            "message_contains".to_string(),
-            toml::Value::Array(vec![
-                toml::Value::String("a".to_string()),
-                toml::Value::String("b".to_string()),
-            ]),
-        );
-        assert_eq!(format_match_fields(&table), "message_contains = a, b");
-    }
-
-    #[test]
-    fn format_match_fields_shows_a_plain_value() {
-        let mut table = toml::Table::new();
-        table.insert("event_id".to_string(), toml::Value::Integer(4625));
-        assert_eq!(format_match_fields(&table), "event_id = 4625");
+    fn every_shipped_rule_appears_in_the_table_model() {
+        let rules = builtin::all_builtin_rules();
+        let rows: Vec<RuleRow> = rules.iter().map(RuleRow::from_rule).collect();
+        let visible = visible_indices(&rows, Some(&BTreeSet::new()), &ViewState::default());
+        assert_eq!(rows.len(), rules.len());
+        assert_eq!(visible.len(), rules.len());
+        // No rule falls into "Other" (that would mean a pack whose sourcetype
+        // the dialogs don't know about).
+        assert!(rows.iter().all(|r| r.source != Source::Other));
     }
 }

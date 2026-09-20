@@ -1,0 +1,29 @@
+# EVTX Security-Auditing 4625 (failed logon) narrowed to LogonType 10 - a
+# failed Remote Desktop logon, the target-side view of RDP password
+# guessing. 4625 uses the same logon-type table as 4624, where 10 is
+# RemoteInteractive (a logon "remotely using Terminal Services or Remote
+# Desktop").
+#
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4625
+#
+# LogonType is a JSON integer in the record, so the match is `LogonType =
+# 10`. Every 4625 is still tagged auth_failure by
+# evtx_4625_auth_failure.toml.
+#
+# No type-10 failure exists in the local logs (the single 4625 there is
+# type 2); the field path and integer type were checked against that real
+# 4625 record.
+
+[rule]
+name = "evtx_rdp_logon_failure"
+description = "Failed logon of type RemoteInteractive (Security-Auditing 4625, LogonType 10) - a failed Terminal Services / Remote Desktop logon"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+provider = "Microsoft-Windows-Security-Auditing"
+event_id = 4625
+event_data = { LogonType = 10 }
+
+[rule.tag]
+value = "rdp_logon_failure"

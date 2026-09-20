@@ -1,0 +1,37 @@
+# EVTX: LocalSessionManager 22, "Remote Desktop Services: Shell start
+# notification received" - the session's shell (desktop) starting,
+# typically right after event 21 (ponderthebits).
+#
+# Microsoft-Windows-TerminalServices-LocalSessionManager/Operational logs
+# console sessions as well as Remote Desktop sessions. `Address` is LOCAL
+# for a console session and a network address for a remote one, so a match
+# alone is not proof of a remote connection. The fields are in
+# UserData/EventXML, not EventData. DLEAPP's `windowsRdpSessions` reports
+# the same five events (21-25).
+#
+# A LOCAL entry is also written around system (re)boot, shortly before or
+# after its 21/22 partner (ponderthebits).
+#
+# Checked against real records. Rests on the provider's manifest message
+# text and field names (the OS message resources, as listed in nasbench's
+# EVTX-ETW-Resources,
+# ETWProvidersCSVs/Internal/Microsoft-Windows-TerminalServices-LocalSessionManager.csv)
+# and on EricZimmerman's EvtxECmd map for this event (MIT).
+#
+# Interpretation source: ponderthebits, "Windows RDP-Related Event Logs:
+# Identification, Tracking, and Investigation" (2018).
+#
+# https://ponderthebits.com/2018/02/windows-rdp-related-event-logs-identification-tracking-and-investigation/
+
+[rule]
+name = "evtx_ts_shell_start"
+description = "Terminal Services shell start notification received (LocalSessionManager 22) - the session's desktop shell starting; LOCAL means console"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+provider = "Microsoft-Windows-TerminalServices-LocalSessionManager"
+event_id = 22
+
+[rule.tag]
+value = "ts_shell_start"

@@ -1,23 +1,45 @@
-# AUL pattern-of-life: fingers physically on glass — digitizer contact
-# presence per finger, per-app touch statistics windows, touch attention
-# events, and tap-to-wake. Predicates from "Apple Unified Log Predicates in
-# iLEAPP: The Reference" (Alexis Brignoni):
+# AUL pattern-of-life: touchscreen digitizer activity — contact presence
+# per finger, per-app touch statistics windows, touch attention events, and
+# tap-to-wake. Predicates from "Apple Unified Log Predicates in iLEAPP: The
+# Reference" (Alexis Brignoni):
 # leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive touchscreen events". The source's contact-presence predicate
 # is `%contact _ presence:%`, a SQL LIKE pattern where `_` is a single-char
-# wildcard (a per-finger index or similar token between literal spaces) —
-# Peach's substring-only matching can't replicate a wildcard, so this
-# matches the stable literal fragment around it instead.
+# wildcard for the finger index. Peach's substring-only matching has no
+# wildcard, so the single-digit indices are listed out ("contact 0
+# presence:" ... "contact 9 presence:"), which matches exactly what the
+# wildcard does. The verbatim line, from Thesis Friday #14, is
+# `contact 0 presence: touching`.
+#
+# Version 1 matched the bare fragment " presence:" instead. That also
+# matched unrelated CommCenter modem lines ("Local emergency numbers
+# presence: 1" and four sibling lines, categories pb.qmi.1/pb.qmi.2): 100 of
+# 281 matches in one 6.4M-record iOS load, none of them touch activity.
+# Restricting to "contact N presence:" removed all 100 and lost none of the
+# 181 real ones there (finger indices 0-6 occurred).
+#
+# The presence state itself varies: touching, withinRange and none all
+# occur, so a match here is a digitizer state change, not necessarily a
+# finger on the glass.
 
 [rule]
 name = "aul_touchscreen_events"
-description = "Direct touchscreen contact — fingers physically on the glass"
-version = "1"
+description = "Touchscreen digitizer activity — per-finger contact presence changes (touching, within range, none), touch statistics, tap-to-wake"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
 message_contains = [
-    " presence:",
+    "contact 0 presence:",
+    "contact 1 presence:",
+    "contact 2 presence:",
+    "contact 3 presence:",
+    "contact 4 presence:",
+    "contact 5 presence:",
+    "contact 6 presence:",
+    "contact 7 presence:",
+    "contact 8 presence:",
+    "contact 9 presence:",
     "touchstats",
     "received tapToWake",
     "AttentionAwareness.Touch",

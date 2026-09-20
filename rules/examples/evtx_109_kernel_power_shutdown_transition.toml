@@ -1,0 +1,25 @@
+# EVTX System log, Microsoft-Windows-Kernel-Power 109, "The kernel power
+# manager has initiated a shutdown transition." Carries the shutdown
+# reason: `ShutdownReason`, plus `ShutdownActionType` and
+# `ShutdownEventCode` on recent Windows 11 builds; older builds log only
+# `ShutdownReason`, and Windows 7/8.1 no fields at all. DLEAPP's
+# `windowsSystemPowerEvents` reports the same event.
+#
+# Checked against real records. Rests on the provider's manifest message
+# text and field names (the OS message resources, as listed in nasbench's
+# EVTX-ETW-Resources,
+# ETWProvidersCSVs/Internal/Microsoft-Windows-Kernel-Power.csv) and on
+# EricZimmerman's EvtxECmd map for this event (MIT).
+
+[rule]
+name = "evtx_kernel_power_shutdown_transition"
+description = "The kernel power manager initiated a shutdown transition (Kernel-Power 109)"
+version = "1"
+
+[rule.match]
+sourcetype = "evtx"
+provider = "Microsoft-Windows-Kernel-Power"
+event_id = 109
+
+[rule.tag]
+value = "system_shutdown"

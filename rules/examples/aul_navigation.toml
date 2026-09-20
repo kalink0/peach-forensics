@@ -1,37 +1,50 @@
-# AUL pattern-of-life: turn-by-turn navigation (Maps) usage.
-# Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
-# (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
-# — "logarchive navigation". The source's `'%Proceed to\%'`/`'%Arrived\%'`
-# predicates use `\%` as an escaped *literal* percent character, not a
-# wildcard — they match text containing an actual "%" right after "Proceed
-# to"/"Arrived" (e.g. a literal progress percentage in the message), so
-# they're ported here as "Proceed to%"/"Arrived%" with the real percent
-# character, not broadened to a bare "Proceed to"/"Arrived".
+# AUL pattern-of-life: Apple Maps navigation framework activity — route
+# planning and navigation-service traffic logged by the MapsNavigation
+# framework under the `com.apple.Navigation` subsystem (from navd, Maps.app
+# and the Maps widget). This is the framework's own activity, not proof that
+# a route was actually followed: the navigation-state values seen in
+# iLEAPP's validation images are only "no destination"/"none"/"stopped".
+#
+# Matched by subsystem prefix, not by message text. The categories under the
+# subsystem differ per OS release (MNNavigationStateManager, MNNavigationXPC,
+# MNRouteEditor on iOS 16-18; FamiliarRouteAuthorizationChecker and
+# GEONavigationListener on iOS 26.5.2), so a category list would need
+# editing for every release. The prefix is deliberately exact-case and
+# anchored at the start: `com.apple.corenavigation` is a different framework
+# (5,239 records in one 6.4M-record iOS load, versus 77 for
+# `com.apple.Navigation` there) and must not match, and the VirtualGarage
+# member is spelled with a lowercase `n`, so it is listed explicitly.
+#
+# History: version 1 matched fifteen English spoken-guidance phrases ("Turn
+# left", "your destination", ...) from the iLEAPP predicate reference dated
+# 2026-08-01 (leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference).
+# iLEAPP retired that predicate on 2026-08-25 after it returned nothing on
+# any of six real images (117,678,121 records, iOS 16.5 through 26.5.2), and
+# it also matched nothing in the 6.4M-record load above. Whether spoken
+# guidance text ever reaches the unified log during live navigation is
+# untested by either source, and it was never documented as observed in the
+# first place.
+#
+# The tag value is `maps_navigation_activity`, not `navigation`, because
+# nothing here shows a route being followed. Version 1 tagged `navigation`,
+# but that never matched anything on real data, so no existing tag is
+# affected by the rename.
+#
+# Sources: iLEAPP `scripts/artifacts/logarchive.py`, `logarchive_navigation`
+# (commits 88ef812a and e1f68bf2, 2026-08-25):
+# https://github.com/abrignoni/iLEAPP
 
 [rule]
 name = "aul_navigation"
-description = "Turn-by-turn navigation instructions (Maps usage)"
-version = "1"
+description = "Maps navigation framework activity (subsystem com.apple.Navigation) — route planning and navigation-service traffic, not proof a route was followed"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
-message_contains = [
-    "Starting route to",
-    "Proceed to the",
-    "Proceed to%",
-    "Turn right",
-    "Turn left",
-    "roundabout",
-    "first exit",
-    "Stay in the",
-    "parking lot for",
-    "of a mile",
-    "In about",
-    "then arrive",
-    "your destination",
-    "At the light",
-    "Arrived%",
+subsystem_prefix = [
+    "com.apple.Navigation",
+    "com.apple.navigation.VirtualGarage",
 ]
 
 [rule.tag]
-value = "navigation"
+value = "maps_navigation_activity"

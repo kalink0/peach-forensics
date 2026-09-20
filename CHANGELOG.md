@@ -2,6 +2,28 @@
 
 All notable changes to Peach will be documented in this file.
 
+## Unreleased
+
+### New Features
+
+- **Tagging rules — `event_data`** — a new match key for EVTX rules: an inline table of field/value pairs that must all equal the same-named fields of the record's `EventData` (or `UserData` element), e.g. `event_data = { LogonType = 10 }`. Values compare by type. It is what lets a rule tell an RDP logon from any other 4624.
+- **Tagging rules — `subsystem_prefix`** — a new match key for rules: matches when the entry's subsystem (AUL's subsystem, EVTX's provider name) *starts with* any of a string or list of strings. Exact-case and anchored at the start, so a family of suffix-varying subsystems can be matched without also catching unrelated ones. An empty prefix never matches.
+
+### Improvements
+
+- **Built-in Rules picker and Rules reference** — both are now one table for every rule instead of a separate list per source, with a search box (name, tag, description, source and the complete match condition), a Source dropdown, and clickable column headers to sort. The picker adds an Enabled/Disabled filter and **Enable shown** / **Disable shown**, which act on just the rules currently listed; the reference stays read-only, with one-line rows and a panel below the table that shows the selected rule's complete match condition and description. The lists are read once when a dialog opens.
+- **EVTX — Remote Desktop / Terminal Services** — the EVTX rule pack grows from 41 to 59 rules. New: the RDP network connection (`RemoteConnectionManager` 1149, `RdpCoreTS` 131), the session lifecycle (`LocalSessionManager` 21 logon, 22 shell start, 23 logoff, 24 disconnect, 25 reconnect — the last two carry the same tags as Security 4779/4778), outbound RDP from this machine (`ClientActiveXCore` 1024), and RDP logons/failed logons (4624/4625 with `LogonType` 10). Also new: user-initiated logoff (4647), group-member removal (4729/4733/4757, same tag as the additions) and the kernel's own boot/shutdown/sleep markers (Kernel-General 12/13, Kernel-Power 109/42). Each rule file says whether it was checked against real records. Two cautions are built into the rules: `LocalSessionManager` events also cover console sessions (`Address` is `LOCAL`), and 1149 is logged for a successful network connection, before credentials are entered, so its tag is `rdp_connection_established`, not an authentication.
+- **EVTX messages** — templates now resolve fields from `UserData` as well as `EventData` (Terminal Services logs there), and numeric fields are rendered. New templates cover the Terminal Services events, Kernel-General 12/13, Kernel-Power 109, 4647 and the group-removal events; the group templates also show `MemberSid`, since `MemberName` is `-` for local accounts.
+- **AUL navigation rule** — `aul_navigation` now matches the MapsNavigation framework's `com.apple.Navigation` subsystem instead of fifteen English spoken-guidance phrases, which matched nothing on real data (its upstream source, iLEAPP, retired the same predicate for the same reason). The tag is renamed from `navigation` to `maps_navigation_activity` ("Maps navigation framework activity", not "a route was followed"); the old value never matched anything on real data, so no existing tag is affected.
+- **AUL touchscreen rule** — `aul_touchscreen_events` no longer matches the bare fragment ` presence:`, which also tagged unrelated CommCenter modem lines ("Local emergency numbers presence: 1", ...) as touch activity — 100 of 281 matches in one real load. It now matches `contact 0`…`contact 9 presence:`, which is exactly what its upstream source's wildcard pattern matches.
+- **AUL dialed-number rule** — `aul_dialed_number_recovery` is now scoped to the `call.provider` category. Its bare `kPhoneNumber` match also tagged an emergency-contact notification (`…kPhoneNumberStatusNotification`) — all 10 matches in one real load were that, none a dialed number. It also tags the hang-up block (`kActionType`), so a setup without a matching hang-up reads as an attempt rather than a connected call.
+- **AUL CarPlay rule** — `aul_carplay_connection` also matches airplayd's `Found USB DirectLink` line, the documented marker for a wired session.
+- **AUL rule pack: 39 → 41 rules** — new `aul_call_status_update` (call state transitions, shows whether a dialed call connected) and `aul_dialpad_entry` (the Phone app's dial-field contact search, i.e. the digits typed on the handset). Both are documented predicates that do not occur in the local test data.
+
+### Bug Fixes
+
+- **EVTX logon type in messages** — the built-in 4624/4625/4634 messages showed a literal `{LogonType}` on real records, because the field arrives as a number and the template lookup only accepted strings. It now renders (`logon type 2`).
+
 ## v0.8.0 - 2026-09-18
 
 ### New Features

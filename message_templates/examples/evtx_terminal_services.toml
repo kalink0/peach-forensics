@@ -1,0 +1,66 @@
+# Message templates for the Windows Terminal Services / Remote Desktop
+# channels. Unlike the Security-Auditing events, most of these providers log
+# their fields under `UserData/EventXML` rather than `EventData`; the
+# placeholder mechanism reads whichever the record has (see
+# `parsers::evtx_templates::event_payload`). Message wording follows the
+# providers' own manifest message texts (the OS message resources, as listed in
+# nasbench's EVTX-ETW-Resources); field names come from the same manifests and
+# were confirmed against EricZimmerman's EvtxECmd maps (MIT) and, for the
+# `LocalSessionManager` events, against real records.
+#
+# Not every one of these can be locally validated: 21/22/23/24 and 39/40 were
+# checked against real `LocalSessionManager` records; 25, 1149 (RemoteConnection-
+# Manager), 131 (RdpCoreTS) and 1024 (the RDP client) were not, and rest on the
+# manifests and the maps alone. `Address` is `LOCAL` for a console session and a
+# network address for a remote one, so a `LocalSessionManager` event is not by
+# itself proof of a remote connection.
+
+[[template]]
+provider = "Microsoft-Windows-TerminalServices-RemoteConnectionManager"
+event_id = 1149
+message = "Remote Desktop Services: User authentication succeeded. User: {Param1}, domain: {Param2}, source network address: {Param3}"
+
+[[template]]
+provider = "Microsoft-Windows-TerminalServices-LocalSessionManager"
+event_id = 21
+message = "Remote Desktop Services: Session logon succeeded. User: {User}, session ID: {SessionID}, source network address: {Address}"
+
+[[template]]
+provider = "Microsoft-Windows-TerminalServices-LocalSessionManager"
+event_id = 22
+message = "Remote Desktop Services: Shell start notification received. User: {User}, session ID: {SessionID}, source network address: {Address}"
+
+[[template]]
+provider = "Microsoft-Windows-TerminalServices-LocalSessionManager"
+event_id = 23
+message = "Remote Desktop Services: Session logoff succeeded. User: {User}, session ID: {SessionID}"
+
+[[template]]
+provider = "Microsoft-Windows-TerminalServices-LocalSessionManager"
+event_id = 24
+message = "Remote Desktop Services: Session has been disconnected. User: {User}, session ID: {SessionID}, source network address: {Address}"
+
+[[template]]
+provider = "Microsoft-Windows-TerminalServices-LocalSessionManager"
+event_id = 25
+message = "Remote Desktop Services: Session reconnection succeeded. User: {User}, session ID: {SessionID}, source network address: {Address}"
+
+[[template]]
+provider = "Microsoft-Windows-TerminalServices-LocalSessionManager"
+event_id = 39
+message = "Session {TargetSession} has been disconnected by session {Source}"
+
+[[template]]
+provider = "Microsoft-Windows-TerminalServices-LocalSessionManager"
+event_id = 40
+message = "Session {Session} has been disconnected, reason code {Reason}"
+
+[[template]]
+provider = "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS"
+event_id = 131
+message = "The server accepted a new {ConnType} connection from client {ClientIP}"
+
+[[template]]
+provider = "Microsoft-Windows-TerminalServices-ClientActiveXCore"
+event_id = 1024
+message = "RDP ClientActiveX is trying to connect to the server ({Value})"

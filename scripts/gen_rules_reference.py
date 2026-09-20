@@ -29,6 +29,13 @@ def format_match(match: dict) -> str:
                 parts.append(f"message contains any of:<br>{items}")
             else:
                 parts.append(f"message contains `{value}`")
+        elif key == "event_data" and isinstance(value, dict):
+            pairs = "<br>".join(f"&bull; `{k}` = `{v}`" for k, v in value.items())
+            parts.append(f"event data has:<br>{pairs}")
+        elif key == "subsystem_prefix":
+            values = value if isinstance(value, list) else [value]
+            items = "<br>".join(f"&bull; `{v}`" for v in values)
+            parts.append(f"subsystem starts with any of:<br>{items}")
         elif isinstance(value, bool):
             parts.append(f"`{key}` = `{str(value).lower()}`")
         else:
@@ -102,13 +109,16 @@ def main():
     out.append("")
     out.append(build_table(aul_rules))
     out.append("")
-    out.append(f"## EVTX Security-Auditing rules ({len(evtx_rules)})")
+    out.append(f"## EVTX rules ({len(evtx_rules)})")
     out.append("")
     out.append(
-        "Cross-checked against [Microsoft's official Security Auditing "
-        "event reference](https://learn.microsoft.com/windows/security/threat-protection/auditing/) "
-        "for each event ID — see each rule file's header comment for the "
-        "specific citation. Every rule matches `sourcetype = \"evtx\"`; "
+        "Security-Auditing events are cross-checked against [Microsoft's "
+        "official Security Auditing event reference](https://learn.microsoft.com/windows/security/threat-protection/auditing/); "
+        "the Remote Desktop / Terminal Services and kernel events rest on the "
+        "providers' own manifest texts and EricZimmerman's EvtxECmd maps — see "
+        "each rule file's header comment for its specific citation and for "
+        "whether it was checked against real records. Every rule matches "
+        "`sourcetype = \"evtx\"`; "
         "companion to the built-in EVTX message templates (see "
         "[field-extraction.md](field-extraction.md#message-templates-evtx))."
     )

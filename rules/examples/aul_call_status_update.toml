@@ -1,0 +1,40 @@
+# AUL pattern-of-life: call state transitions logged by CommCenter's call
+# controller ("Call(StatusUpdate) <from> -> <to> for call <id>"). This is the
+# chain that says whether a dialed call actually connected, which the
+# call.provider transaction blocks of aul_dialed_number_recovery.toml cannot
+# say on their own: Thesis Friday #24 records one attempt that ran
+# "InitializingMedia -> Dialing" and collapsed to "Disconnected ->
+# Disconnected" within 317 ms, and a second that traversed the full chain.
+#
+# Scoped to category `call`, as iLEAPP's `logarchive_dialed_numbers` does
+# (`category = 'call' AND ... LIKE '%Call(StatusUpdate)%'`): the category
+# holds many unrelated CommCenter lines (network attach state, IMS config,
+# personality changes), so the message alone is matched only inside it.
+#
+# The call identifier in these lines is redacted to <private> in the
+# quoted examples, so a status chain is tied to its dialed-number block by
+# timing, not by an identifier.
+#
+# Collected by iLEAPP (its notes do not say on which image the status lines
+# were seen) and quoted by Thesis Friday on iOS 26.6, a single device. The
+# message does not occur in the 6.4M-record iOS load the other AUL rules
+# were re-checked against, so this is a documented predicate, not one
+# validated on local data.
+#
+# Source: Thesis Friday #24 (Tim Korver):
+# https://thesisfriday.com/thesis-friday-24-recovering-a-dialed-number-from-the-unified-log/
+# Category scoping: iLEAPP `logarchive_dialed_numbers`
+# (https://github.com/abrignoni/iLEAPP).
+
+[rule]
+name = "aul_call_status_update"
+description = "CommCenter call state transitions (Call(StatusUpdate) ... -> ...) — shows whether a dialed call reached Dialing or connected, or collapsed to Disconnected"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+category = "call"
+message_contains = "Call(StatusUpdate)"
+
+[rule.tag]
+value = "call_status_update"

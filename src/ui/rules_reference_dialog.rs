@@ -1,6 +1,17 @@
-//! "Rules reference" — every currently active AUL/EVTX/journald/
-//! intrusion_log tagging rule's match condition, tag, and description,
-//! grouped by sourcetype.
+//! "Rules reference" — every currently active tagging rule's match
+//! condition, tag, and description, in one table with a search box, a Source
+//! dropdown and sortable column headers (the model and controls it shares
+//! with the Built-in Rules picker live in [`crate::ui::rule_list`]). Unlike
+//! that picker it is read-only. Every row is one line of the same height;
+//! selecting a rule shows its complete match condition and description in a
+//! panel below the table.
+//!
+//! The rows are deliberately not sized to their content. A rule can have
+//! thirty match phrases, and a table whose rows are each as tall as their
+//! longest cell is neither scannable nor, without measuring the text against
+//! the real column widths, reliably laid out. One-line rows with a summary
+//! in the Match column (the full text is in the tooltip and the detail panel)
+//! keep the overview and never clip.
 //!
 //! Built from [`tagging::builtin::active_builtin_rules`] every time the
 //! dialog opens, **not** from the static `docs/rules-reference.md` file this
@@ -19,69 +30,23 @@
 //! GitHub. The button stays, but is disabled (with an explanatory tooltip)
 //! whenever a downloaded pack is active rather than linking to something
 //! that no longer matches what's on screen.
-//!
-//! Headings/prose go through [`egui_commonmark`] for clickable links and
-//! real heading styles; each pack's rule table is hand-built with
-//! `egui_extras::TableBuilder` instead (real column wrapping, real per-row
-//! height for rules with many predicates) — same split the previous,
-//! markdown-doc-backed version of this dialog used.
 
 use eframe::egui;
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_extras::{Column, TableBuilder};
 
 use crate::tagging::builtin;
 use crate::tagging::pack_bundle;
-use crate::tagging::rule::Rule;
 use crate::tagging::rule_file;
 use crate::ui::dialog_window::show_dialog_window;
+use crate::ui::rule_list::{
+    RuleRow, SortColumn, ViewState, search_row, sort_header, source_dropdown, visible_indices,
+};
 
 /// The GitHub copy of the build-time-generated reference doc — only ever
 /// accurate while the embedded (tier 1) baseline is active, see this
 /// module's doc comment. Gated accordingly in the UI.
 const RULES_REFERENCE_URL: &str =
     "https://github.com/kalink0/peach-forensics/blob/main/docs/rules-reference.md";
-
-/// One rule, flattened for table display. `name` already carries the
-/// rule's own version suffix (e.g. `aul_airplane_mode (v3)`) when present,
-/// rather than a separate column — keeps the table at the same four
-/// columns the previous doc-backed version had.
-pub struct RuleRow {
-    name: String,
-    match_condition: String,
-    tag: String,
-    description: String,
-}
-
-/// One sourcetype's worth of rules — `heading_markdown` is rendered once
-/// through `CommonMarkViewer`, the rows through `TableBuilder`.
-pub struct Section {
-    heading_markdown: String,
-    rules: Vec<RuleRow>,
-}
-
-impl RuleRow {
-    fn from_rule(rule: &Rule) -> Self {
-        let name = match &rule.rule.version {
-            Some(version) => format!("{} (v{version})", rule.rule.name),
-            None => rule.rule.name.clone(),
-        };
-        RuleRow {
-            name,
-            match_condition: format_match(&rule.rule.match_fields),
-            tag: rule.rule.tag.value.clone(),
-            description: rule.rule.description.clone().unwrap_or_default(),
-        }
-    }
-
-    fn matches_filter(&self, filter_lower: &str) -> bool {
-        filter_lower.is_empty()
-            || self.name.to_lowercase().contains(filter_lower)
-            || self.match_condition.to_lowercase().contains(filter_lower)
-            || self.tag.to_lowercase().contains(filter_lower)
-            || self.description.to_lowercase().contains(filter_lower)
-    }
-}
 
 pub enum RulesReferenceDialog {
     Closed,
@@ -95,15 +60,14 @@ pub enum RulesReferenceDialog {
         active_pack_version: Option<u32>,
         /// Parsed once at open time, not every frame — same reasoning
         /// `RawFieldsDialog` pretty-prints `fields` once.
-        sections: Vec<Section>,
-        /// `egui_commonmark`'s image/layout cache — persists across frames
-        /// on purpose; recreating it every frame would defeat its point.
-        cache: CommonMarkCache,
-        /// Case-insensitive substring filter over every rule's name, match
-        /// condition, tag, and description. A pack section disappears
-        /// entirely once none of its rules match, rather than showing an
-        /// empty table under a heading.
-        filter: String,
+        rows: Vec<RuleRow>,
+        view: ViewState,
+        /// The rule whose full details are shown below the table, by name.
+        /// Kept when a filter hides its row.
+        selected: Option<String>,
+        /// Set on open so the search box has the keyboard straight away;
+        /// cleared after the first frame.
+        focus_search: bool,
     },
 }
 
@@ -117,9 +81,10 @@ impl RulesReferenceDialog {
         let rules = builtin::active_builtin_rules(applied_pack_dir.as_deref());
         Self::Open {
             active_pack_version,
-            sections: build_sections(&rules),
-            cache: CommonMarkCache::default(),
-            filter: String::new(),
+            rows: rules.iter().map(RuleRow::from_rule).collect(),
+            view: ViewState::default(),
+            selected: None,
+            focus_search: true,
         }
     }
 
@@ -132,30 +97,30 @@ impl RulesReferenceDialog {
 
         if let Self::Open {
             active_pack_version,
-            sections,
-            cache,
-            filter,
+            rows,
+            view,
+            selected,
+            focus_search,
         } = self
         {
             close = show_dialog_window(
                 ctx,
                 "peach_rules_reference_dialog",
                 "Rules Reference",
-                [860.0, 660.0],
+                [960.0, 680.0],
                 true,
                 |ui, close| {
-                    // Pinned to the bottom *before* the scroll area below —
-                    // same reasoning as `activity_log_dialog`'s bottom bar:
-                    // an unbounded `ScrollArea` claims all remaining space
-                    // in its parent `Ui` first, which for this dialog's
-                    // hundred-plus rules (some `TableBuilder` rows well
-                    // over 400px tall for a rule with 20+ predicates) grew
-                    // the whole window far past the screen instead of
-                    // scrolling, taking the Close button down with it and
-                    // out of reach. `Panel::bottom` reserves its own space
-                    // up front regardless of source order, so the button
-                    // stays visible and the scroll area gets exactly what's
-                    // left of the window's actual (bounded) height.
+                    // Pinned to the bottom *before* the table below, same
+                    // reasoning as `activity_log_dialog`'s bottom bar: a
+                    // scrolling region claims all remaining space in its
+                    // parent `Ui` first, which would push a Close button
+                    // placed after it out of the window (with this dialog's
+                    // hundred-plus rules, some over 400px tall, it grew the
+                    // whole window past the screen and took the button with
+                    // it). `Panel::bottom` reserves its own space up front
+                    // regardless of source order, so the button stays
+                    // visible and the table gets exactly what's left of the
+                    // window's actual (bounded) height.
                     egui::Panel::bottom("peach_rules_reference_dialog_bottom_bar").show(ui, |ui| {
                         ui.add_space(4.0);
                         if ui.button("Close").clicked() {
@@ -163,12 +128,25 @@ impl RulesReferenceDialog {
                         }
                         ui.add_space(4.0);
                     });
+                    // Above the Close bar (panels stack from the edge inward),
+                    // also declared before the table so the table gets only
+                    // what is left.
+                    egui::Panel::bottom("peach_rules_reference_dialog_detail").show(ui, |ui| {
+                        ui.add_space(4.0);
+                        detail_panel(ui, rows, selected.as_deref());
+                        ui.add_space(4.0);
+                    });
 
                     render_active_pack_line(ui, *active_pack_version);
+                    ui.weak(
+                        "Built from the rules actually active in this session right now, not \
+                         a fixed snapshot — this updates whenever a different rule pack is \
+                         applied. See File \u{2192} Rule packs... to check for updates.",
+                    );
 
+                    search_row(ui, view, focus_search);
                     ui.horizontal(|ui| {
-                        ui.label("Filter:");
-                        ui.text_edit_singleline(filter);
+                        source_dropdown(ui, rows, view);
                         let github_button = ui.add_enabled(
                             active_pack_version.is_none(),
                             egui::Button::new("Open on GitHub..."),
@@ -186,37 +164,17 @@ impl RulesReferenceDialog {
                                 .open_url(egui::OpenUrl::same_tab(RULES_REFERENCE_URL));
                         }
                     });
+
+                    let visible = visible_indices(rows, None, view);
+                    ui.weak(format!("{} of {} rules shown", visible.len(), rows.len()));
                     ui.separator();
 
-                    let filter_lower = filter.trim().to_lowercase();
-
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        if filter_lower.is_empty() {
-                            CommonMarkViewer::new().show(
-                                ui,
-                                cache,
-                                "Built from the rules actually active in this session right \
-                                 now, not a fixed snapshot — this updates whenever a \
-                                 different rule pack is applied. See **File → Rule packs...** \
-                                 to check for updates.",
-                            );
-                        }
-
-                        for section in sections.iter() {
-                            let visible_rules: Vec<&RuleRow> = section
-                                .rules
-                                .iter()
-                                .filter(|r| r.matches_filter(&filter_lower))
-                                .collect();
-                            if visible_rules.is_empty() {
-                                continue;
-                            }
-
-                            CommonMarkViewer::new().show(ui, cache, &section.heading_markdown);
-                            render_rule_table(ui, &visible_rules);
-                            ui.add_space(12.0);
-                        }
-                    });
+                    if visible.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label("No rules match the current filters.");
+                    } else {
+                        reference_table(ui, rows, &visible, view, selected);
+                    }
                 },
             );
         }
@@ -244,310 +202,272 @@ fn render_active_pack_line(ui: &mut egui::Ui, active_pack_version: Option<u32>) 
     }
 }
 
-/// Groups `rules` into one [`Section`] per sourcetype (AUL, EVTX,
-/// journald, intrusion_log), sorted by rule name within each — plus a
-/// catch-all "Other" group for anything that doesn't declare one of those
-/// four (e.g. a downloaded pack containing a rule with no `sourcetype`
-/// match condition at all), so a rule this dialog doesn't recognize is
-/// still shown rather than silently dropped.
-fn build_sections(rules: &[Rule]) -> Vec<Section> {
-    let mut aul = Vec::new();
-    let mut evtx = Vec::new();
-    let mut journald = Vec::new();
-    let mut intrusion_log = Vec::new();
-    let mut biome = Vec::new();
-    let mut other = Vec::new();
+/// Height of every table row. One line of text plus a little air.
+const ROW_HEIGHT: f32 = 20.0;
 
-    for rule in rules {
-        let sourcetype = rule
-            .rule
-            .match_fields
-            .get("sourcetype")
-            .and_then(|v| v.as_str());
-        match sourcetype {
-            Some("aul") => aul.push(rule),
-            Some("evtx") => evtx.push(rule),
-            Some("journald") => journald.push(rule),
-            Some("intrusion_log") => intrusion_log.push(rule),
-            Some("biome") => biome.push(rule),
-            _ => other.push(rule),
-        }
-    }
-
-    [
-        ("AUL pattern-of-life rules", aul),
-        ("EVTX Security-Auditing rules", evtx),
-        ("journald rules", journald),
-        ("Android Intrusion Log rules", intrusion_log),
-        ("Apple Biome rules", biome),
-        ("Other rules", other),
-    ]
-    .into_iter()
-    .filter(|(_, group)| !group.is_empty())
-    .map(|(label, mut group)| {
-        group.sort_by(|a, b| a.rule.name.cmp(&b.rule.name));
-        let rules: Vec<RuleRow> = group.iter().map(|r| RuleRow::from_rule(r)).collect();
-        Section {
-            heading_markdown: format!("## {label} ({})", rules.len()),
-            rules,
-        }
-    })
-    .collect()
-}
-
-/// Renders a rule's `[rule.match]` table as human-readable lines, one
-/// condition per line — `sourcetype` is skipped (already implied by which
-/// [`Section`] the rule is in), `message_contains` gets its own bulleted
-/// form for its OR-list semantics, everything else is `key = value` with
-/// the value in the same syntax the source TOML itself uses (via
-/// `toml::Value`'s own `Display`), rather than re-deriving a
-/// presentation-only format — what's on screen matches what the rule file
-/// actually says.
-fn format_match(match_fields: &toml::Table) -> String {
-    let mut parts = Vec::new();
-    for (key, value) in match_fields {
-        if key == "sourcetype" {
-            continue;
-        }
-        if key == "message_contains" {
-            parts.push(format_message_contains(value));
-        } else {
-            parts.push(format!("{key} = {value}"));
-        }
-    }
-    if parts.is_empty() {
-        "(sourcetype only)".to_string()
-    } else {
-        parts.join("\n")
-    }
-}
-
-fn format_message_contains(value: &toml::Value) -> String {
-    match value {
-        toml::Value::Array(items) => {
-            let bullets: Vec<String> = items.iter().map(|v| format!("• {v}")).collect();
-            format!("message contains any of:\n{}", bullets.join("\n"))
-        }
-        other => format!("message contains {other}"),
-    }
-}
-
-fn render_rule_table(ui: &mut egui::Ui, rows: &[&RuleRow]) {
+/// The rule table. It is the dialog's only scrolling region (no outer
+/// `ScrollArea`), so `TableBuilder`'s own vertical scrollbar is the right
+/// one. Every row is one line, so `rows` (fixed height, only the rows on
+/// screen are built) is enough. Text that doesn't fit its column is cut with
+/// an ellipsis, and the full text is in the row's tooltip and, for the
+/// selected rule, the detail panel.
+///
+/// Clicking any cell selects the rule. The cells carry their own click sense
+/// rather than the table row: a row-level `Sense::click` is the shape that
+/// interfered with the timeline's row context menu.
+fn reference_table(
+    ui: &mut egui::Ui,
+    rows: &[RuleRow],
+    visible: &[usize],
+    view: &mut ViewState,
+    selected: &mut Option<String>,
+) {
     TableBuilder::new(ui)
-        // `TableBuilder` wraps its body in its own `ScrollArea` by default
-        // (sensible when a table is the only scrollable thing on screen,
-        // e.g. `ui::timeline_view`) — here three of these sit inside one
-        // outer `ScrollArea` that scrolls the whole dialog, so each
-        // table's own scrollbar would just be a redundant, confusing
-        // second scrollbar nested inside the first. Disabled; the outer
-        // scroll area is the only one that should exist.
-        .vscroll(false)
         .striped(true)
-        .column(Column::auto().at_least(160.0))
-        .column(Column::remainder().at_least(260.0))
-        .column(Column::auto().at_least(130.0))
-        .column(Column::remainder().at_least(220.0))
-        .header(20.0, |mut header| {
+        .resizable(true)
+        .min_scrolled_height(0.0)
+        .column(Column::initial(110.0).at_least(60.0).clip(true))
+        .column(Column::initial(230.0).at_least(120.0).clip(true))
+        .column(Column::initial(260.0).at_least(120.0).clip(true))
+        .column(Column::initial(170.0).at_least(80.0).clip(true))
+        .column(Column::remainder().at_least(160.0).clip(true))
+        .header(22.0, |mut header| {
             header.col(|ui| {
-                ui.strong("Rule name");
+                sort_header(ui, "Source", SortColumn::Source, view);
+            });
+            header.col(|ui| {
+                sort_header(ui, "Rule", SortColumn::Rule, view);
             });
             header.col(|ui| {
                 ui.strong("Match");
             });
             header.col(|ui| {
-                ui.strong("Tag");
+                sort_header(ui, "Tag", SortColumn::Tag, view);
             });
             header.col(|ui| {
                 ui.strong("Description");
             });
         })
-        .body(|mut body| {
-            for row in rows {
-                body.row(estimate_row_height(row), |mut table_row| {
-                    table_row.col(|ui| {
-                        ui.label(egui::RichText::new(&row.name).monospace());
-                    });
-                    table_row.col(|ui| {
-                        ui.label(egui::RichText::new(&row.match_condition).monospace());
-                    });
-                    table_row.col(|ui| {
-                        ui.label(egui::RichText::new(&row.tag).monospace());
-                    });
-                    table_row.col(|ui| {
-                        ui.label(&row.description);
-                    });
+        .body(|body| {
+            body.rows(ROW_HEIGHT, visible.len(), |mut row| {
+                let rule = &rows[visible[row.index()]];
+                let is_selected = selected.as_deref() == Some(rule.name.as_str());
+                row.set_selected(is_selected);
+
+                let mut clicked = false;
+                let mut cell = |ui: &mut egui::Ui, text: egui::RichText, hover: &str| {
+                    let response = ui
+                        .add(
+                            egui::Label::new(text)
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text(hover);
+                    clicked |= response.clicked();
+                };
+                row.col(|ui| {
+                    cell(ui, egui::RichText::new(rule.source.label()), &rule.hover);
                 });
-            }
+                row.col(|ui| {
+                    cell(
+                        ui,
+                        egui::RichText::new(&rule.display_name).monospace(),
+                        &rule.hover,
+                    );
+                });
+                row.col(|ui| {
+                    cell(
+                        ui,
+                        egui::RichText::new(&rule.match_summary).monospace(),
+                        &rule.match_condition,
+                    );
+                });
+                row.col(|ui| {
+                    cell(ui, egui::RichText::new(&rule.tag).monospace(), &rule.hover);
+                });
+                row.col(|ui| {
+                    cell(ui, egui::RichText::new(&rule.description), &rule.hover);
+                });
+                if clicked {
+                    *selected = Some(rule.name.clone());
+                }
+            });
         });
 }
 
-/// Approximates the row height a wrapped multi-line `Match` cell needs, so
-/// `TableBuilder::body::row` (which wants a height up front, not something
-/// it measures after the fact) doesn't clip a rule with many predicates.
-/// Counts explicit lines only (each condition/bullet is its own line via
-/// [`format_match`]), not word-wrap within a single very long line — an
-/// approximation, not exact layout math; worst case one unusually long
-/// single line looks slightly cramped, nothing is lost or hidden.
-fn estimate_row_height(row: &RuleRow) -> f32 {
-    const LINE_HEIGHT: f32 = 16.0;
-    const VERTICAL_PADDING: f32 = 10.0;
-    let lines = row.match_condition.lines().count().max(1) as f32;
-    lines * LINE_HEIGHT + VERTICAL_PADDING
+/// The selected rule's complete details: name, source and tag, the full
+/// description, and the whole match condition, wrapped and scrollable. With
+/// nothing selected, a hint — the panel keeps a minimum height either way so
+/// the table above doesn't jump when a rule is picked.
+fn detail_panel(ui: &mut egui::Ui, rows: &[RuleRow], selected: Option<&str>) {
+    ui.set_min_height(110.0);
+    let Some(rule) = selected.and_then(|name| rows.iter().find(|r| r.name == name)) else {
+        ui.weak("Click a rule to see its full match condition and description here.");
+        return;
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.strong(&rule.display_name);
+        ui.weak(format!("\u{00B7} {} \u{00B7} tag", rule.source.label()));
+        ui.monospace(&rule.tag);
+    });
+    if !rule.description.is_empty() {
+        ui.add(egui::Label::new(&rule.description).wrap());
+    }
+    egui::ScrollArea::vertical()
+        .id_salt("peach_rules_reference_dialog_detail_scroll")
+        .max_height(150.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(&rule.match_condition).monospace()).wrap());
+        });
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+    use crate::tagging::rule::Rule;
+    use crate::ui::rule_list::{Source, StatusFilter};
 
     fn rule(toml_text: &str) -> Rule {
         Rule::from_toml_str(toml_text).expect("valid test rule TOML")
     }
 
+    fn row(toml_text: &str) -> RuleRow {
+        RuleRow::from_rule(&rule(toml_text))
+    }
+
+    /// The one-line Match cell shows a summary; the full condition is what
+    /// the tooltip and the detail panel show, so both must exist and the
+    /// summary must never be longer than the full text would need.
     #[test]
-    fn format_match_skips_sourcetype_and_renders_key_value_pairs() {
-        let r = rule(
-            "[rule]\nname = \"e\"\n[rule.match]\nsourcetype = \"evtx\"\nevent_id = 4625\n[rule.tag]\nvalue = \"t\"\n",
+    fn a_row_has_a_one_line_summary_and_the_full_multi_line_condition() {
+        let r = row(
+            "[rule]\nname = \"e\"\n[rule.match]\nmessage_contains = [\"a\", \"b\", \"c\", \"d\", \"e\"]\n[rule.tag]\nvalue = \"t\"\n",
         );
-        assert_eq!(format_match(&r.rule.match_fields), "event_id = 4625");
+        assert!(!r.match_summary.contains('\n'), "{:?}", r.match_summary);
+        assert!(r.match_summary.contains("(+2 more)"), "{}", r.match_summary);
+        // "message contains any of:" plus five bullets.
+        assert_eq!(r.match_condition.lines().count(), 6);
     }
 
     #[test]
-    fn format_match_renders_message_contains_array_as_bullets() {
-        let r = rule(
-            "[rule]\nname = \"e\"\n[rule.match]\nmessage_contains = [\"a\", \"b\"]\n[rule.tag]\nvalue = \"t\"\n",
-        );
-        assert_eq!(
-            format_match(&r.rule.match_fields),
-            "message contains any of:\n• \"a\"\n• \"b\""
-        );
-    }
-
-    #[test]
-    fn format_match_renders_a_single_message_contains_string() {
-        let r = rule(
-            "[rule]\nname = \"e\"\n[rule.match]\nmessage_contains = \"kPhoneNumber\"\n[rule.tag]\nvalue = \"t\"\n",
-        );
-        assert_eq!(
-            format_match(&r.rule.match_fields),
-            "message contains \"kPhoneNumber\""
-        );
-    }
-
-    #[test]
-    fn format_match_reports_sourcetype_only_rules_explicitly() {
-        let r = rule(
-            "[rule]\nname = \"e\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"t\"\n",
-        );
-        assert_eq!(format_match(&r.rule.match_fields), "(sourcetype only)");
-    }
-
-    #[test]
-    fn rule_row_from_rule_appends_version_when_present() {
-        let r = rule(
-            "[rule]\nname = \"aul_x\"\nversion = \"3\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"x\"\n",
-        );
-        let row = RuleRow::from_rule(&r);
-        assert_eq!(row.name, "aul_x (v3)");
-    }
-
-    #[test]
-    fn rule_row_from_rule_omits_version_suffix_when_absent() {
-        let r = rule(
-            "[rule]\nname = \"aul_x\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"x\"\n",
-        );
-        let row = RuleRow::from_rule(&r);
-        assert_eq!(row.name, "aul_x");
-    }
-
-    #[test]
-    fn build_sections_groups_by_sourcetype_and_sorts_by_name() {
-        let rules = vec![
-            rule(
-                "[rule]\nname = \"aul_b\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"t\"\n",
-            ),
-            rule(
-                "[rule]\nname = \"aul_a\"\n[rule.match]\nsourcetype = \"aul\"\n[rule.tag]\nvalue = \"t\"\n",
-            ),
-            rule(
-                "[rule]\nname = \"evtx_a\"\n[rule.match]\nsourcetype = \"evtx\"\n[rule.tag]\nvalue = \"t\"\n",
-            ),
-        ];
-        let sections = build_sections(&rules);
-
-        assert_eq!(sections.len(), 2);
-        assert!(sections[0].heading_markdown.contains("AUL"));
-        assert_eq!(sections[0].rules.len(), 2);
-        assert_eq!(sections[0].rules[0].name, "aul_a");
-        assert_eq!(sections[0].rules[1].name, "aul_b");
-        assert!(sections[1].heading_markdown.contains("EVTX"));
-    }
-
-    #[test]
-    fn build_sections_puts_rules_with_no_recognized_sourcetype_in_other() {
-        let rules = vec![rule(
-            "[rule]\nname = \"generic_error\"\n[rule.match]\nlevel = \"ERROR\"\n[rule.tag]\nvalue = \"error\"\n",
-        )];
-        let sections = build_sections(&rules);
-
-        assert_eq!(sections.len(), 1);
-        assert!(sections[0].heading_markdown.contains("Other"));
-    }
-
-    /// Regression coverage against the real embedded baseline, not just
-    /// the parser/grouping logic in isolation — confirms
-    /// `active_builtin_rules(None)` produces all four expected pack
-    /// sections with no empty ones (and no "Other" catch-all, since every
-    /// embedded rule declares one of the four known sourcetypes).
-    #[test]
-    fn the_embedded_baseline_groups_into_five_non_empty_sections() {
-        let rules = builtin::active_builtin_rules(None);
-        let sections = build_sections(&rules);
-        assert_eq!(sections.len(), 5);
-        for section in &sections {
-            assert!(!section.rules.is_empty());
-            for row in &section.rules {
-                assert!(!row.name.is_empty());
-                assert!(!row.tag.is_empty());
-            }
-        }
-    }
-
-    /// `matches_filter` takes an *already-lowercased* filter (the call
-    /// site lowercases it once per frame, not once per row) — case
-    /// insensitivity comes from lowercasing each field's own content
-    /// inside this method, which is what's under test here, e.g. a
-    /// lowercase "airplane" filter matching the mixed-case
-    /// "Airplane Mode is now 1" match condition.
-    #[test]
-    fn rule_row_filter_matches_any_field_case_insensitively() {
-        let row = RuleRow {
-            name: "aul_airplane_mode".to_string(),
-            match_condition: "Airplane Mode is now 1".to_string(),
-            tag: "airplane_mode".to_string(),
-            description: "Airplane mode enabled or disabled".to_string(),
-        };
-        assert!(row.matches_filter(""));
-        assert!(row.matches_filter("airplane"));
-        assert!(row.matches_filter("now 1"));
-        assert!(row.matches_filter("enabled or disabled"));
-        assert!(!row.matches_filter("bluetooth"));
-    }
-
-    #[test]
-    fn open_starts_dialog_open_with_no_filter_and_no_active_pack_version() {
+    fn open_starts_dialog_open_with_no_filter() {
         let dialog = RulesReferenceDialog::open();
         assert!(dialog.is_open());
         assert!(matches!(
             &dialog,
-            RulesReferenceDialog::Open {
-                filter,
-                ..
-            } if filter.is_empty()
+            RulesReferenceDialog::Open { view, selected: None, .. } if view.no_filter()
         ));
     }
 
     #[test]
     fn closed_is_not_open() {
         assert!(!RulesReferenceDialog::Closed.is_open());
+    }
+
+    /// Regression coverage against the real embedded baseline, not just the
+    /// grouping logic in isolation: every shipped rule gets a row, none is
+    /// in the "Other" catch-all (every embedded rule declares one of the
+    /// known sourcetypes), and each has a name and tag.
+    #[test]
+    fn the_embedded_baseline_lists_every_rule_in_a_known_source() {
+        let rules = builtin::active_builtin_rules(None);
+        let rows: Vec<RuleRow> = rules.iter().map(RuleRow::from_rule).collect();
+        assert_eq!(rows.len(), rules.len());
+        for r in &rows {
+            assert!(!r.name.is_empty());
+            assert!(!r.tag.is_empty());
+            assert!(!r.match_condition.is_empty());
+            assert_ne!(r.source, Source::Other, "{}", r.name);
+        }
+        let sources: BTreeSet<Source> = rows.iter().map(|r| r.source).collect();
+        assert_eq!(sources.len(), 5);
+    }
+
+    /// Runs `frames` frames of the dialog in a headless egui context — no
+    /// window, so this catches a panic in the layout/table code, not how it
+    /// looks.
+    fn render(dialog: &mut RulesReferenceDialog, frames: usize) {
+        let ctx = egui::Context::default();
+        for _ in 0..frames {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 900.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(input, |ui| dialog.ui(ui.ctx()));
+        }
+    }
+
+    #[test]
+    fn the_dialog_renders_the_shipped_rules_in_every_view_without_panicking() {
+        let searching = |text: &str| ViewState {
+            search: text.into(),
+            ..ViewState::default()
+        };
+        let mut hide_aul = ViewState::default();
+        hide_aul.toggle_source(Source::Aul);
+        let mut views = vec![
+            ViewState::default(),
+            searching("airplane"),
+            searching("no rule contains this text 9f3a"),
+            hide_aul,
+            ViewState {
+                status: StatusFilter::Disabled,
+                ..ViewState::default()
+            },
+        ];
+        for column in [SortColumn::Source, SortColumn::Rule, SortColumn::Tag] {
+            for ascending in [true, false] {
+                views.push(ViewState {
+                    sort_column: column,
+                    ascending,
+                    ..ViewState::default()
+                });
+            }
+        }
+
+        for view in views {
+            let mut dialog = RulesReferenceDialog::open();
+            if let RulesReferenceDialog::Open { view: v, .. } = &mut dialog {
+                *v = view;
+            }
+            render(&mut dialog, 3);
+            assert!(dialog.is_open());
+        }
+    }
+
+    /// The detail panel with a real rule selected, with a name that isn't in
+    /// the list (a filter never removes it from `rows`, but a stale name
+    /// must not panic), and while a search hides the selected rule's row.
+    #[test]
+    fn the_detail_panel_renders_for_a_present_a_missing_and_a_filtered_out_rule() {
+        let first_name = match RulesReferenceDialog::open() {
+            RulesReferenceDialog::Open { rows, .. } => rows[0].name.clone(),
+            RulesReferenceDialog::Closed => unreachable!(),
+        };
+        for (selected, search) in [
+            (Some(first_name.clone()), ""),
+            (Some("no_such_rule".to_string()), ""),
+            (Some(first_name), "no rule contains this text 9f3a"),
+            (None, ""),
+        ] {
+            let mut dialog = RulesReferenceDialog::open();
+            if let RulesReferenceDialog::Open {
+                selected: sel,
+                view,
+                ..
+            } = &mut dialog
+            {
+                *sel = selected;
+                view.search = search.into();
+            }
+            render(&mut dialog, 3);
+            assert!(dialog.is_open());
+        }
     }
 }

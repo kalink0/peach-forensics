@@ -32,8 +32,9 @@ pub fn aul_pattern_of_life_rules() -> Vec<Rule> {
         .collect()
 }
 
-/// The EVTX Security-Auditing tagging pack (`rules/examples/evtx_*.toml`),
-/// the tagging companion to the built-in EVTX message templates
+/// The EVTX tagging pack (`rules/examples/evtx_*.toml`) — Security-Auditing
+/// events plus Remote Desktop / Terminal Services and kernel boot/shutdown
+/// events, despite the function's historical name — the tagging companion to the built-in EVTX message templates
 /// (`parsers::evtx_templates`, `message_templates/examples/evtx_*.toml`) —
 /// same embedding mechanism, same "every file in the directory ships
 /// automatically" property, see `build.rs`'s doc comment. Every rule in
@@ -247,11 +248,20 @@ mod tests {
             .find(|r| r.rule.tag.value == "dialed_number_recovery")
             .expect("expected an embedded rule tagging dialed_number_recovery");
 
+        let call_provider = serde_json::json!({ "category": "call.provider" });
         let message = "kPhoneNumber\": \"0652441234\", kActionType\": 0";
-        assert!(dialed_number.matches("aul", None, Some(message), &serde_json::Value::Null));
+        assert!(dialed_number.matches("aul", None, Some(message), &call_provider));
 
         let unrelated = "Started tracking call";
-        assert!(!dialed_number.matches("aul", None, Some(unrelated), &serde_json::Value::Null));
+        assert!(!dialed_number.matches("aul", None, Some(unrelated), &call_provider));
+
+        // The rule is scoped to CommCenter's call.provider category: the
+        // same text elsewhere (an emergency-contact notification whose name
+        // merely contains "kPhoneNumber") is not a dialed number.
+        let emergency = serde_json::json!({ "category": "Emergency" });
+        let notification = "#EmergCon,EMERGENCY:notification,kPhoneNumberStatusNotification";
+        assert!(!dialed_number.matches("aul", None, Some(notification), &emergency));
+        assert!(!dialed_number.matches("aul", None, Some(message), &serde_json::Value::Null));
     }
 
     #[test]
@@ -272,11 +282,12 @@ mod tests {
     fn embeds_every_evtx_rule_file_and_all_parse() {
         let rules = evtx_security_auditing_rules();
         // Same "loose lower bound" reasoning as the AUL pack's equivalent
-        // test — 41 Security-Auditing event IDs are shipped today, more can
-        // be added later without this test needing an edit.
+        // test — 59 EVTX rules (Security-Auditing, Remote Desktop / Terminal
+        // Services, kernel boot/shutdown/sleep, PowerShell) are shipped today,
+        // more can be added later without this test needing an edit.
         assert!(
-            rules.len() >= 41,
-            "expected at least 41 embedded EVTX rules, got {}",
+            rules.len() >= 59,
+            "expected at least 59 embedded EVTX rules, got {}",
             rules.len()
         );
     }
