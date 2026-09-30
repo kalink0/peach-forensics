@@ -2,6 +2,12 @@
 
 All notable changes to Peach will be documented in this file.
 
+## v0.9.1 - 2026-09-30
+
+### Improvements
+
+- **Linux build** — Linux release and nightly binaries are now built on a fixed Ubuntu 24.04 runner instead of GitHub's moving `ubuntu-latest`, so the minimum glibc they require no longer changes silently when GitHub moves `ubuntu-latest` to a newer Ubuntu release.
+
 ## v0.9.0 - 2026-09-20
 
 ### New Features

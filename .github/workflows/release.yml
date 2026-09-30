@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             artifact_name: peach-linux
           - os: windows-latest
             artifact_name: peach-windows

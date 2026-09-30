@@ -1,6 +1,7 @@
 # --- Internal / never publish ---
 # Bootstrap work-order document - stays local, never lands in the repo.
 CLAUDE.md
+.claude/
 
 # --- Rust ---
 # Cargo.lock is committed on purpose (peach is a binary application, not a library).

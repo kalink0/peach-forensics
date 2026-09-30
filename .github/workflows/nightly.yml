@@ -13,7 +13,7 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
     steps:
@@ -81,7 +81,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             artifact_name: peach-linux
           - os: windows-latest
             artifact_name: peach-windows
@@ -198,7 +198,7 @@ jobs:
   release:
     needs: [check, build, macos-universal]
     if: github.event_name == 'workflow_dispatch' || needs.check.outputs.should_run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Download Linux artifact
