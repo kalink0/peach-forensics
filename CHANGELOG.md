@@ -2,6 +2,12 @@
 
 All notable changes to Peach will be documented in this file.
 
+## Unreleased
+
+### Bug Fixes
+
+- **Windows: no Visual C++ Redistributable needed** — the Windows build now links the C runtime statically. Before, `peach.exe` imported `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll` and `MSVCP140.dll` and failed to start with a missing DLL error (`STATUS_DLL_NOT_FOUND`) on Windows without the Visual C++ Redistributable installed. Release, nightly and CI builds now check the imported DLLs and fail if the dynamic C runtime shows up again.
+
 ## v0.9.1 - 2026-09-30
 
 ### Improvements

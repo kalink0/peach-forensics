@@ -59,10 +59,11 @@ No native package for Linux yet — grab the binary from
 
 ### Windows runtime requirement
 
-Needs the [Microsoft Visual C++ Redistributable 2015-2022
+None from v0.9.2 on — the C runtime is linked statically, so `peach.exe`
+starts without the Microsoft Visual C++ Redistributable. Releases up to
+v0.9.1 need the [Visual C++ Redistributable 2015-2022
 (x64)](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist)
-installed (bundled DuckDB/SQLite link against it) — install it manually if
-peach fails to start with a missing DLL error.
+installed and fail to start with a missing DLL error without it.
 
 ## Building and running
 
