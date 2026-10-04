@@ -1,0 +1,32 @@
+# AUL pattern-of-life: the passcode text field (SBUIPasscodeTextField)
+# becoming the keyboard input target ("forSetDelegate:") and ceasing to be
+# it ("_teardownExistingDelegate:"). Shows that a passcode field was on
+# screen — not the digits, and not whether the code was correct.
+#
+# The process separates the lock screen (SpringBoard) from passcode prompts
+# for another authentication (CoreAuthUI on iOS 17.2.1 and 18.7,
+# LocalAuthenticationUIService on iOS 26.5.2, per iLEAPP); filter by the
+# Process column to tell them apart.
+#
+# Source: iLEAPP `logarchive_passcode_field` (commit 055b35a, 2026-10-03),
+# from Tim Korver's "Apple Unified Log search term and process cheatsheet",
+# which is not published on thesisfriday.com — iLEAPP is the citable
+# source: https://github.com/abrignoni/iLEAPP. iLEAPP saw the two forms in
+# equal numbers on each of its iOS 17.2.1-26.5.2 images and none on iOS
+# 12.4. iLEAPP's `LIKE '%_teardown...'` treats the leading underscore as a
+# one-character wildcard; matched literally here.
+
+[rule]
+name = "aul_passcode_field"
+description = "Passcode text field shown / dismissed as keyboard input target — not the digits, not the outcome"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "forSetDelegate:<SBUIPasscodeTextField",
+    "_teardownExistingDelegate:<SBUIPasscodeTextField",
+]
+
+[rule.tag]
+value = "passcode_field"

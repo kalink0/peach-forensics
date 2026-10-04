@@ -7,26 +7,69 @@
 # leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive unlock sessions and method".
 #
-# Five macOS-specific predicates added from Thesis Friday #26 (Tim Korver),
-# "Same unlock, three different stories" — distinguishing the Touch ID vs.
-# password unlock path on macOS specifically (tested macOS 26.6.2, build
-# 25G83, Mac16,8/Apple M4 Pro):
+# macOS predicates from Thesis Friday #26 (Tim Korver), "Same unlock, three
+# different stories" — the Touch ID vs. password unlock path on macOS
+# (tested macOS 26.6.2, build 25G83, Mac16,8/Apple M4 Pro):
 # https://thesisfriday.com/thesis-friday-26-same-unlock-three-different-stories/
-# - "matchResult:timestamp: MATCH" / "has received no-match": biometrickitd's
-#   and coreauthd's own match/reject verdict, one level up from the raw
-#   sensor press in aul_biometric_sensor_events — this is the authentication
-#   decision, not just hardware presence.
 # - "lockScreenImmediateFromTouchIDPress": loginwindow attributing a *lock*
 #   specifically to the Touch ID button, alongside the existing (differently
 #   worded) "lock button source" above.
 # - "authenticated as user" / "right 'system.login.screensaver'": the
 #   password path's authd grant — the only one of the three stories that
 #   puts a cleartext account name in the log.
+# - "LWDefaultScreenLockUI loginPressed:]" (with "Attempt #: N" further on
+#   the line), "password is CORRECT", "ODRecordVerifyPassword failed" and
+#   "pam_authenticate failed": the lock screen's password attempts and their
+#   outcome. The bare "Attempt #:" is not used, it is too generic on its own.
+#   Thesis Friday #27 found password-verification and authentication-failure
+#   lines throughout a block where no password was typed (it does not name
+#   the strings, so whether these two are of that kind is open). A failure
+#   line alone is not a person typing a wrong password; read it with the
+#   loginwindow lines around it:
+#   https://thesisfriday.com/thesis-friday-27-backward-reasoning-from-a-provable-endpoint/
+#
+# Version 2 (iOS kernel endpoint and outcome lines):
+# - "handle_async_keybag_unlock" and "Sending notification for volume": the
+#   two kernel lines Thesis Friday #28 counts as an unlock's provable
+#   endpoint (keybag unlocked, data volume notified; "volume" is the storage
+#   volume, not the volume buttons). "handle_async_keybag_unlock" is the
+#   apfs function prefix of the line ("(apfs) handle_async_keybag_unlock:6567:
+#   disk1s8 apfs is being UN-locked!" in Thesis Friday #12), so it covers
+#   that line whichever wording follows. #28 measured them gone within 13.2
+#   hours on a phone in daily use while the ChronoServices keybag lines
+#   survived, so their absence is not evidence that no unlock happened:
+#   https://thesisfriday.com/thesis-friday-28-what-a-busy-phone-forgets/
+#   The volume notification carries the state as written (unlocked, locked
+#   or "cx expired"), so it also tags locks.
+# - "is now UN-locked": the kernel keybag endpoint as iLEAPP collects it
+#   (commit 055b35a, 2026-10-03; "apfs Data is now UN-locked" on iOS 12.4,
+#   "apfs is now UN-locked" later), from Tim Korver's "Apple Unified Log
+#   search term and process cheatsheet", which is not published on
+#   thesisfriday.com — iLEAPP is the citable source.
+# - "Unlock attempt succeeded": SpringBoard's outcome line after "Processed
+#   authentication request", documented by Lionel Notari, who also shows
+#   success=YES with type 1 logged for a wrong passcode — the outcome is the
+#   following "Unlock attempt succeeded: yes/no", not the success flag:
+#   https://www.ios-unifiedlogs.com/post/ios-unified-logs-unlock
+#   iLEAPP reports it absent on all five of its images (iOS 12.4-26.5.2).
+# - Every ChronoServices keybag transition (not only those leaving
+#   "locked") is tagged by the companion rule
+#   aul_unlock_keybag_transitions.toml, same tag value.
+# - "matchResult:timestamp: MATCH" and "has received no-match" moved to
+#   aul_biometric_match.toml: a biometric match is not an unlock (Thesis
+#   Friday #27 recorded successful Touch ID matches on a machine that was
+#   already unlocked), so it gets its own tag.
+#
+# Acquisition caveat (Thesis Friday, "The stop rule"): in one 67-minute
+# acquisition window the author counted 158 kernel keybag unlock lines and
+# 370 keybag transition lines in an hour with no unlock in the reference
+# session — keep an acquisition logbook to tell these from user activity:
+# https://thesisfriday.com/the-stop-rule/
 
 [rule]
 name = "aul_unlock_sessions"
-description = "Unlock session duration, authentication method, and outcome"
-version = "1"
+description = "Unlock session duration, authentication method and outcome, kernel keybag/volume unlock endpoint"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
@@ -34,14 +77,20 @@ message_contains = [
     "Screen did unlock (Was locked for",
     "Screen did lock (Was unlocked for",
     "Processed authentication request",
+    "Unlock attempt succeeded",
     "Transition: locked ->",
     "apfs is being UN-locked",
+    "is now UN-locked",
+    "handle_async_keybag_unlock",
+    "Sending notification for volume",
     "lock button source",
-    "matchResult:timestamp: MATCH",
-    "has received no-match",
     "lockScreenImmediateFromTouchIDPress",
     "authenticated as user",
     "right 'system.login.screensaver'",
+    "LWDefaultScreenLockUI loginPressed:]",
+    "password is CORRECT",
+    "ODRecordVerifyPassword failed",
+    "pam_authenticate failed",
 ]
 
 [rule.tag]

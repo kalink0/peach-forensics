@@ -1,0 +1,47 @@
+# AUL pattern-of-life: the result of a Face ID / Touch ID match attempt —
+# the iOS kernel matchResultHandler line, biometrickitd's macOS
+# "matchResult:timestamp: MATCH <uid>: <uuid>" / "NO-MATCH", coreauthd's
+# "has received no-match", and SpringBoard's "Base unlock behavior received
+# biometric event" (finger on, finger off, bio unlocked, identity match
+# failed). One level above aul_biometric_sensor_events (what the hardware
+# saw), one level below aul_unlock_sessions (the state change).
+#
+# A match is not an unlock: Thesis Friday #27 recorded successful Touch ID
+# matches with the machine already unlocked and no change of state, and a
+# power-button press and a non-enrolled finger both produced a non-match
+# with nothing to separate them at this layer:
+# https://thesisfriday.com/thesis-friday-27-backward-reasoning-from-a-provable-endpoint/
+# The entry records the sensor stack's verdict, not who was in front of it.
+#
+# Sources:
+# - "matchResult:timestamp:" and "has received no-match": Thesis Friday #26
+#   (Tim Korver), macOS 26.6.2 verbatim lines. Version 1 of
+#   aul_unlock_sessions.toml matched only the MATCH form of the first one;
+#   both now live here, NO-MATCH included:
+#   https://thesisfriday.com/thesis-friday-26-same-unlock-three-different-stories/
+# - "Base unlock behavior received biometric event": Lionel Notari,
+#   https://www.ios-unifiedlogs.com/post/ios-unified-logs-unlock
+# - "matchResultHandler: MATCH": iLEAPP `logarchive_biometric_match`
+#   (commit 055b35a, 2026-10-03), from Tim Korver's "Apple Unified Log search
+#   term and process cheatsheet", which is not published on thesisfriday.com.
+#   Per iLEAPP the cheatsheet reads "MATCH -1" as firing on a wrong passcode
+#   and on a failed Face ID alike (the surrounding lines decide which), and
+#   the kernel line appeared on its iOS 12.4, 17.2.1 and 18.3.2 images but
+#   not on 18.7 or 26.5.2. https://github.com/abrignoni/iLEAPP
+
+[rule]
+name = "aul_biometric_match"
+description = "Face ID / Touch ID match results (MATCH, NO-MATCH, biometric events) — a match is not an unlock"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = [
+    "matchResultHandler: MATCH",
+    "matchResult:timestamp:",
+    "has received no-match",
+    "Base unlock behavior received biometric event",
+]
+
+[rule.tag]
+value = "biometric_match"

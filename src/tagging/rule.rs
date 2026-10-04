@@ -29,6 +29,12 @@ use thiserror::Error;
 /// a family that spells its members with different capitalization lists
 /// each spelling explicitly instead of relying on a silent case fold.
 ///
+/// `category_prefix` is the same prefix test for the `category` field
+/// (resolved exactly like the `category` key). It exists for families of
+/// categories that share a stem but whose full names are not documented,
+/// such as iLEAPP's `category LIKE 'SystemGesture%'` for SpringBoard's
+/// system gesture recognizers.
+///
 /// `event_data` is an inline table of field/value pairs that must all equal
 /// the same-named field of an EVTX record's payload — its `EventData`, or the
 /// `UserData` element for providers that log there (see
@@ -49,6 +55,9 @@ pub struct Rule {
     /// a rule whose only prefix is `""` must match nothing instead.
     #[serde(skip)]
     subsystem_prefixes: Vec<String>,
+    /// `category_prefix` values, prepared exactly like `subsystem_prefixes`.
+    #[serde(skip)]
+    category_prefixes: Vec<String>,
     /// `message_contains` needles, precomputed once from
     /// `rule.match_fields` here at parse time rather than rebuilt on every
     /// [`Rule::matches`] call. Import-time tagging runs `matches()` once per
@@ -93,10 +102,10 @@ impl Rule {
     pub fn from_toml_str(s: &str) -> Result<Self, RuleParseError> {
         let mut rule: Rule = toml::from_str(s)?;
         rule.message_contains_needles = match_strings(&rule.rule.match_fields, "message_contains");
-        rule.subsystem_prefixes = match_strings(&rule.rule.match_fields, "subsystem_prefix")
-            .into_iter()
-            .filter(|prefix| !prefix.is_empty())
-            .collect();
+        rule.subsystem_prefixes =
+            non_empty_match_strings(&rule.rule.match_fields, "subsystem_prefix");
+        rule.category_prefixes =
+            non_empty_match_strings(&rule.rule.match_fields, "category_prefix");
         Ok(rule)
     }
 
@@ -128,6 +137,14 @@ impl Rule {
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|actual| {
                         self.subsystem_prefixes
+                            .iter()
+                            .any(|prefix| actual.starts_with(prefix.as_str()))
+                    }),
+                "category_prefix" => normalized_field("category", sourcetype, fields)
+                    .or_else(|| fields.get("category"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|actual| {
+                        self.category_prefixes
                             .iter()
                             .any(|prefix| actual.starts_with(prefix.as_str()))
                     }),
@@ -318,7 +335,18 @@ fn match_strings(match_fields: &toml::Table, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Reads a `match` value (`message_contains`, `subsystem_prefix`) as a list
+/// [`match_strings`] without empty strings, for the prefix keys: an empty
+/// prefix would match every entry that has the field at all, so a rule
+/// whose only prefix is `""` must match nothing instead.
+fn non_empty_match_strings(match_fields: &toml::Table, key: &str) -> Vec<String> {
+    match_strings(match_fields, key)
+        .into_iter()
+        .filter(|prefix| !prefix.is_empty())
+        .collect()
+}
+
+/// Reads a `match` value (`message_contains`, `subsystem_prefix`,
+/// `category_prefix`) as a list
 /// of strings to search for, accepting either a bare string or an array of
 /// strings. Any other shape (e.g. an integer) yields an empty list, so a
 /// malformed rule simply never matches rather than panicking.
@@ -475,6 +503,164 @@ mod tests {
         assert!(any("received tapToWake"));
         assert!(!any("#I Local emergency numbers presence: 1"));
         assert!(!any("#I SIM card emergency numbers presence: 0"));
+    }
+
+    fn aul_in(rule: &Rule, subsystem: &str, category: &str, message: &str) -> bool {
+        rule.matches(
+            "aul",
+            None,
+            Some(message),
+            &serde_json::json!({ "subsystem": subsystem, "category": category }),
+        )
+    }
+
+    /// A biometric match is not an unlock, so the match lines carry their
+    /// own tag and no longer the unlock-session one. Lines are the verbatim
+    /// macOS 26.6.2 examples the rules cite.
+    #[test]
+    fn shipped_biometric_match_lines_are_split_from_unlock_sessions() {
+        let unlock = shipped_rule("aul_unlock_sessions.toml");
+        let matched = shipped_rule("aul_biometric_match.toml");
+        let lines = [
+            "matchResult:timestamp: MATCH 503: 9C26B226-B86B-49B0-AE8D-19F917B0896F",
+            "matchResult:timestamp: NO-MATCH",
+            "MechanismTouchId[108](run) has received no-match from <private> (lockout state:1)",
+            "Base unlock behavior received biometric event: identity match failed",
+        ];
+        for line in lines {
+            assert!(aul(&matched, "Daemon-Mesa", line), "{line}");
+            assert!(!aul(&unlock, "Daemon-Mesa", line), "{line}");
+        }
+    }
+
+    #[test]
+    fn shipped_unlock_sessions_rule_tags_kernel_endpoint_and_password_path() {
+        let rule = shipped_rule("aul_unlock_sessions.toml");
+        let any = |message: &str| aul(&rule, "", message);
+
+        assert!(any("Unlock attempt succeeded: no"));
+        assert!(any("handle_async_keybag_unlock"));
+        assert!(any("Sending notification for volume"));
+        assert!(any("apfs is now UN-locked"));
+        assert!(any(
+            "-[LWDefaultScreenLockUI loginPressed:] |      Attempt #: 2"
+        ));
+        assert!(any(
+            "-[LWDefaultScreenLockUI authSuccess] | enter. password is CORRECT"
+        ));
+        assert!(any(
+            "ODRecordVerifyPassword failed with result ODErrorCredentialsInvalid"
+        ));
+        assert!(any("pam_authenticate failed: 9"));
+        assert!(!any("Attempt #: 2"));
+    }
+
+    /// Every keybag transition counts, not only those leaving `locked`, but
+    /// only inside `com.apple.chrono:keybag`.
+    #[test]
+    fn shipped_keybag_transition_rule_is_scoped_to_chrono_keybag() {
+        let rule = shipped_rule("aul_unlock_keybag_transitions.toml");
+
+        assert!(aul_in(
+            &rule,
+            "com.apple.chrono",
+            "keybag",
+            "Transition: locking -> unlocked"
+        ));
+        assert!(aul_in(
+            &rule,
+            "com.apple.chrono",
+            "keybag",
+            "Transition: inBioUnlock -> locking"
+        ));
+        assert!(!aul_in(
+            &rule,
+            "com.apple.SpringBoard",
+            "LiftToWake",
+            "Transition received: (sleep -> wake)"
+        ));
+        assert!(!aul_in(
+            &rule,
+            "com.apple.chrono",
+            "widgets",
+            "Transition: locking -> unlocked"
+        ));
+    }
+
+    /// The SpringBoard button lines are only taken from the buttons
+    /// subsystem, and backboardd's press lines only from category `Button`.
+    #[test]
+    fn shipped_hardware_button_rules_are_scoped() {
+        let springboard = shipped_rule("aul_hardware_buttons_springboard.toml");
+        let backboardd = shipped_rule("aul_hardware_buttons.toml");
+
+        assert!(aul_in(
+            &springboard,
+            "com.apple.SpringBoard.buttons",
+            "",
+            "press count: 1"
+        ));
+        assert!(!aul_in(
+            &springboard,
+            "com.apple.SpringBoard",
+            "",
+            "press count: 1"
+        ));
+        assert!(aul(&backboardd, "Button", "finished: firstDown: 1.2"));
+        assert!(!aul(&backboardd, "Keyboard", "finished: firstDown: 1.2"));
+    }
+
+    #[test]
+    fn shipped_orientation_and_wake_gesture_rules_match_cited_lines() {
+        let orientation = shipped_rule("aul_device_orientation.toml");
+        let wake = shipped_rule("aul_wake_gesture.toml");
+
+        assert!(aul(
+            &orientation,
+            "Orientation",
+            "[com.apple.locationd.Motion:Orientation] Received orientation. (FaceUp to Portrait) Timestamp 1106.888068"
+        ));
+        assert!(aul(&orientation, "", "[TTW] Orientation changed"));
+        assert!(!aul(
+            &orientation,
+            "",
+            "Received orientation update: <FBSOrientationUpdate>"
+        ));
+        assert!(aul(
+            &wake,
+            "WakeGesture",
+            "Gesture notification: 1(Detected), Mode:Normal, Start:FaceUp, End:Level, HostAwake, 0, Inferred:0"
+        ));
+
+        let lift = shipped_rule("aul_lift_to_wake.toml");
+        assert!(aul_in(
+            &lift,
+            "com.apple.SpringBoard",
+            "LiftToWake",
+            "Transition received: (sleep -> wake)"
+        ));
+        assert!(!aul_in(
+            &lift,
+            "com.apple.SpringBoard",
+            "Other",
+            "Transition received: (sleep -> wake)"
+        ));
+    }
+
+    #[test]
+    fn shipped_springboard_system_gesture_rule_needs_the_category_stem() {
+        let rule = shipped_rule("aul_system_gestures_springboard.toml");
+
+        assert!(aul(
+            &rule,
+            "SystemGestures",
+            "gestureRecognizerShouldBegin: DeckGrabberTongue"
+        ));
+        assert!(!aul(
+            &rule,
+            "KeyboardTouch",
+            "gestureRecognizerShouldBegin: DeckGrabberTongue"
+        ));
     }
 
     /// An EVTX record shaped like the ones the parser produces: provider and
@@ -1174,6 +1360,49 @@ value = "airplane_mode"
             None,
             &serde_json::json!({"subsystem": "unrelated"})
         ));
+    }
+
+    #[test]
+    fn category_prefix_matches_a_string_or_any_array_entry_and_is_case_sensitive() {
+        let single = Rule::from_toml_str(
+            "[rule]\nname = \"g\"\n[rule.match]\nsourcetype = \"aul\"\ncategory_prefix = \"SystemGesture\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        let list = Rule::from_toml_str(
+            "[rule]\nname = \"g\"\n[rule.match]\nsourcetype = \"aul\"\ncategory_prefix = [\"Keyboard\", \"SystemGesture\"]\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        let cat = |name: &str| serde_json::json!({ "category": name });
+
+        assert!(single.matches("aul", None, None, &cat("SystemGesture")));
+        assert!(single.matches("aul", None, None, &cat("SystemGestures")));
+        assert!(!single.matches("aul", None, None, &cat("systemGesture")));
+        assert!(!single.matches("aul", None, None, &cat("NoSystemGesture")));
+        assert!(list.matches("aul", None, None, &cat("KeyboardTouch")));
+        assert!(list.matches("aul", None, None, &cat("SystemGestureRecognizer")));
+        assert!(!list.matches("aul", None, None, &cat("Button")));
+    }
+
+    #[test]
+    fn category_prefix_with_empty_malformed_or_missing_values_never_matches() {
+        let with_category = serde_json::json!({"category": "SystemGesture"});
+        for value in ["\"\"", "[\"\"]", "[]", "42"] {
+            let rule = Rule::from_toml_str(&format!(
+                "[rule]\nname = \"bad\"\n[rule.match]\ncategory_prefix = {value}\n[rule.tag]\nvalue = \"t\"\n"
+            ))
+            .unwrap();
+            assert!(
+                !rule.matches("aul", None, None, &with_category),
+                "category_prefix = {value} must not match"
+            );
+        }
+
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"g\"\n[rule.match]\ncategory_prefix = \"SystemGesture\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        assert!(!rule.matches("aul", None, None, &serde_json::json!({})));
+        assert!(!rule.matches("aul", None, None, &serde_json::json!({"category": 7})));
     }
 
     /// `subsystem` resolves EVTX's provider name the same way the plain

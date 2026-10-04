@@ -1,0 +1,31 @@
+# AUL pattern-of-life: physical button presses as backboardd logs them —
+# one "began:" and one "finished:" entry per press under category `Button`,
+# each carrying "firstDown:"; the "finished:" entry gives the time since
+# firstDown, i.e. how long the button was held. The usage pair at the start
+# is a USB HID Consumer Page usage: 0xC/0x30 Power, 0xC/0xE9 Volume
+# Increment, 0xC/0xEA Volume Decrement (USB-IF HID Usage Tables 1.5,
+# section 15).
+#
+# SpringBoard's side-button press counts and press-type lines are a second
+# rule, aul_hardware_buttons_springboard.toml, same tag value (Peach's rule
+# grammar ANDs every condition within one [rule.match] block). Volume
+# presses are also tagged by aul_audio_volume.toml. Presses can come from
+# an examiner handling the device.
+#
+# Source: iLEAPP `logarchive_hardware_buttons` (commit 055b35a, 2026-10-03),
+# from Tim Korver's "Apple Unified Log search term and process cheatsheet",
+# which is not published on thesisfriday.com — iLEAPP is the citable
+# source: https://github.com/abrignoni/iLEAPP
+
+[rule]
+name = "aul_hardware_buttons"
+description = "Physical button press began/finished (backboardd, HID usage and hold time)"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+category = "Button"
+message_contains = "firstDown:"
+
+[rule.tag]
+value = "hardware_buttons"

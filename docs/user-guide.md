@@ -210,6 +210,16 @@ subsystem_prefix = ["com.apple.Navigation", "com.apple.navigation.VirtualGarage"
 An empty prefix never matches (it would otherwise match every entry that has
 a subsystem at all).
 
+`category_prefix` is the same prefix test for `category`, for a family of
+categories whose full names are not all known:
+
+```toml
+[rule.match]
+sourcetype = "aul"
+category_prefix = "SystemGesture"
+message_contains = "gestureRecognizerShouldBegin"
+```
+
 `event_data` matches fields of an EVTX record's payload — its `EventData`, or
 the single `UserData` element for providers that log there (Terminal Services
 does) — with an inline table whose pairs must all be equal:
