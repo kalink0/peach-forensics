@@ -1,0 +1,25 @@
+# AUL pattern-of-life: backboardd's "system gesture stealing the touches" —
+# a touch taken over by a system edge gesture (app switcher, Control
+# Center, Cover Sheet). Per the source, a single entry is an edge touch,
+# while a real swipe writes nine to twenty-three of them, so look at the
+# run, not one row.
+#
+# SpringBoard's recognizer lines, which name the gesture, are the companion
+# rule aul_system_gestures_springboard.toml, same tag value.
+#
+# Source: iLEAPP `logarchive_system_gestures` (commit 055b35a, 2026-10-03),
+# from Tim Korver's "Apple Unified Log search term and process cheatsheet",
+# which is not published on thesisfriday.com — iLEAPP is the citable
+# source: https://github.com/abrignoni/iLEAPP
+
+[rule]
+name = "aul_system_gestures"
+description = "Touches taken over by a system edge gesture (backboardd) — one entry is an edge touch, a swipe writes many"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = "system gesture stealing the touches"
+
+[rule.tag]
+value = "system_gestures"

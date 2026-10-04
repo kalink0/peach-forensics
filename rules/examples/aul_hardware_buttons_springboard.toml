@@ -1,0 +1,35 @@
+# AUL pattern-of-life: SpringBoard's button recognizers
+# (`com.apple.SpringBoard.buttons`) — the side button's "press count:" (1 a
+# single press, 2 a second press shortly after), "Lock button single press
+# recognized", and the combination recognizer's "SOS button gesture: press
+# type=" (102 volume up, 103 volume down, 104 side button, per the source).
+# Companion to aul_hardware_buttons.toml (backboardd), same tag value.
+#
+# iLEAPP saw each press type exactly twice per matching backboardd press on
+# its iOS 18.7 and 26.5.2 images, so rows are not a press count. Those
+# counts tie "SOS button gesture" lines to ordinary presses; the line alone
+# is not an Emergency SOS call (that is aul_emergency_sos.toml).
+#
+# Source: iLEAPP `logarchive_hardware_buttons` (commit 055b35a, 2026-10-03),
+# from Tim Korver's "Apple Unified Log search term and process cheatsheet",
+# which is not published on thesisfriday.com — iLEAPP is the citable
+# source: https://github.com/abrignoni/iLEAPP. iLEAPP anchors the three
+# texts at the start of the message; Peach matches them as substrings
+# within the subsystem.
+
+[rule]
+name = "aul_hardware_buttons_springboard"
+description = "Side button press count, single-press recognition and button press type (SpringBoard)"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+subsystem = "com.apple.SpringBoard.buttons"
+message_contains = [
+    "press count:",
+    "Lock button single press recognized",
+    "SOS button gesture: press type=",
+]
+
+[rule.tag]
+value = "hardware_buttons"

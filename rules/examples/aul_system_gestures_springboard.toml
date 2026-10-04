@@ -1,0 +1,33 @@
+# AUL pattern-of-life: SpringBoard's system gesture recognizers starting —
+# "gestureRecognizerShouldBegin" lines in categories whose name starts with
+# "SystemGesture". The line names the recognizer: DeckGrabberTongue (app
+# switcher), ControlCenterGrabberTongue, CoverSheetGrabberTongue and
+# SBCoverSheetSystemGesturesDelegate. Companion to aul_system_gestures.toml
+# (backboardd's "system gesture stealing the touches", which does not say
+# which gesture), same tag value.
+#
+# A line records that a recognizer began, not that the gesture completed.
+# Per iLEAPP only the backboardd line appeared on its iOS 12.4 image.
+#
+# Matched by category prefix because the source gives only the stem
+# (`category LIKE 'SystemGesture%'`), not the full category names, and
+# "gestureRecognizerShouldBegin" alone is a generic UIKit delegate method
+# name that other processes can log too.
+#
+# Source: iLEAPP `logarchive_system_gestures` (commit 055b35a, 2026-10-03),
+# from Tim Korver's "Apple Unified Log search term and process cheatsheet",
+# which is not published on thesisfriday.com — iLEAPP is the citable
+# source: https://github.com/abrignoni/iLEAPP
+
+[rule]
+name = "aul_system_gestures_springboard"
+description = "SpringBoard system gesture recognizer began (app switcher, Control Center, Cover Sheet) — not that the gesture completed"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+category_prefix = "SystemGesture"
+message_contains = "gestureRecognizerShouldBegin"
+
+[rule.tag]
+value = "system_gestures"

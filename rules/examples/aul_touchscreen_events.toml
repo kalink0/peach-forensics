@@ -21,11 +21,19 @@
 # The presence state itself varies: touching, withinRange and none all
 # occur, so a match here is a digitizer state change, not necessarily a
 # finger on the glass.
+#
+# Version 3 adds backboardd's "Touch entered", which iLEAPP added on
+# 2026-10-03 (commit 055b35a) from Tim Korver's "Apple Unified Log search
+# term and process cheatsheet". The cheatsheet is not published on
+# thesisfriday.com, so iLEAPP is the citable source. Per iLEAPP, the
+# rectangle in the line is the screen size, not the finger position, and
+# the line appeared only on its iOS 26.5.2 image of five tested images
+# (iOS 12.4 to 26.5.2).
 
 [rule]
 name = "aul_touchscreen_events"
-description = "Touchscreen digitizer activity — per-finger contact presence changes (touching, within range, none), touch statistics, tap-to-wake"
-version = "2"
+description = "Touchscreen digitizer activity — per-finger contact presence changes (touching, within range, none), touch entered, touch statistics, tap-to-wake"
+version = "3"
 
 [rule.match]
 sourcetype = "aul"
@@ -43,6 +51,7 @@ message_contains = [
     "touchstats",
     "received tapToWake",
     "AttentionAwareness.Touch",
+    "Touch entered",
 ]
 
 [rule.tag]

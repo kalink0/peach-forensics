@@ -1,0 +1,33 @@
+# AUL pattern-of-life: SpringBoard's lift-to-wake transition
+# (`com.apple.SpringBoard:LiftToWake`), "Transition received: (sleep ->
+# wake)" — the screen waking because the device was lifted. Companion to
+# aul_wake_gesture.toml, same tag value: in Thesis Friday #25 a
+# "Gesture notification: 1(Detected)" line and this line 89 microseconds
+# later are one event (lifted from face up to level, screen woke). The
+# recognizer line says a gesture was detected; this line says the screen
+# actually woke.
+#
+# The BiometricKit "prewarmCamera" line that follows in #25 is a separate
+# process: it only means the camera was being prepared, not that Face ID
+# ran, and the lift says nothing about a face or an unlock.
+#
+# Only "sleep -> wake" is documented. Other transitions in the category
+# are tagged too and are reported as stored; their meaning is not
+# established by the source.
+#
+# Source: Thesis Friday #25 (Tim Korver), verbatim line:
+# https://thesisfriday.com/thesis-friday-25-proximity-is-not-causality/
+
+[rule]
+name = "aul_lift_to_wake"
+description = "Lift-to-wake transition (SpringBoard LiftToWake, e.g. sleep -> wake) — the screen woke because the device was lifted"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+subsystem = "com.apple.SpringBoard"
+category = "LiftToWake"
+message_contains = "Transition received:"
+
+[rule.tag]
+value = "wake_gesture"

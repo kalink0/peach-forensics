@@ -6,15 +6,32 @@
 #
 # Source: Thesis Friday #2 (Tim Korver):
 # https://thesisfriday.com/thesis-friday-2-aul-device-orientation/
+#
+# Version 2 adds the kernel's "[TTW] Orientation changed", from iLEAPP
+# `logarchive_orientation` (commit 055b35a, 2026-10-03), taken from Tim
+# Korver's "Apple Unified Log search term and process cheatsheet", which is
+# not published on thesisfriday.com — iLEAPP is the citable source:
+# https://github.com/abrignoni/iLEAPP. The line carries only a code and a
+# microsecond counter; iLEAPP saw it on iOS 17.2.1, 18.7 and 26.5.2. Per
+# the cheatsheet as iLEAPP quotes it, several processes log the same
+# orientation change, and the end state is reliable while the start state
+# is not. iLEAPP's broader "Received orientation" (no trailing period) also
+# takes FrontBoard's "Received orientation update: <FBSOrientationUpdate
+# ...>"; that form is a different message and stays unmatched here. Wake
+# gestures such as a pick-up, which iLEAPP reports in the same artifact,
+# are aul_wake_gesture.toml.
 
 [rule]
 name = "aul_device_orientation"
 description = "Device orientation transitions (portrait/landscape/face up-down)"
-version = "1"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
-message_contains = "Received orientation."
+message_contains = [
+    "Received orientation.",
+    "[TTW] Orientation changed",
+]
 
 [rule.tag]
 value = "device_orientation"

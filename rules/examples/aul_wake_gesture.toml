@@ -1,0 +1,35 @@
+# AUL pattern-of-life: wake gesture notifications
+# (`com.apple.locationd.Motion:WakeGesture`) — "Gesture notification:
+# 1(Detected), Mode:Normal, Start:FaceUp, End:Level, HostAwake, 0,
+# Inferred:0". 1(Detected) is read as the device being picked up; values
+# also seen are 2(Dismissed), 4(PreDetection) and 7(Suppressed), so a match
+# is a recognizer state, not necessarily a pick-up.
+#
+# Several processes (SpringBoard, biometrickitd, audiomxd; assistantd on
+# iOS 12.4) write the same notification for one event, so rows are not a
+# count of pick-ups. In Thesis Friday #25 a 1(Detected) line and
+# SpringBoard's LiftToWake "Transition received: (sleep -> wake)" 89
+# microseconds later are one event: the phone was lifted from face up to
+# level and the screen woke. The LiftToWake line is the companion rule
+# aul_lift_to_wake.toml, same tag value. The BiometricKit "prewarmCamera"
+# line right after it only means the camera was being prepared — it is not
+# Face ID running, and the pick-up says nothing about a face or an unlock.
+#
+# Sources: verbatim line in Thesis Friday #25 (Tim Korver):
+# https://thesisfriday.com/thesis-friday-25-proximity-is-not-causality/
+# Value list, process list and the "picked up" reading: iLEAPP
+# `logarchive_orientation` (commit 055b35a, 2026-10-03), which quotes Tim
+# Korver's "Apple Unified Log search term and process cheatsheet" (not
+# published on thesisfriday.com): https://github.com/abrignoni/iLEAPP
+
+[rule]
+name = "aul_wake_gesture"
+description = "Wake gesture notifications (raise-to-wake recognizer: detected, dismissed, pre-detection) — 1(Detected) reads as a pick-up"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+message_contains = "Gesture notification:"
+
+[rule.tag]
+value = "wake_gesture"

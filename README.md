@@ -133,9 +133,12 @@ version format if you just want the rules for something other than Peach:
 - **AUL** — most predicates sourced from ["Apple Unified Log Predicates in
   iLEAPP: The
   Reference"](https://leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference)
-  by Alexis Brignoni, with a handful of newer ones (dialed-number recovery,
-  device orientation, Apple Watch Crown/button, CarPlay handshake) from Tim
-  Korver's [Thesis Friday](https://thesisfriday.com/) series.
+  by Alexis Brignoni and later [iLEAPP](https://github.com/abrignoni/iLEAPP)
+  releases, with a handful of
+  newer ones (dialed-number recovery, device orientation, Apple Watch
+  Crown/button, CarPlay handshake, unlock endpoint and retention) from Tim
+  Korver's [Thesis Friday](https://thesisfriday.com/) series and Lionel
+  Notari's [ios-unifiedlogs.com](https://www.ios-unifiedlogs.com/).
 - **EVTX** — cross-checked against [Microsoft's official Security Auditing
   event
   reference](https://learn.microsoft.com/windows/security/threat-protection/auditing/)

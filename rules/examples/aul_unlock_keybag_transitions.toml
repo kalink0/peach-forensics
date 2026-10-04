@@ -1,0 +1,47 @@
+# AUL pattern-of-life: every ChronoServices keybag state transition
+# (`com.apple.chrono:keybag`, "Transition: <from> -> <to>"), not only the
+# ones leaving "locked" that aul_unlock_sessions.toml matches by text. A
+# separate rule file because Peach's rule grammar ANDs every condition
+# within one [rule.match] block, while this predicate is an independent
+# alternative to that rule's message substrings. Same tag value.
+#
+# Reading caveats:
+# - Several processes write the same transition (chronod, SpringBoard,
+#   duetexpertd and WidgetRenderer_Default on iOS; chronod with
+#   NotificationCenter or ControlCenter on macOS), so rows are not a count
+#   of unlocks. Thesis Friday #27 treats them as one message relayed, not
+#   independent observations, and #28 says this line cannot carry the
+#   unlock endpoint on its own — that is the kernel lines in
+#   aul_unlock_sessions.toml.
+# - On macOS 26.6.2, "locked -> inBioUnlock" followed Touch ID and
+#   "locked -> unlocked" a password (#26); a biometrically unlocked session
+#   stays in inBioUnlock until it locks (#27).
+# - These lines carry a time-to-live: on a phone in daily use they were the
+#   only unlock lines left after 13.2 hours, so in an older archive they may
+#   be all there is (#28).
+#
+# Sources: Thesis Friday #28 (Tim Korver) uses this subsystem/category pair
+# as the "ChronoServices keybag" family:
+# https://thesisfriday.com/thesis-friday-28-what-a-busy-phone-forgets/
+# https://thesisfriday.com/thesis-friday-27-backward-reasoning-from-a-provable-endpoint/
+# https://thesisfriday.com/thesis-friday-26-same-unlock-three-different-stories/
+# The narrowing to "Transition:" lines follows iLEAPP `logarchive_unlock_auth`
+# (commit 5d3b32f, 2026-10-03) and DLEAPP `macosUnifiedLogScreenUnlock`
+# (commit d5fb022): https://github.com/abrignoni/iLEAPP,
+# https://github.com/abrignoni/DLEAPP. Their SQL anchors the text at the
+# start of the message; Peach's substring match does not, which is the same
+# for a message that begins with "Transition:".
+
+[rule]
+name = "aul_unlock_keybag_transitions"
+description = "ChronoServices keybag state transitions (all states) — written by several processes per transition, not a count of unlocks"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+subsystem = "com.apple.chrono"
+category = "keybag"
+message_contains = "Transition:"
+
+[rule.tag]
+value = "unlock_sessions"

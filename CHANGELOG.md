@@ -2,6 +2,18 @@
 
 All notable changes to Peach will be documented in this file.
 
+## Unreleased
+
+### New Features
+
+- **Tagging rules — `category_prefix`** — a new match key: matches when the entry's category *starts with* any of a string or list of strings, exact-case, like `subsystem_prefix`. For families of categories whose full names are not documented. An empty prefix never matches.
+
+### Improvements
+
+- **AUL rule pack: 41 → 51 rules** — synced with iLEAPP's unified log update of 2026-10-03 and Tim Korver's Thesis Friday #25-#28. New: `aul_biometric_match` (Face ID / Touch ID match results — a match is not an unlock), `aul_unlock_keybag_transitions` (every ChronoServices keybag transition), `aul_passcode_field` (passcode field shown/dismissed), `aul_hardware_buttons` and `aul_hardware_buttons_springboard` (button presses with hold time and press type), `aul_wake_gesture` and `aul_lift_to_wake` (raise-to-wake detected, and the screen waking from it), `aul_system_gestures` and `aul_system_gestures_springboard` (edge gestures taking over a touch, and which recognizer began — app switcher, Control Center, Cover Sheet) and `aul_usb_host` (a USB connection to a computer rather than a charger — an acquisition produces these too).
+- **AUL unlock rule** — `aul_unlock_sessions` now also tags the kernel lines that mark an unlock's endpoint (`handle_async_keybag_unlock`, `Sending notification for volume`, `is now UN-locked`), SpringBoard's `Unlock attempt succeeded` and the macOS lock screen's password attempts and their outcome. The Touch ID match lines moved to `aul_biometric_match`, so entries tagged `unlock_sessions` by version 1 for `matchResult:timestamp: MATCH` / `has received no-match` carry `biometric_match` after a re-tag.
+- **AUL touchscreen and orientation rules** — `aul_touchscreen_events` also tags `Touch entered` (iOS 26), `aul_device_orientation` the kernel's `[TTW] Orientation changed`.
+
 ## v0.9.1 - 2026-09-30
 
 ### Improvements
