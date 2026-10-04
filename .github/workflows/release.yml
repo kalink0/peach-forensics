@@ -9,6 +9,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Static C runtime on Windows, so peach.exe starts without the Visual C++
+  # Redistributable installed. Target-scoped, so it has no effect on the
+  # Linux/macOS jobs. Checked by scripts/check_windows_runtime_deps.ps1.
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
 
 jobs:
   build:
@@ -38,6 +42,11 @@ jobs:
 
       - name: Build (release)
         run: cargo build --release --all-features --verbose
+
+      - name: Check runtime DLL dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check_windows_runtime_deps.ps1 target\release\peach.exe
 
       - name: Package (Linux)
         if: runner.os == 'Linux'

@@ -13,6 +13,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Same static C runtime as the release/nightly Windows builds, so CI tests
+  # the configuration that actually ships.
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
 
 jobs:
   lint:
@@ -40,4 +43,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --all-features --verbose
+      - name: Check runtime DLL dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check_windows_runtime_deps.ps1 target\debug\peach.exe
       - run: cargo test --all-features --verbose
