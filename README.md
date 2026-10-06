@@ -52,7 +52,10 @@ scoop bucket add forensics https://github.com/kalink0/scoop-forensics
 scoop install forensics/peach-forensics
 ```
 
-**Windows (winget)** — pending initial review, not yet published.
+**Windows (winget)**
+```powershell
+winget install kalink0.Peach
+```
 
 No native package for Linux yet — grab the binary from
 [Releases](https://github.com/kalink0/peach-forensics/releases).
