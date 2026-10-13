@@ -696,6 +696,11 @@ load parallelizes:
   automatic by default. Irrelevant for AUL, Android Intrusion Log, or a
   single-file load — those are always exactly one parse unit, nothing to
   spread across threads.
+- **Database memory limit (MB)** — how much RAM the timeline database may
+  use; 2048 MB by default. Beyond it, the database spills to a temporary
+  folder next to the session file instead of taking more RAM. Without a
+  limit it would grow up to 80% of the machine's RAM during a large load.
+  Raising it rarely makes loading faster. A change applies right away.
 - **Assume timezone for logs with no timezone of their own** — a session-wide
   fallback for a text source's own `assume_offset` (see
   [Text parser configs](#text-parser-configs) above), used whenever that

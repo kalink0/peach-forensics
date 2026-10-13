@@ -157,6 +157,36 @@ impl SettingsDialog {
                     ui.separator();
                     help_row(
                         ui,
+                        "Database memory limit (MB):",
+                        "RAM the timeline database may use. Beyond it, data spills to a \
+                         temp folder next to the session file. Raising it rarely speeds \
+                         up loading.",
+                    );
+                    ui.horizontal(|ui| {
+                        let mut default = draft.duckdb_memory_limit_mb.is_none();
+                        if ui.checkbox(&mut default, "Default").changed() {
+                            draft.duckdb_memory_limit_mb =
+                                (!default).then_some(config::DEFAULT_DUCKDB_MEMORY_LIMIT_MB);
+                        }
+                        if let Some(mut value) = draft.duckdb_memory_limit_mb {
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut value)
+                                        .range(256..=1_048_576)
+                                        .speed(64),
+                                )
+                                .changed()
+                            {
+                                draft.duckdb_memory_limit_mb = Some(value);
+                            }
+                        } else {
+                            ui.weak(format!("({} MB)", config::DEFAULT_DUCKDB_MEMORY_LIMIT_MB));
+                        }
+                    });
+
+                    ui.separator();
+                    help_row(
+                        ui,
                         "Assume timezone for logs with no timezone of their own:",
                         "Fallback when a text source's own \"Assume offset\" isn't set.",
                     );

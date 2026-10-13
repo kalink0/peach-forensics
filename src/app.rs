@@ -596,6 +596,7 @@ impl PeachApp {
         let (source_path, source_kind, pending_cli_sources) = queue_from_cli_sources(add_sources);
 
         let mut timeline = TimelineView::new(db_path.clone(), session_paths.sqlite_path.clone());
+        timeline.set_memory_limit_mb(settings.effective_duckdb_memory_limit_mb());
         // Best-effort, same reasoning as `rule_paths` above: a bad
         // hand-edited `display_timezone` just means starting at UTC (the
         // default it would already be at), not a crash on startup —
@@ -713,6 +714,8 @@ impl PeachApp {
 
         self.db_path = session_paths.duckdb_path.clone();
         self.timeline = TimelineView::new(self.db_path.clone(), session_paths.sqlite_path.clone());
+        self.timeline
+            .set_memory_limit_mb(self.settings.effective_duckdb_memory_limit_mb());
         if let Ok(display_tz) = self.settings.display_timezone_spec() {
             self.timeline.set_display_timezone(display_tz);
         }
@@ -746,6 +749,8 @@ impl PeachApp {
 
         self.db_path = session_paths.duckdb_path.clone();
         self.timeline = TimelineView::new(self.db_path.clone(), session_paths.sqlite_path.clone());
+        self.timeline
+            .set_memory_limit_mb(self.settings.effective_duckdb_memory_limit_mb());
         if let Ok(display_tz) = self.settings.display_timezone_spec() {
             self.timeline.set_display_timezone(display_tz);
         }
@@ -1586,6 +1591,8 @@ impl PeachApp {
                 if let Ok(display_tz) = new_settings.display_timezone_spec() {
                     self.timeline.set_display_timezone(display_tz);
                 }
+                self.timeline
+                    .set_memory_limit_mb(new_settings.effective_duckdb_memory_limit_mb());
                 // Keep the load-controls quick-access copy of this field in
                 // sync — otherwise saving a change via Settings would leave
                 // it showing a stale value until the app restarts. Display

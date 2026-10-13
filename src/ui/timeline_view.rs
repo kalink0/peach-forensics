@@ -332,6 +332,9 @@ pub struct TimelineView {
     /// and again whenever Settings are saved, the same refresh-on-save
     /// pattern `rules_dir` already uses.
     display_tz: TimezoneSpec,
+    /// DuckDB `memory_limit` in MiB, applied whenever the database is
+    /// opened — see [`crate::config::DEFAULT_DUCKDB_MEMORY_LIMIT_MB`].
+    memory_limit_mb: u64,
 }
 
 impl TimelineView {
@@ -364,6 +367,19 @@ impl TimelineView {
             column_order: DEFAULT_COLUMN_ORDER.to_vec(),
             sort_descending: false,
             display_tz: TimezoneSpec::Fixed(chrono::FixedOffset::east_opt(0).unwrap()),
+            memory_limit_mb: crate::config::DEFAULT_DUCKDB_MEMORY_LIMIT_MB,
+        }
+    }
+
+    /// Sets the DuckDB memory limit — called by `app.rs` on startup (from
+    /// `Settings::duckdb_memory_limit_mb`) and again whenever Settings are
+    /// saved. Applied right away if the database is already open (the
+    /// setting is per database instance, so every clone sees it), otherwise
+    /// on the next open in [`Self::try_clone_conn`].
+    pub fn set_memory_limit_mb(&mut self, memory_limit_mb: u64) {
+        self.memory_limit_mb = memory_limit_mb;
+        if let Some(conn) = self.conn.borrow().as_ref() {
+            apply_memory_limit(conn, memory_limit_mb);
         }
     }
 
@@ -439,6 +455,7 @@ impl TimelineView {
             return conn.try_clone().ok();
         }
         let conn = Connection::open(&self.db_path).ok()?;
+        apply_memory_limit(&conn, self.memory_limit_mb);
         let clone = conn.try_clone().ok();
         *self.conn.borrow_mut() = Some(conn);
         clone
@@ -1211,6 +1228,15 @@ fn context_window_query(timestamp: chrono::NaiveDateTime, minutes: i64) -> Strin
     )
 }
 
+/// Sets DuckDB's `memory_limit` on `conn`'s database instance. Best-effort:
+/// a failure only means DuckDB keeps its default limit — reported on stderr,
+/// never a reason to refuse opening the timeline.
+fn apply_memory_limit(conn: &Connection, memory_limit_mb: u64) {
+    if let Err(err) = conn.execute_batch(&format!("SET memory_limit = '{memory_limit_mb}MiB'")) {
+        eprintln!("peach: failed to set DuckDB memory limit to {memory_limit_mb} MiB: {err}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1395,6 +1421,46 @@ mod tests {
         view.reopen_connection();
 
         assert!(!db_path.exists());
+    }
+
+    fn current_memory_limit(conn: &Connection) -> String {
+        conn.query_row("SELECT current_setting('memory_limit')", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn the_memory_limit_is_applied_when_the_database_is_opened() {
+        let db_path = temp_db_path("memory-limit-on-open");
+        let mut view = TimelineView::new(db_path.clone(), temp_sqlite_path("session"));
+        view.set_memory_limit_mb(512);
+
+        let conn = view.try_clone_conn().unwrap();
+
+        assert!(current_memory_limit(&conn).starts_with("512"));
+        drop(conn);
+        view.reopen_connection();
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    #[test]
+    fn changing_the_memory_limit_applies_to_an_open_database_and_survives_a_reopen() {
+        let db_path = temp_db_path("memory-limit-change");
+        let mut view = TimelineView::new(db_path.clone(), temp_sqlite_path("session"));
+        drop(view.try_clone_conn().unwrap());
+
+        view.set_memory_limit_mb(768);
+        let conn = view.try_clone_conn().unwrap();
+        assert!(current_memory_limit(&conn).starts_with("768"));
+        drop(conn);
+
+        view.reopen_connection();
+        let reopened = view.try_clone_conn().unwrap();
+        assert!(current_memory_limit(&reopened).starts_with("768"));
+        drop(reopened);
+        view.reopen_connection();
+        std::fs::remove_file(db_path).unwrap();
     }
 
     #[test]

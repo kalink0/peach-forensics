@@ -101,7 +101,22 @@ pub struct Settings {
     /// override field here has it.
     #[serde(default)]
     pub staging_dir: Option<PathBuf>,
+    /// DuckDB `memory_limit` for the session's timeline database, in MiB.
+    /// `None` (the default) means [`DEFAULT_DUCKDB_MEMORY_LIMIT_MB`].
+    /// `#[serde(default)]` for the same backward-compat reason every
+    /// override field here has it.
+    #[serde(default)]
+    pub duckdb_memory_limit_mb: Option<u64>,
 }
+
+/// Default DuckDB `memory_limit`, in MiB. Without an explicit limit DuckDB
+/// lets its buffer pool grow to 80% of physical RAM, and a bulk load fills
+/// it: a 17.5M-entry AUL load grew Peach past 42 GB. With a limit, DuckDB
+/// spills to a temp directory next to the database file instead — a 2 GB
+/// limit held a 2.5M-entry AUL load (Appender insert plus import-time
+/// tagging) at ~2.5 GB RSS, against ~5.6 GB and still climbing without one,
+/// at the same speed.
+pub const DEFAULT_DUCKDB_MEMORY_LIMIT_MB: u64 = 2048;
 
 impl Settings {
     /// Resolves the effective sessions directory — the configured override
@@ -147,6 +162,13 @@ impl Settings {
     /// override if set, otherwise [`default_load_threads`].
     pub fn effective_load_threads(&self) -> usize {
         self.load_threads.unwrap_or_else(default_load_threads)
+    }
+
+    /// The DuckDB memory limit to apply, in MiB — the configured override
+    /// if set, otherwise [`DEFAULT_DUCKDB_MEMORY_LIMIT_MB`].
+    pub fn effective_duckdb_memory_limit_mb(&self) -> u64 {
+        self.duckdb_memory_limit_mb
+            .unwrap_or(DEFAULT_DUCKDB_MEMORY_LIMIT_MB)
     }
 
     /// The effective display timezone — the configured override if set and
@@ -248,6 +270,7 @@ mod tests {
             default_source_timezone: Some("Europe/Berlin".to_string()),
             display_timezone: Some("America/New_York".to_string()),
             staging_dir: Some(PathBuf::from("/tmp/some-case-drive/peach-staging")),
+            duckdb_memory_limit_mb: Some(4096),
         };
 
         save_to(&path, &settings).unwrap();
@@ -300,6 +323,30 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(settings.effective_load_threads(), 3);
+    }
+
+    #[test]
+    fn load_from_a_file_predating_the_duckdb_memory_limit_field_uses_the_default() {
+        let path = temp_config_path("no-duckdb-memory-limit-field");
+        std::fs::write(&path, b"sessions_dir = \"/tmp/some-case-drive\"\n").unwrap();
+
+        let loaded = load_from(&path);
+
+        assert_eq!(loaded.duckdb_memory_limit_mb, None);
+        assert_eq!(
+            loaded.effective_duckdb_memory_limit_mb(),
+            DEFAULT_DUCKDB_MEMORY_LIMIT_MB
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn effective_duckdb_memory_limit_uses_the_configured_override() {
+        let settings = Settings {
+            duckdb_memory_limit_mb: Some(512),
+            ..Settings::default()
+        };
+        assert_eq!(settings.effective_duckdb_memory_limit_mb(), 512);
     }
 
     #[test]
