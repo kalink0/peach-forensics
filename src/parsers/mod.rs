@@ -48,7 +48,7 @@ impl ParserConfig {
 
 /// Progress-reporting hooks a parser can call during [`LogParser::parse_streaming`],
 /// independent of `sink`'s per-record delivery. Bundled into one struct
-/// rather than two more `parse_streaming` parameters — same reasoning as
+/// rather than more `parse_streaming` parameters — same reasoning as
 /// `app::RuleSelection` bundling its own fields.
 pub struct StreamingProgress<'a> {
     /// Called with the number of additional bytes consumed at whatever
@@ -56,14 +56,6 @@ pub struct StreamingProgress<'a> {
     /// overall load progress isn't limited to "0% until this whole call
     /// returns."
     pub on_bytes: &'a mut dyn FnMut(u64),
-    /// Called at most once, as soon as the total record count for this
-    /// source becomes known — which for most parsers is never, since they
-    /// discover records one at a time with no upfront count available. A
-    /// caller can use this to turn "N inserted so far, out of nothing in
-    /// particular" into a real percentage for whatever happens after
-    /// parsing (DB insert, tagging) instead of just a raw climbing count
-    /// with no sense of how much is left.
-    pub on_total_known: &'a mut dyn FnMut(usize),
 }
 
 /// One record a parser couldn't make sense of, kept rather than silently
@@ -119,24 +111,18 @@ pub trait LogParser: Sync {
     /// sourcetypes that haven't shown a memory problem in practice.
     ///
     /// AUL overrides this: a real device's `.logarchive` can resolve into
-    /// millions of entries, and materializing all of them (each carrying a
-    /// serialized `raw`/`fields` JSON copy) in one `Vec` before the first
-    /// row reaches DuckDB is what drove a 219 MB source past 45 GB of RSS
-    /// during testing — DuckDB, not the Rust heap, is supposed to hold the
+    /// millions of entries, and materializing all of them in one `Vec`
+    /// before the first row reaches DuckDB grew past 20 GB of RSS on a real
+    /// 817 MB archive — DuckDB, not the Rust heap, is supposed to hold the
     /// bulk timeline.
     ///
     /// `progress` (see [`StreamingProgress`]) is never touched by the
     /// default implementation here — every non-AUL sourcetype is already a
-    /// single file with no natural sub-file checkpoint, and its total
-    /// record count is no more knowable upfront than AUL's. AUL overrides
-    /// both hooks: `on_bytes` once per `.tracev3` file finished within one
+    /// single file with no natural sub-file checkpoint. AUL calls
+    /// `on_bytes` once per `.tracev3` file finished within one
     /// `.logarchive` directory (otherwise a multi-hundred-MB AUL source
     /// reports as one opaque unit with no progress signal until the entire
-    /// load completes), and `on_total_known` once every file has been
-    /// parsed and the entries are sorted but not yet handed to `sink` —
-    /// the one point where AUL's total *is* already known, a side effect
-    /// of resolving everything before the first row reaches `sink` (see
-    /// above).
+    /// load completes).
     ///
     /// Returns whatever [`SkippedRecord`]s accumulated during this parse —
     /// always empty when `skip_bad_records` is `false`.
@@ -289,7 +275,6 @@ mod tests {
             _skip_bad_records: bool,
         ) -> anyhow::Result<Vec<SkippedRecord>> {
             (progress.on_bytes)(10);
-            (progress.on_total_known)(1);
             sink(ParsedRecord {
                 timestamp_utc: Utc::now(),
                 level: None,
@@ -307,7 +292,6 @@ mod tests {
         let path = write_temp_file("c", b"dummy source content");
         let config = dummy_config();
         let mut bytes_calls = Vec::new();
-        let mut total_calls = Vec::new();
 
         parse_source_streaming(
             &ProgressReportingParser,
@@ -316,14 +300,12 @@ mod tests {
             |_entry| Ok(()),
             &mut StreamingProgress {
                 on_bytes: &mut |delta| bytes_calls.push(delta),
-                on_total_known: &mut |total| total_calls.push(total),
             },
             false,
         )
         .unwrap();
 
         assert_eq!(bytes_calls, vec![10, 20]);
-        assert_eq!(total_calls, vec![1]);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -384,7 +366,6 @@ mod tests {
             },
             &mut StreamingProgress {
                 on_bytes: &mut |_| {},
-                on_total_known: &mut |_| {},
             },
             false,
         )
@@ -419,7 +400,6 @@ mod tests {
                 },
                 &mut StreamingProgress {
                     on_bytes: &mut |_| {},
-                    on_total_known: &mut |_| {},
                 },
                 false,
             )

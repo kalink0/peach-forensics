@@ -154,23 +154,10 @@ enum LoadOutcome {
     /// instead — known upfront from file sizes, at file-level granularity
     /// (jumps per completed file, not smoothly within one — see
     /// `run_load`).
-    ///
-    /// `total_entries` is the one exception: `Some` only for AUL, and only
-    /// once its own parsing phase has finished (see
-    /// `AulParser::parse_streaming`'s doc comment on why that's the one
-    /// point its total is knowable at all) — from then on `inserted` *is*
-    /// a fraction of `total_entries`, covering exactly the phase
-    /// (DB insert + tagging) that the byte-progress bar can't: it's
-    /// already at 100% by the time parsing hands off to this phase, so
-    /// without this field that phase — often the larger share of total
-    /// load time — would show only a raw climbing count with no sense of
-    /// how much is left. `None` for every other sourcetype, and for AUL
-    /// itself before parsing finishes.
     Progress {
         inserted: usize,
         bytes_done: u64,
         bytes_total: u64,
-        total_entries: Option<usize>,
     },
     Done(Result<(LoadSummary, std::time::Duration), String>),
 }
@@ -248,8 +235,6 @@ enum LoadState {
         inserted_so_far: usize,
         bytes_done: u64,
         bytes_total: u64,
-        /// See [`LoadOutcome::Progress`]'s doc comment.
-        total_entries: Option<usize>,
     },
     Done {
         inserted: usize,
@@ -954,7 +939,6 @@ impl PeachApp {
             inserted_so_far: 0,
             bytes_done: 0,
             bytes_total: 0,
-            total_entries: None,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         self.load_cancel = Some(Arc::clone(&cancel));
@@ -1824,13 +1808,11 @@ impl eframe::App for PeachApp {
                         inserted,
                         bytes_done,
                         bytes_total,
-                        total_entries,
                     }) => {
                         self.load_state = LoadState::Loading {
                             inserted_so_far: inserted,
                             bytes_done,
                             bytes_total,
-                            total_entries,
                         };
                     }
                     Ok(LoadOutcome::Done(result)) => {
@@ -2703,15 +2685,14 @@ impl eframe::App for PeachApp {
                         inserted_so_far,
                         bytes_done,
                         bytes_total,
-                        total_entries,
                     } => {
                         ui.spinner();
                         // Data-based progress — file-level granularity (jumps
                         // per completed file, not smooth within one large
                         // file; see `run_load`'s doc comment for why entry
                         // count can't drive a real fraction here either) —
-                        // except for AUL, where `on_bytes_progress` advances
-                        // per `.tracev3` file within the one `.logarchive`.
+                        // AUL's `on_bytes_progress` advances per `.tracev3`
+                        // file within the one `.logarchive`.
                         if *bytes_total > 0 {
                             let fraction = *bytes_done as f32 / *bytes_total as f32;
                             ui.add(egui::ProgressBar::new(fraction).desired_width(200.0).text(
@@ -2722,31 +2703,10 @@ impl eframe::App for PeachApp {
                                 ),
                             ));
                         }
-                        // Once AUL's parsing phase ends, `bytes_done` is
-                        // already pinned at `bytes_total` (100%) while the
-                        // DB insert + tagging phase — often the larger share
-                        // of total load time — is still running; without
-                        // this second bar that phase would show only a raw
-                        // climbing count with no sense of how much is left.
-                        // `total_entries` stays `None` for every other
-                        // sourcetype (see `LoadOutcome::Progress`'s doc
-                        // comment), so this just falls through to the same
-                        // plain count they've always shown.
-                        match total_entries {
-                            Some(total) if *total > 0 => {
-                                let fraction = *inserted_so_far as f32 / *total as f32;
-                                ui.add(
-                                    egui::ProgressBar::new(fraction).desired_width(200.0).text(
-                                        format!("Writing: {inserted_so_far} / {total} entries"),
-                                    ),
-                                );
-                            }
-                            _ if *inserted_so_far > 0 => {
-                                ui.label(format!("Loading... {inserted_so_far} entries so far"));
-                            }
-                            _ => {
-                                ui.label("Loading...");
-                            }
+                        if *inserted_so_far > 0 {
+                            ui.label(format!("Loading... {inserted_so_far} entries so far"));
+                        } else {
+                            ui.label("Loading...");
                         }
                     }
                     LoadState::Done {
@@ -3242,11 +3202,6 @@ fn run_sequential(
             inserted: total_inserted,
             bytes_done,
             bytes_total,
-            // The file this send reports on just finished entirely (insert
-            // + tagging included), so whatever `total_entries` it may have
-            // reported mid-file is moot now — and the next file (if any)
-            // starts its own count from scratch.
-            total_entries: None,
         });
         // Checked here (between files) in addition to inside
         // `load_one_file`'s own per-batch check: a file that finished (or
@@ -3309,14 +3264,13 @@ fn load_one_file(
     // `*total_inserted` once `parse_source_streaming` returns.
     let inserted_cell = std::cell::Cell::new(*total_inserted);
     let bytes_done_cell = std::cell::Cell::new(bytes_done_before);
-    let total_entries_cell: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
     // Every entry carries the same `source_file_id` (assigned once per file
     // by `parse_source_streaming`, before the first one reaches this sink),
     // so capturing it off the first entry gives `load_one_file` its own copy
     // even if streaming is cut short by [`LoadCancelled`] below —
     // `parse_source_streaming`'s `Err` path doesn't return the id at all.
     let captured_source_file_id: std::cell::Cell<Option<SourceFileId>> = std::cell::Cell::new(None);
-    let send_progress = |inserted: usize, bytes_done: u64, total_entries: Option<usize>| {
+    let send_progress = |inserted: usize, bytes_done: u64| {
         // Best-effort: if the UI thread has already dropped its receiver
         // (e.g. app shutting down mid-load), there's nobody to tell and the
         // load itself must still proceed.
@@ -3324,7 +3278,6 @@ fn load_one_file(
             inserted,
             bytes_done,
             bytes_total,
-            total_entries,
         });
     };
 
@@ -3341,11 +3294,7 @@ fn load_one_file(
             batch.push(entry);
             if batch.len() >= LOAD_BATCH_SIZE {
                 tags_applied += flush_batch(conn, &mut batch, ctx.rules, ctx.sourcetype)?;
-                send_progress(
-                    inserted_cell.get(),
-                    bytes_done_cell.get(),
-                    total_entries_cell.get(),
-                );
+                send_progress(inserted_cell.get(), bytes_done_cell.get());
                 if ctx.cancel.load(Ordering::Relaxed) {
                     anyhow::bail!(LoadCancelled);
                 }
@@ -3355,15 +3304,7 @@ fn load_one_file(
         &mut StreamingProgress {
             on_bytes: &mut |delta| {
                 bytes_done_cell.set(bytes_done_cell.get() + delta);
-                send_progress(
-                    inserted_cell.get(),
-                    bytes_done_cell.get(),
-                    total_entries_cell.get(),
-                );
-            },
-            on_total_known: &mut |total| {
-                total_entries_cell.set(Some(total));
-                send_progress(inserted_cell.get(), bytes_done_cell.get(), Some(total));
+                send_progress(inserted_cell.get(), bytes_done_cell.get());
             },
         },
         ctx.skip_bad_records,
@@ -3590,9 +3531,6 @@ fn run_parallel(
                 inserted: total_inserted,
                 bytes_done,
                 bytes_total,
-                // `run_parallel` never handles AUL (see `parse_file_for_worker`'s
-                // doc comment) — the only sourcetype that can ever populate this.
-                total_entries: None,
             });
         }
     });
@@ -3657,7 +3595,6 @@ fn parse_file_for_worker(ctx: &LoadContext, file_path: &Path, tx: &mpsc::SyncSen
         },
         &mut StreamingProgress {
             on_bytes: &mut |_| {},
-            on_total_known: &mut |_| {},
         },
         ctx.skip_bad_records,
     );
@@ -4064,9 +4001,6 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::log_entry::ParsedRecord;
-    use crate::parsers::SkippedRecord;
-    use chrono::Utc;
 
     /// Catches exactly the failure mode the embedded icon asset is prone
     /// to: `APP_ICON_SIZE` and the actual pixel data in
@@ -5179,95 +5113,6 @@ mod tests {
         // entry approach in `load_one_file` exists to avoid.
         assert_eq!(summary.loaded_sources.len(), 1);
         assert_eq!(summary.per_file_inserted.len(), 1);
-
-        std::fs::remove_dir_all(base).unwrap();
-    }
-
-    struct TotalKnownParser;
-
-    impl LogParser for TotalKnownParser {
-        fn sourcetype(&self) -> &str {
-            "test-total-known"
-        }
-
-        fn parse(
-            &self,
-            _path: &Path,
-            _config: &ParserConfig,
-            _skip_bad_records: bool,
-        ) -> anyhow::Result<(Vec<ParsedRecord>, Vec<SkippedRecord>)> {
-            Ok((Vec::new(), Vec::new()))
-        }
-
-        fn parse_streaming(
-            &self,
-            _path: &Path,
-            _config: &ParserConfig,
-            sink: &mut dyn FnMut(ParsedRecord) -> anyhow::Result<()>,
-            progress: &mut StreamingProgress,
-            _skip_bad_records: bool,
-        ) -> anyhow::Result<Vec<SkippedRecord>> {
-            (progress.on_total_known)(2);
-            for message in ["first", "second"] {
-                sink(ParsedRecord {
-                    timestamp_utc: Utc::now(),
-                    level: None,
-                    message: Some(message.to_string()),
-                    raw: message.to_string(),
-                    fields: serde_json::Value::Null,
-                })?;
-            }
-            Ok(Vec::new())
-        }
-    }
-
-    /// `load_one_file` (below `run_load`'s `SourceKind` dispatch, so this
-    /// injects a test-double parser directly via `LoadContext` — no real
-    /// AUL fixture needed) must surface `total_entries` in a `Progress`
-    /// send as soon as the parser reports it, not just once a full
-    /// `LOAD_BATCH_SIZE` batch flushes — otherwise a small/test-sized
-    /// source would never show it at all.
-    #[test]
-    fn load_one_file_surfaces_total_entries_as_soon_as_the_parser_reports_it() {
-        let base = temp_test_dir("load-one-file-total-entries");
-        let db_path = base.join("test.duckdb");
-        let conn = duckdb::Connection::open(&db_path).unwrap();
-        setup_timeline_schema(&conn).unwrap();
-        let config = ParserConfig::from_toml_str(
-            "[parser]\nname = \"test\"\nsourcetype = \"test-total-known\"\n",
-        )
-        .unwrap();
-        let ctx = LoadContext {
-            parser: &TotalKnownParser,
-            config: &config,
-            sourcetype: "test-total-known",
-            rules: &[],
-            parser_config_path: None,
-            cancel: no_cancel(),
-            skip_bad_records: false,
-        };
-        let file_path = base.join("fake-source");
-        std::fs::write(&file_path, b"unused").unwrap();
-        let (tx, rx) = mpsc::channel();
-        let mut total_inserted = 0usize;
-
-        let result = load_one_file(&ctx, &file_path, &conn, &mut total_inserted, 0, 100, &tx)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(result.0, 0, "no rules selected, so no tags applied");
-        assert_eq!(total_inserted, 2);
-        let total_entries_seen: Vec<Option<usize>> = rx
-            .try_iter()
-            .map(|msg| match msg {
-                LoadOutcome::Progress { total_entries, .. } => total_entries,
-                LoadOutcome::Done(_) => None,
-            })
-            .collect();
-        assert!(
-            total_entries_seen.contains(&Some(2)),
-            "expected a Progress message with total_entries = Some(2), got {total_entries_seen:?}"
-        );
 
         std::fs::remove_dir_all(base).unwrap();
     }

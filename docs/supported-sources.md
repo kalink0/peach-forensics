@@ -29,6 +29,12 @@ selecting either just works, no manual restructuring needed:
   `LogarchiveProvider`'s string-lookup paths assume the flattened bundle
   layout and silently look in the wrong place for a raw extraction's split
   layout).
+- macOS AppleDouble files (`._0000000000000036.tracev3`), which macOS writes
+  next to every file it copies to exFAT/FAT volumes or SMB shares, are
+  ignored like the archive's other non-log files (`Info.plist`,
+  `logd.0.log`): they hold extended attributes, not log entries. Only files
+  whose content starts with the AppleDouble signature are ignored — any other
+  `._*.tracev3` file is parsed, and fails visibly if it isn't valid.
 - `level` is the raw `LogType` variant name (`Error`, `Info`,
   `ProcessSignpostStart`, …) — not remapped into an INFO/WARN/ERROR scheme.
 - `raw` and `fields` both hold the complete extracted record as JSON — there's no

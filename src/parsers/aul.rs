@@ -1,19 +1,19 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Utc};
-use macos_unifiedlogs::cache::MemoryStringCache;
 use macos_unifiedlogs::filesystem::LogarchiveProvider;
 use macos_unifiedlogs::parser::{build_log, collect_timesync, parse_log};
 use macos_unifiedlogs::traits::{FileProvider, SourceFile};
-use macos_unifiedlogs::unified_log::LogData;
+use macos_unifiedlogs::unified_log::{LogData, UnifiedLogData};
 
 use crate::model::log_entry::ParsedRecord;
 use crate::parsers::{LogParser, ParserConfig, SkippedRecord, StreamingProgress};
 
 mod bounded_cache;
 mod raw_extraction_provider;
-use bounded_cache::BoundedCache;
+use bounded_cache::BoundedStringCache;
 use raw_extraction_provider::RawExtractionProvider;
 
 /// Wraps the `macos-unifiedlogs` crate to parse Apple Unified Log
@@ -28,23 +28,19 @@ use raw_extraction_provider::RawExtractionProvider;
 /// whether `path` is a file or a directory.
 ///
 /// One `.logarchive` = one peach source. It typically holds several
-/// `.tracev3` files whose entries are interleaved in time, so there's no
-/// single natural "file order" — entries are combined and sorted by
-/// (resolved timestamp, source `.tracev3` path, position within that file)
-/// before [`crate::parsers::parse_source`] assigns sequence numbers, so the
-/// same input always produces the same order. That sort needs every
-/// resolved entry in memory at once (there's no getting around it without a
-/// proper streaming k-way merge across files, which is a bigger project for
-/// if this ever stops being enough) — but the actual [`LogParser::parse`]
-/// implementation lives in `parse_streaming` and hands each entry to its
-/// caller as soon as it's converted, instead of *also* collecting a second,
-/// fully-JSON-serialized `Vec<ParsedRecord>` on top of the sorted
-/// `Vec<LogData>`. That second collection is what turned a 219 MB real-device
-/// `.logarchive` into 45+ GB of RSS during testing: every entry existed
-/// three times over (the resolved `LogData`, plus independently-serialized
-/// `raw` and `fields` copies) before a single row reached DuckDB. `parse`
-/// (the non-streaming trait method) is now just a thin `parse_streaming` +
-/// collect for callers that still want the whole `Vec` at once.
+/// `.tracev3` files whose entries are interleaved in time. Entries are
+/// handed on in source order — `.tracev3` files in the provider's sorted
+/// path order, entries in their order within each file — so
+/// [`crate::parsers::parse_source`] assigns the same sequence numbers to the
+/// same input every time. Chronological order is the timeline query's job
+/// (`ORDER BY timestamp_utc, event_id_source, event_id_seq`), not the
+/// parser's, so only one `.tracev3` file's entries are ever in memory at
+/// once. Collecting and sorting every entry of the whole archive up front
+/// instead grew past 20 GB of RSS on a real 817 MB iOS `.logarchive` (601
+/// MB of `.tracev3` data) and wrote nothing to DuckDB until parsing had
+/// finished. `parse` (the non-streaming trait method) is just a thin
+/// `parse_streaming` + collect for callers that want the whole `Vec` at once
+/// — it holds every entry in memory, so it is unsuitable for real archives.
 ///
 /// Deliberately out of scope for this first version: the crate's
 /// oversize-string second pass (entries whose format string lives in a
@@ -82,37 +78,16 @@ impl LogParser for AulParser {
             },
             &mut StreamingProgress {
                 on_bytes: &mut |_| {},
-                on_total_known: &mut |_| {},
             },
             skip_bad_records,
         )?;
         Ok((records, skipped))
     }
 
-    /// Calls `progress.on_bytes` once per `.tracev3` file finished, not
-    /// once per entry: entries only start reaching `sink` in the second
-    /// loop below, after every file has already been parsed and resolved
-    /// (see the module doc comment on why the cross-file sort needs that) —
-    /// an entry-count-based signal would stay at zero for the entire first
-    /// pass, which on a real multi-hundred-MB `.logarchive` is most of the
-    /// wall-clock time. Byte progress checkpointed per source file, the way
-    /// iLEAPP's own `unifiedlog_iterator`-driven import does it, is the
-    /// finest granularity available without re-architecting around a
-    /// streaming k-way merge (see that same doc comment).
-    ///
-    /// `progress.on_total_known` fires exactly once, right before the
-    /// second loop starts: `collected.len()` is the final entry count at
-    /// that point (every file has been parsed, nothing more will be
-    /// added), and it's the only moment AUL can offer this — before it,
-    /// the count isn't finished growing; during the second loop, `sink`
-    /// already needs a total to be useful, not a value arriving alongside
-    /// it. Reported here instead of always being unknown (the default
-    /// [`LogParser::parse_streaming`] behavior) is what lets a caller show
-    /// a real percentage for the DB insert/tagging work that follows
-    /// parsing, instead of just a raw climbing count with no sense of how
-    /// much is left — the exact gap a flat byte-progress bar leaves once
-    /// parsing itself finishes but insert/tagging (usually the larger
-    /// share of total load time) is still running.
+    /// Calls `progress.on_bytes` once per `.tracev3` file finished, after
+    /// that file's entries have all reached `sink` — the finest granularity
+    /// available, since a `.tracev3` file is decompressed and resolved as a
+    /// whole before its first entry exists.
     fn parse_streaming(
         &self,
         path: &Path,
@@ -177,17 +152,11 @@ fn parse_with_provider(
         bail!("no .tracev3 files found under {}", path.display());
     }
 
-    // Bounded rather than `MemoryStringCache::default()`'s plain unbounded
-    // `HashMap` — `dsc` (shared-cache-strings) files alone run 30-150MB
-    // each, and letting this grow without a cap across a whole
-    // `.logarchive` parse is exactly the failure mode behind a real earlier
-    // AUL memory-blowup incident (see this module's doc comment). Caps
-    // match what this module's own hand-rolled eviction used before 0.7
-    // removed the `FileProvider::update_uuid`/`update_dsc` methods that
-    // eviction hooked into.
-    let cache = MemoryStringCache::new(BoundedCache::new(30), BoundedCache::new(2));
+    // Byte-budgeted rather than `MemoryStringCache::default()`'s plain
+    // unbounded `HashMap` — see `BoundedStringCache` for why neither that
+    // nor a small count cap works.
+    let cache = BoundedStringCache::new();
 
-    let mut collected: Vec<(f64, String, usize, LogData)> = Vec::new();
     let mut skipped = Vec::new();
     for mut file in tracev3_files {
         let source_path = file.source_path().to_string();
@@ -195,10 +164,9 @@ fn parse_with_provider(
         // file in the `.logarchive` is independently readable, so skip
         // mode just moves on to the next one rather than losing
         // everything in the whole directory over one bad sub-file.
-        let unified_log_data = match parse_log(file.reader(), &source_path)
-            .with_context(|| format!("failed to parse tracev3 file {source_path}"))
-        {
-            Ok(data) => data,
+        let unified_log_data = match read_tracev3(&mut file, &source_path) {
+            Ok(Some(data)) => data,
+            Ok(None) => continue,
             Err(err) if skip_bad_records => {
                 skipped.push(SkippedRecord {
                     location: source_path.clone(),
@@ -211,35 +179,71 @@ fn parse_with_provider(
 
         let (log_data, _unresolved_oversize) =
             build_log(&unified_log_data, &provider, &cache, &timesync_data, false);
+        // `unified_log_data` holds this file's decompressed chunks; drop it
+        // before handing entries on so only one file's data is alive.
+        drop(unified_log_data);
         for (index, entry) in log_data.into_iter().enumerate() {
-            collected.push((entry.time, source_path.clone(), index, entry));
+            // Each `entry` already came out of a successfully-parsed
+            // tracev3 file — a failure here is `to_parsed_record`'s own
+            // JSON-serialization step on one already-resolved entry, fully
+            // independent of every other entry, so it's always safe to skip
+            // and continue (unlike journald's structural case).
+            match to_parsed_record(entry) {
+                Ok(record) => sink(record)?,
+                Err(err) if skip_bad_records => skipped.push(SkippedRecord {
+                    location: format!("{source_path}, entry {index}"),
+                    reason: format!("{err:#}"),
+                }),
+                Err(err) => return Err(err),
+            }
         }
         let file_bytes = std::fs::metadata(&source_path)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
         (progress.on_bytes)(file_bytes);
     }
-
-    (progress.on_total_known)(collected.len());
-    for entry in order_entries(collected) {
-        // Each `entry` already came out of a successfully-parsed
-        // tracev3 file above — a failure here is `to_parsed_record`'s
-        // own JSON-serialization step on one already-resolved entry,
-        // fully independent of every other entry, so it's always safe
-        // to skip and continue (unlike journald's structural case).
-        // `entry.time` is captured before the entry is consumed, since
-        // `to_parsed_record` takes it by value.
-        let time = entry.time;
-        match to_parsed_record(entry) {
-            Ok(record) => sink(record)?,
-            Err(err) if skip_bad_records => skipped.push(SkippedRecord {
-                location: format!("entry at raw timestamp {time}"),
-                reason: format!("{err:#}"),
-            }),
-            Err(err) => return Err(err),
-        }
-    }
     Ok(skipped)
+}
+
+/// First four bytes of an AppleDouble file.
+const APPLE_DOUBLE_MAGIC: [u8; 4] = [0x00, 0x05, 0x16, 0x07];
+
+/// Parses one `.tracev3` file, or returns `None` if it is an AppleDouble
+/// file rather than log data.
+///
+/// macOS writes a `._<name>` AppleDouble companion next to every file it
+/// copies to a volume without native extended-attribute support (exFAT,
+/// FAT, SMB shares), so a `.logarchive` that passed through one carries a
+/// `._<hex>.tracev3` beside each real `.tracev3`. The crate's providers
+/// match those by extension alone. They hold only extended attributes, not
+/// log entries, so they are ignored like the archive's other non-log files
+/// (`Info.plist`, `logd.0.log`). A `._` name alone is not enough: only a
+/// file whose content starts with the AppleDouble magic is ignored, and
+/// anything else is parsed — and fails visibly — like any other file.
+fn read_tracev3(
+    file: &mut impl SourceFile,
+    source_path: &str,
+) -> anyhow::Result<Option<UnifiedLogData>> {
+    let is_apple_double_name = Path::new(source_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("._"));
+
+    let parsed = if is_apple_double_name {
+        let mut data = Vec::new();
+        file.reader()
+            .read_to_end(&mut data)
+            .with_context(|| format!("failed to read tracev3 file {source_path}"))?;
+        if data.starts_with(&APPLE_DOUBLE_MAGIC) {
+            return Ok(None);
+        }
+        parse_log(data.as_slice(), source_path)
+    } else {
+        parse_log(file.reader(), source_path)
+    };
+    parsed
+        .map(Some)
+        .with_context(|| format!("failed to parse tracev3 file {source_path}"))
 }
 
 /// Names of the `diagnostics` subfolders that hold `.tracev3` files.
@@ -351,18 +355,6 @@ fn dir_names(path: &Path) -> std::io::Result<Vec<String>> {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| e.file_name().to_str().map(str::to_string))
         .collect())
-}
-
-/// Sorts combined entries from every `.tracev3` file in one logarchive into
-/// a single deterministic order: by resolved timestamp, then by which
-/// `.tracev3` file it came from, then by its position within that file.
-fn order_entries(mut entries: Vec<(f64, String, usize, LogData)>) -> Vec<LogData> {
-    entries.sort_by(|a, b| {
-        a.0.total_cmp(&b.0)
-            .then_with(|| a.1.cmp(&b.1))
-            .then_with(|| a.2.cmp(&b.2))
-    });
-    entries.into_iter().map(|(_, _, _, entry)| entry).collect()
 }
 
 /// Maps one resolved AUL [`LogData`] entry to a [`ParsedRecord`].
@@ -488,40 +480,6 @@ mod tests {
     }
 
     #[test]
-    fn order_entries_sorts_by_time_then_source_path_then_index() {
-        let entries = vec![
-            (
-                2.0,
-                "b.tracev3".to_string(),
-                0,
-                sample_log_data(2.0, "second", LogType::Info),
-            ),
-            (
-                1.0,
-                "a.tracev3".to_string(),
-                1,
-                sample_log_data(1.0, "first-b", LogType::Info),
-            ),
-            (
-                1.0,
-                "a.tracev3".to_string(),
-                0,
-                sample_log_data(1.0, "first-a", LogType::Info),
-            ),
-        ];
-
-        let ordered = order_entries(entries);
-
-        assert_eq!(
-            ordered
-                .iter()
-                .map(|e| e.message.as_str())
-                .collect::<Vec<_>>(),
-            vec!["first-a", "first-b", "second"]
-        );
-    }
-
-    #[test]
     fn parse_rejects_a_path_that_is_not_a_directory() {
         let mut path = std::env::temp_dir();
         path.push(format!(
@@ -590,6 +548,53 @@ mod tests {
         assert!(records.is_empty(), "the only tracev3 file was malformed");
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].location.ends_with(".tracev3"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A `._*.tracev3` AppleDouble file must not fail the load, even with
+    /// skip mode off.
+    #[test]
+    fn an_apple_double_tracev3_companion_is_ignored_not_parsed() {
+        let root = temp_test_dir("apple-double");
+        std::fs::create_dir_all(root.join("Persist")).unwrap();
+        std::fs::create_dir_all(root.join("dsc")).unwrap();
+        std::fs::create_dir_all(root.join("00")).unwrap();
+        let mut apple_double = APPLE_DOUBLE_MAGIC.to_vec();
+        apple_double.extend_from_slice(b"\x00\x02\x00\x00Mac OS X        ");
+        std::fs::write(root.join("Persist").join("._0000001.tracev3"), apple_double).unwrap();
+
+        let config =
+            ParserConfig::from_toml_str("[parser]\nname = \"aul\"\nsourcetype = \"aul\"\n")
+                .unwrap();
+        let (records, skipped) = AulParser.parse(&root, &config, false).unwrap();
+
+        assert!(records.is_empty());
+        assert!(skipped.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The `._` name alone must not hide a file: without the AppleDouble
+    /// magic it is parsed like any other `.tracev3` and fails visibly.
+    #[test]
+    fn a_dot_underscore_name_without_apple_double_magic_is_still_parsed() {
+        let root = temp_test_dir("dot-underscore-not-apple-double");
+        std::fs::create_dir_all(root.join("Persist")).unwrap();
+        std::fs::create_dir_all(root.join("dsc")).unwrap();
+        std::fs::create_dir_all(root.join("00")).unwrap();
+        std::fs::write(
+            root.join("Persist").join("._0000001.tracev3"),
+            b"not a real tracev3",
+        )
+        .unwrap();
+
+        let config =
+            ParserConfig::from_toml_str("[parser]\nname = \"aul\"\nsourcetype = \"aul\"\n")
+                .unwrap();
+        let err = AulParser.parse(&root, &config, false).unwrap_err();
+
+        assert!(format!("{err:#}").contains("._0000001.tracev3"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
