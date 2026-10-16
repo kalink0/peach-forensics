@@ -671,7 +671,11 @@ load parallelizes:
 
 - **Sessions directory** — where new sessions' `.duckdb`/`.sqlite` files are
   created (see [Sessions](#sessions) below). Defaults to the OS-standard
-  per-user data directory; only affects sessions created from now on.
+  per-user data directory (on Windows the local one,
+  `%LOCALAPPDATA%\peach\data\sessions`, not the roaming `%APPDATA%`); only
+  affects sessions created from now on. A session can take tens of GB
+  (a large AUL archive can reach about 60 GB), so on a small system drive
+  point this at a volume with room to spare.
 - **Rules directory** — where **Tag all matching (advanced)...** (see
   [Tagging](#tagging) above) writes new rule files, and where Peach looks
   for rules to load automatically. Defaults to the OS-standard per-user data

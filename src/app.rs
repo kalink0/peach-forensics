@@ -367,6 +367,11 @@ pub struct PeachApp {
     portable_case_export_rx: Option<mpsc::Receiver<PortableCaseExportOutcome>>,
     portable_case_import_state: PortableCaseImportState,
     portable_case_import_rx: Option<mpsc::Receiver<PortableCaseImportOutcome>>,
+    /// Set at startup when [`persist::migrate_legacy_sessions`] couldn't
+    /// move some sessions out of the old default location — shown until
+    /// dismissed, so sessions that seem to have vanished from the session
+    /// list are explained instead of silently missing.
+    session_migration_warning: Option<String>,
     timeline: TimelineView,
     filter_bar: FilterBar,
     available_levels: Vec<(String, String)>,
@@ -545,9 +550,48 @@ fn builtin_rules_button_is_relevant(
     })
 }
 
+/// Moves sessions from the old default location (Roaming on Windows, see
+/// [`persist::default_sessions_dir`]) to the current one. Runs regardless
+/// of a `Settings::sessions_dir` override or `--ephemeral-session`: the
+/// point is getting multi-GB timelines out of a roaming profile, whichever
+/// directory this run itself uses. Returns the warning to show if anything
+/// couldn't be moved.
+fn migrate_legacy_sessions_at_startup() -> Option<String> {
+    let legacy_dir = persist::legacy_sessions_dir()?;
+    let new_dir = persist::default_sessions_dir().ok()?;
+    let migration = persist::migrate_legacy_sessions(&legacy_dir, &new_dir);
+    for moved in &migration.moved {
+        eprintln!("peach: moved session to {}", moved.display());
+    }
+    session_migration_warning_text(&migration, &legacy_dir, &new_dir)
+}
+
+fn session_migration_warning_text(
+    migration: &persist::SessionMigration,
+    legacy_dir: &Path,
+    new_dir: &Path,
+) -> Option<String> {
+    if migration.failed.is_empty() {
+        return None;
+    }
+    let mut text = format!(
+        "{} item(s) could not be moved from the old sessions folder {} to {}. \
+         They were left unchanged. To open them, close Peach and move them yourself, \
+         or point Settings → Sessions directory at the old folder:",
+        migration.failed.len(),
+        legacy_dir.display(),
+        new_dir.display()
+    );
+    for (path, reason) in &migration.failed {
+        text.push_str(&format!("\n• {}: {reason}", path.display()));
+    }
+    Some(text)
+}
+
 impl PeachApp {
     fn new(add_sources: Vec<PathBuf>, cleanup_dirs: Vec<PathBuf>, ephemeral_session: bool) -> Self {
         let settings = config::load();
+        let session_migration_warning = migrate_legacy_sessions_at_startup();
         // `--ephemeral-session` (crush handing off a temp-extracted or
         // decrypted source): use a one-off directory under the configured
         // staging base (OS temp by default, see `Settings::staging_dir`)
@@ -660,6 +704,7 @@ impl PeachApp {
             portable_case_export_rx: None,
             portable_case_import_state: PortableCaseImportState::Idle,
             portable_case_import_rx: None,
+            session_migration_warning,
             filter_bar: FilterBar::new(),
             available_levels: Vec::new(),
             available_tags: Vec::new(),
@@ -2639,6 +2684,17 @@ impl eframe::App for PeachApp {
                 }
             }
 
+            if let Some(warning) = &self.session_migration_warning {
+                let mut dismiss = false;
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::from_rgb(230, 160, 0), warning);
+                    dismiss = ui.button("Dismiss").clicked();
+                });
+                if dismiss {
+                    self.session_migration_warning = None;
+                }
+            }
+
             let can_load = !matches!(self.load_state, LoadState::Loading { .. })
                 && !matches!(self.retag_state, RetagState::Running)
                 && !matches!(
@@ -4030,6 +4086,29 @@ mod tests {
             parser_config_path: None,
             source_file_id: String::new(),
         }
+    }
+
+    #[test]
+    fn session_migration_warning_only_when_something_failed_and_names_each_item() {
+        let legacy = Path::new("/roaming/sessions");
+        let new = Path::new("/local/sessions");
+        let clean = persist::SessionMigration {
+            moved: vec![new.join("session-a")],
+            failed: Vec::new(),
+        };
+        assert_eq!(session_migration_warning_text(&clean, legacy, new), None);
+
+        let partial = persist::SessionMigration {
+            moved: Vec::new(),
+            failed: vec![(legacy.join("session-b"), "access denied".to_string())],
+        };
+        let text = session_migration_warning_text(&partial, legacy, new).unwrap();
+        assert!(text.starts_with("1 item(s) could not be moved"));
+        assert!(text.contains(&legacy.display().to_string()));
+        assert!(text.contains(&format!(
+            "{}: access denied",
+            legacy.join("session-b").display()
+        )));
     }
 
     #[test]

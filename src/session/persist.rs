@@ -7,17 +7,85 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::db::session_schema::setup_session_schema;
 use crate::model::event_id::EventId;
 
-/// Default per-user directory for session files (XDG on Linux, `AppData` on
-/// Windows, `Application Support` on macOS) — not user-configurable yet
-/// (per the `source-file-id-design`-style incremental approach: a real
-/// override UI is a later, separate step, not built preemptively here).
+/// Default per-user directory for session files (XDG on Linux,
+/// `%LOCALAPPDATA%` on Windows, `Application Support` on macOS), used
+/// unless `Settings::sessions_dir` overrides it.
+///
+/// Deliberately the *local* data directory, not `data_dir()`: on Windows
+/// the latter is `%APPDATA%` (Roaming), which domain environments sync to a
+/// server on logon/logoff or redirect to a network share — wrong for
+/// multi-GB DuckDB timelines, and case data shouldn't be replicated off the
+/// machine as a side effect of where Peach happens to store it. Linux and
+/// macOS have no such split (`data_local_dir() == data_dir()` there).
+/// Sessions created by older versions under Roaming are moved over by
+/// [`migrate_legacy_sessions`].
 pub fn default_sessions_dir() -> anyhow::Result<PathBuf> {
     let project_dirs = ProjectDirs::from("", "", "peach")
         .context("could not determine a per-user data directory on this platform")?;
-    let dir = project_dirs.data_dir().join("sessions");
+    let dir = project_dirs.data_local_dir().join("sessions");
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create sessions directory {}", dir.display()))?;
     Ok(dir)
+}
+
+/// Where older versions kept sessions by default (`data_dir()`, i.e.
+/// `%APPDATA%` on Windows) — `None` where that's the same directory as
+/// [`default_sessions_dir`] (Linux, macOS), so there's nothing to migrate.
+pub fn legacy_sessions_dir() -> Option<PathBuf> {
+    let project_dirs = ProjectDirs::from("", "", "peach")?;
+    (project_dirs.data_dir() != project_dirs.data_local_dir())
+        .then(|| project_dirs.data_dir().join("sessions"))
+}
+
+/// What [`migrate_legacy_sessions`] did — `failed` entries are still at
+/// their old location, untouched, with the reason.
+#[derive(Debug, Default)]
+pub struct SessionMigration {
+    pub moved: Vec<PathBuf>,
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+/// Moves every entry of `legacy_dir` into `new_dir` via `rename` only —
+/// never copy-then-delete, so a failure can't leave a half-copied session
+/// behind or remove an original. `rename` is a metadata operation on the
+/// same volume; across volumes (e.g. a Roaming folder redirected to a
+/// network share) or while another Peach instance holds a session open it
+/// fails, and that entry stays where it was and is reported in `failed`. An entry whose name already
+/// exists in `new_dir` is never overwritten. `legacy_dir` itself is removed
+/// afterwards only if it ended up empty. A missing `legacy_dir` is not an
+/// error — the normal case on every run after the first.
+pub fn migrate_legacy_sessions(legacy_dir: &Path, new_dir: &Path) -> SessionMigration {
+    let mut result = SessionMigration::default();
+    if legacy_dir == new_dir {
+        return result;
+    }
+    let Ok(entries) = std::fs::read_dir(legacy_dir) else {
+        return result;
+    };
+    if let Err(err) = std::fs::create_dir_all(new_dir) {
+        result.failed.push((
+            legacy_dir.to_path_buf(),
+            format!("failed to create {}: {err}", new_dir.display()),
+        ));
+        return result;
+    }
+    for entry in entries.flatten() {
+        let from = entry.path();
+        let to = new_dir.join(entry.file_name());
+        if to.exists() {
+            result
+                .failed
+                .push((from, format!("{} already exists", to.display())));
+            continue;
+        }
+        match std::fs::rename(&from, &to) {
+            Ok(()) => result.moved.push(to),
+            Err(err) => result.failed.push((from, err.to_string())),
+        }
+    }
+    // Only succeeds if empty, which is exactly when it should go.
+    let _ = std::fs::remove_dir(legacy_dir);
+    result
 }
 
 /// A fresh, one-off directory under `base` (the OS temp directory by
@@ -711,6 +779,77 @@ mod tests {
 
         assert!(dir.starts_with(&base));
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "peach-persist-test-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn migrate_legacy_sessions_moves_every_session_and_removes_the_empty_legacy_dir() {
+        let base = unique_test_dir("migrate-moves");
+        let legacy = base.join("roaming").join("sessions");
+        let new = base.join("local").join("sessions");
+        for id in ["session-a", "session-b"] {
+            std::fs::create_dir_all(legacy.join(id)).unwrap();
+            std::fs::write(legacy.join(id).join(format!("{id}.sqlite")), id).unwrap();
+        }
+
+        let result = migrate_legacy_sessions(&legacy, &new);
+
+        assert_eq!(result.moved.len(), 2);
+        assert!(result.failed.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(new.join("session-a").join("session-a.sqlite")).unwrap(),
+            "session-a"
+        );
+        assert!(new.join("session-b").join("session-b.sqlite").is_file());
+        assert!(!legacy.exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn migrate_legacy_sessions_never_overwrites_an_existing_session_and_keeps_the_original() {
+        let base = unique_test_dir("migrate-collision");
+        let legacy = base.join("roaming");
+        let new = base.join("local");
+        std::fs::create_dir_all(legacy.join("session-a")).unwrap();
+        std::fs::write(legacy.join("session-a").join("old.sqlite"), "old").unwrap();
+        std::fs::create_dir_all(new.join("session-a")).unwrap();
+        std::fs::write(new.join("session-a").join("new.sqlite"), "new").unwrap();
+
+        let result = migrate_legacy_sessions(&legacy, &new);
+
+        assert!(result.moved.is_empty());
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(result.failed[0].0, legacy.join("session-a"));
+        assert!(legacy.join("session-a").join("old.sqlite").is_file());
+        assert!(new.join("session-a").join("new.sqlite").is_file());
+        assert!(!new.join("session-a").join("old.sqlite").exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn migrate_legacy_sessions_is_a_no_op_without_a_legacy_dir_or_when_both_are_the_same() {
+        let base = unique_test_dir("migrate-noop");
+        let new = base.join("local");
+
+        let missing = migrate_legacy_sessions(&base.join("does-not-exist"), &new);
+        assert!(missing.moved.is_empty() && missing.failed.is_empty());
+        assert!(!new.exists());
+
+        std::fs::create_dir_all(new.join("session-a")).unwrap();
+        let same = migrate_legacy_sessions(&new, &new);
+        assert!(same.moved.is_empty() && same.failed.is_empty());
+        assert!(new.join("session-a").is_dir());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
