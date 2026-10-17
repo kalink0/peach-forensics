@@ -17,11 +17,23 @@
 # sensor's equivalent of the iOS "Home Button Was Pressed" line above
 # (tested macOS 26.6.2, build 25G83):
 # https://thesisfriday.com/thesis-friday-26-same-unlock-three-different-stories/
+#
+# Version 2 adds the kernel's "isFaceDetected=1", listed with
+# getFaceDetectInfo and PearlCamFrameReceived (AppleH13CameraInterface) for
+# Face ID hardware in Tim Korver's "Apple Unified Log search term and
+# process cheatsheet" (v2, published with Thesis Friday #31 on 2026-10-16,
+# CC BY-NC-ND 4.0):
+# https://thesisfriday.com/unified-log-search-terms-cheatsheet/
+# Per the cheatsheet, "FD Distance 0" in these lines means no face was
+# detected, and none of these lines is a match on its own — read them with
+# the match result in the same cluster (aul_biometric_match.toml).
+# Not checked against real AUL data; where "isFaceDetected=1" sits on the
+# same line as "getFaceDetectInfo", it adds no rows.
 
 [rule]
 name = "aul_biometric_sensor_events"
 description = "Face ID / Touch ID sensor-level events (not the unlock decision itself)"
-version = "1"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
@@ -33,6 +45,7 @@ message_contains = [
     "Home Button Was Pressed",
     "setFingerOnState: FingerON",
     "TouchID button pressed: 1",
+    "isFaceDetected=1",
 ]
 
 [rule.tag]

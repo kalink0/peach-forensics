@@ -7,15 +7,21 @@
 # Source: Thesis Friday #2 (Tim Korver):
 # https://thesisfriday.com/thesis-friday-2-aul-device-orientation/
 #
-# Version 2 adds the kernel's "[TTW] Orientation changed", from iLEAPP
-# `logarchive_orientation` (commit 055b35a, 2026-10-03), taken from Tim
-# Korver's "Apple Unified Log search term and process cheatsheet", which is
-# not published on thesisfriday.com — iLEAPP is the citable source:
-# https://github.com/abrignoni/iLEAPP. The line carries only a code and a
-# microsecond counter; iLEAPP saw it on iOS 17.2.1, 18.7 and 26.5.2. Per
-# the cheatsheet as iLEAPP quotes it, several processes log the same
-# orientation change, and the end state is reliable while the start state
-# is not. iLEAPP's broader "Received orientation" (no trailing period) also
+# Version 2 adds the kernel's "[TTW] Orientation changed", from Tim
+# Korver's "Apple Unified Log search term and process cheatsheet" (v2,
+# published with Thesis Friday #31 on 2026-10-16, CC BY-NC-ND 4.0):
+# https://thesisfriday.com/unified-log-search-terms-cheatsheet/
+# The cheatsheet lists it as the sensor-level line (AOP, its own
+# microsecond counter, no process in between) and as the line to count
+# pick-ups on instead of "Gesture notification:". iLEAPP
+# (`logarchive_orientation`, commit 055b35a, 2026-10-03) saw it on iOS
+# 17.2.1, 18.7 and 26.5.2: https://github.com/abrignoni/iLEAPP. Per the
+# cheatsheet, processes report different start states for the same event
+# (including Ambiguous): the end state is reliable, the start state is
+# not. On iOS 12 the rotation line came from SpringBoard / CoreMotion
+# under another name, which gives zero hits on iOS 26 (and the other way
+# around), so a zero here on an old build is not an absence of rotations.
+# iLEAPP's broader "Received orientation" (no trailing period) also
 # takes FrontBoard's "Received orientation update: <FBSOrientationUpdate
 # ...>"; that form is a different message and stays unmatched here. Wake
 # gestures such as a pick-up, which iLEAPP reports in the same artifact,

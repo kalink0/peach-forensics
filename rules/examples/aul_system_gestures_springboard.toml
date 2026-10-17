@@ -14,10 +14,14 @@
 # "gestureRecognizerShouldBegin" alone is a generic UIKit delegate method
 # name that other processes can log too.
 #
-# Source: iLEAPP `logarchive_system_gestures` (commit 055b35a, 2026-10-03),
-# from Tim Korver's "Apple Unified Log search term and process cheatsheet",
-# which is not published on thesisfriday.com — iLEAPP is the citable
-# source: https://github.com/abrignoni/iLEAPP
+# Source: iLEAPP `logarchive_system_gestures` (commit 055b35a, 2026-10-03):
+# https://github.com/abrignoni/iLEAPP. iLEAPP attributes it to Tim
+# Korver's "Apple Unified Log search term and process cheatsheet", but the
+# published v2 (Thesis Friday #31, 2026-10-16) does not contain
+# "gestureRecognizerShouldBegin"; for the edge swipe it lists
+# SpringBoard's "SBGrabberTongue" and the category
+# SystemGestureAppSwitcher instead, so iLEAPP remains the source here:
+# https://thesisfriday.com/unified-log-search-terms-cheatsheet/
 
 [rule]
 name = "aul_system_gestures_springboard"

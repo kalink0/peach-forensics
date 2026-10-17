@@ -4,6 +4,12 @@
 # iLEAPP: The Reference" (Alexis Brignoni):
 # leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive lock status".
+#
+# "Device unlocked" (softwareupdateservicesd) is the line Tim Korver's
+# "Apple Unified Log search term and process cheatsheet" (v2, published
+# with Thesis Friday #31 on 2026-10-16, CC BY-NC-ND 4.0) counts unlocks on
+# for iOS: one line per unlock, iOS 12 through 26, and it says nothing
+# about the method: https://thesisfriday.com/unified-log-search-terms-cheatsheet/
 
 [rule]
 name = "aul_screen_lock_state"

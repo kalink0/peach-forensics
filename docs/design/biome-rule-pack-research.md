@@ -197,20 +197,45 @@ of weight:
    folder untouched" mechanism.** Option 1 leaves it alone entirely. With the
    envelope-verification risk that used to justify that rework now largely closed for
    v2, there's less reason to pay it.
-4. **SEGB v1 is explicitly deferred, not implemented in the first pass.**
-   `ccl_segb1.py` was *not* touched by the upstream hardening commit above — no
-   re-vendoring provenance header, no new test, no fixture. Per CCL's own upstream
-   project, there has been no newer `ccl-segb` release, so no v1 hardening is expected
-   to appear from that source soon either — and v1 files are increasingly rare in
-   real-world captures (newer iOS/macOS versions predominantly produce v2). Building a
-   v1 reader to the same confidence bar as the now-verified v2 one would mean redoing
-   from-scratch edge-case discovery with zero external verification — not worth paying
-   for now. Peach will still **detect** v1 files by signature (so they're never
-   silently mis-parsed as v2 or silently skipped) and surface a clear, visible
-   "SEGB v1 not yet supported" error per file — consistent with CLAUDE.md §0.1's
-   "Fehler sichtbar machen, nicht verschlucken" principle — rather than shipping an
-   unverified v1 reader. v1 support is a tracked future item, revisited only if real
-   v1 data turns up or CCL's upstream moves again.
+4. **SEGB v1 — first deferred, implemented in v0.10.0.**
+   The first pass deferred v1: `ccl_segb1.py` was *not* touched by the upstream
+   hardening commit above (no new test, no fixture), and without real v1 data a port
+   could only be checked against the reference code itself. v1 files were detected by
+   signature and reported per file as "SEGB v1 not yet supported", never silently
+   misread or skipped; v1 was to be revisited once real v1 data turned up.
+
+   The first pass also justified the deferral by saying v1 files were increasingly
+   rare because newer iOS/macOS versions predominantly produce v2. That was an
+   assumption with no source behind it, and real data contradicted it. On an iOS 17.3
+   (21D50) full file system extraction of an iPhone 11 (2024-07-28):
+   - 74 stream files under `local/` were v1, 141 were v2 (plus 61 v1 and some v2
+     files under `tombstone/`, which Peach does not load). The format is per stream:
+     74 streams were v1-only, 85 were v2-only, none had both.
+   - The device was upgraded from iOS 16. The v1 files were created in July 2023
+     (their names are Cocoa-microsecond creation times), before iOS 17's release,
+     and held records up to the day of the extraction: v1 streams created under
+     iOS 16 kept being written after the upgrade. Whether iOS 17 creates new
+     streams as v1 is not established.
+   - The v1 streams included most of the streams the built-in rules cover
+     (`App.InFocus`, `Device.ScreenLocked`, `Device.Power.PluggedIn`,
+     `Device.Wireless.WiFi`, CarPlay, Airplane Mode, `Messages.Read`, …): 27 Biome
+     rules matched v1 records, 17 matched v2 records. Without v1 support most of this
+     device's Biome pattern-of-life data was unavailable.
+   That is one device; how this looks on other devices and iOS versions is not
+   established.
+
+   With that data the port could be verified: the Rust v1 reader and `ccl_segb1.py`
+   produced identical results for all 67,955 records of the 74 v1 files (offset,
+   state, both timestamps to the microsecond, payload length and CRC32, CRC result,
+   the unknown header value). The reader adds bounds checks the reference lacks: a
+   record running past the end of the file or with a negative length ends the walk
+   with a visible per-record error; an unrecognized state or an undecodable
+   `timestamp1`, where the reference raises and aborts the file, becomes a per-record
+   error and the walk continues, since the record length is still known. None of
+   these occurred in the real data. v1 `Unknown` (4) records are kept, unlike v2's,
+   because in v1 the state sits in front of the record's own payload bytes.
+   `timestamp1` is the record time, as in iLEAPP's Biome modules; `timestamp2` is
+   kept raw in the record's fields since its meaning is not documented.
 
 See the `feature/biome-segb-parser` branch's commit history for the step-by-step
 implementation built on this decision.

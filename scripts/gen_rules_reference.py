@@ -103,7 +103,9 @@ def main():
         "iLEAPP: The Reference\"](https://leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference) "
         "(Alexis Brignoni), with a handful of newer, higher-precision ones "
         "from Tim Korver's [Thesis Friday](https://thesisfriday.com/) "
-        "series instead — see each rule file's header comment for the "
+        "series and his [search term and process cheatsheet]"
+        "(https://thesisfriday.com/unified-log-search-terms-cheatsheet/) "
+        "instead — see each rule file's header comment for the "
         "specific citation either way. Every rule matches "
         "`sourcetype = \"aul\"`."
     )
@@ -164,7 +166,7 @@ def main():
     out.append("")
     out.append(
         "Stream names and field semantics sourced from iLEAPP's `biome*.py` "
-        "artifact modules (Apache-2.0). The SEGB v2 envelope format decoded "
+        "artifact modules (Apache-2.0). The SEGB v1/v2 envelope format decoded "
         "underneath these streams is a Rust port of [CCL Forensics' "
         "ccl_segb project](https://github.com/cclgroupltd/ccl-segb) (MIT) — "
         "see [docs/design/biome-rule-pack-research.md](design/biome-rule-pack-research.md) "

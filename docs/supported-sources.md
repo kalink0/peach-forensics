@@ -207,17 +207,9 @@ to discover every candidate file — no manual restructuring needed.
   structurally (no `local`/`remote` parent) before ever being opened,
   never even counted as a skipped source.
 - Each file is a **SEGB** envelope (Segmented Biome) wrapping one or more
-  records. **Only SEGB v2 is currently implemented** — the format variant
-  that has an actively-maintained upstream reference implementation
-  ([`cclgroupltd/ccl-segb`](https://github.com/cclgroupltd/ccl-segb), MIT)
-  with a hardened, tested v2 reader; SEGB v1 predates that hardening pass
-  and has no equivalent fixture/test to verify a Rust port against. A v1
-  file is detected by its signature (so it's never silently misread as v2
-  or silently skipped) and surfaces a clear "SEGB v1 not yet supported"
-  error per file instead. See
-  [docs/design/biome-rule-pack-research.md](design/biome-rule-pack-research.md)
-  for the full rationale and what would need to change to add v1 support
-  later.
+  records. **SEGB v1 and v2 are both supported.** The version is
+  identified per file by the position of the `SEGB` magic: bytes 52–55
+  for v1, bytes 0–3 for v2. One `streams` folder can contain both.
 - Each record's protobuf payload is decoded schema-less (no `.proto`
   definitions exist for these streams) — the output is a JSON object keyed
   by field number (`"1"`, `"2"`, …), with a length-delimited field's bytes

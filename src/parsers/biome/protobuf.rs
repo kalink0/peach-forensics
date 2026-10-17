@@ -23,8 +23,10 @@ use serde_json::{Map, Value, json};
 /// Protobuf's own spec-defined ceiling on field numbers.
 const MAX_FIELD_NUMBER: u64 = 1 << 29;
 /// Caps recursive "try this length-delimited field as a nested message"
-/// attempts — SEGB payloads aren't deeply nested in practice, so this is
-/// generous headroom, not a tight budget.
+/// attempts — a guard against pathological or corrupt input, not a
+/// statement about how deep real payloads nest. Hitting it is flagged in
+/// the decoded output ("maximum nesting depth exceeded"), never silently
+/// truncated.
 const MAX_DECODE_DEPTH: usize = 32;
 /// A global cap on the total number of fields decoded across a whole
 /// [`decode_message`] call, including every recursive nested-message
@@ -42,8 +44,8 @@ const MAX_DECODE_WORK: usize = 100_000;
 /// whatever fields decoded before that point are kept and a sibling
 /// `"_decode_error"` string key records why decoding stopped early — a
 /// partial, visibly-flagged result rather than silently discarding the
-/// whole record (see [`crate::parsers::biome`]'s module doc comment and
-/// CLAUDE.md's error-visibility principle). This mirrors iLEAPP's own
+/// whole record (see [`crate::parsers::biome`]'s module doc comment; errors
+/// are made visible, not swallowed). This mirrors iLEAPP's own
 /// `_records()`, which catches a `blackboxprotobuf` decode exception and
 /// still yields the record rather than dropping it.
 pub fn decode_message(bytes: &[u8]) -> Value {
@@ -106,8 +108,7 @@ fn decode_message_impl(bytes: &[u8], depth: usize, budget: &mut usize) -> Value 
 /// Inserts `value` under `key`, turning a second occurrence of the same
 /// field number into a JSON array rather than overwriting the first —
 /// protobuf allows a field number to repeat, and silently keeping only the
-/// last occurrence would lose data CLAUDE.md's forensic principles say
-/// must be kept.
+/// last occurrence would silently lose source data.
 fn insert_or_accumulate(fields: &mut Map<String, Value>, key: String, value: Value) {
     match fields.get_mut(&key) {
         None => {

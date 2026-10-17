@@ -1,24 +1,33 @@
 //! Reads Apple's SEGB ("Segmented Biome") envelope format — the container
 //! that wraps individual protobuf records inside a `biome/streams/.../local`
 //! or `.../remote` file. Two on-disk variants exist, distinguished by where
-//! the `"SEGB"` magic sits and by header/framing shape; this module only
-//! implements v2, the variant actually hardened against real-world edge
-//! cases as of this writing (see below) — v1 is detected (so it's never
-//! silently misread as v2) but not decoded, and callers must treat
-//! [`SegbVersion::V1`] as an explicit "not yet supported" condition.
+//! the `"SEGB"` magic sits and by header/framing shape: v2
+//! ([`read_v2_records`]) and v1 ([`read_v1_records`]).
 //!
 //! Ported from, and checked line-by-line against, the actual upstream
 //! reference implementation: [`cclgroupltd/ccl-segb`](https://github.com/cclgroupltd/ccl-segb)
-//! (CCL Forensics, MIT License), specifically `ccl_segb2.py` at commit
-//! `e218d7e9e5266b833d345ba4be9cf1f7e2ea1b57` (2026-07-11) — the same
-//! commit crush-forensics vendors verbatim in `crush/third_party/ccl_segb/`.
-//! That commit is itself a fix for three real trailer-parsing bugs
-//! (unrecognized trailer state, duplicate `end_offset` entries, stale
-//! too-short entries) found against real device data; all three are ported
-//! here too, not just the "happy path" reader. `ccl_segb1.py` (v1) predates
-//! that hardening pass and has no equivalent fixture/test to verify a port
-//! against, which is why it's deliberately left unimplemented rather than
-//! guessed at.
+//! (CCL Forensics, MIT License), specifically `ccl_segb2.py` and
+//! `ccl_segb1.py` at commit `e218d7e9e5266b833d345ba4be9cf1f7e2ea1b57`
+//! (2026-07-11) — the same commit crush-forensics and iLEAPP vendor
+//! verbatim. That commit is itself a fix for three real trailer-parsing
+//! bugs in v2 (unrecognized trailer state, duplicate `end_offset` entries,
+//! stale too-short entries) found against real device data; all three are
+//! ported here too, not just the "happy path" reader. `ccl_segb1.py` was
+//! not part of that hardening pass (last changed upstream 2024-05-13) and
+//! has no bounds checks of its own; the v1 reader here adds them, see
+//! [`read_v1_records`].
+//!
+//! # On-disk layout (v1)
+//!
+//! - 56-byte file header: `end_of_data_offset: u32` LE (absolute, from the
+//!   start of the file), 48 bytes not interpreted by the reference
+//!   implementation, then the 4-byte magic `"SEGB"` at offset 52.
+//! - Records follow the header back to back until `end_of_data_offset`:
+//!   a 32-byte record header (`record_length: i32`, `state: i32` — an
+//!   [`EntryState`] raw value —, `timestamp1: f64`, `timestamp2: f64`, both
+//!   Cocoa time, `crc32_stored: u32`, an `i32` of unknown meaning, all LE),
+//!   then `record_length` payload bytes, then padding that aligns the next
+//!   record header to an 8-byte boundary (absolute file offset).
 //!
 //! # On-disk layout (v2)
 //!
@@ -46,6 +55,8 @@ use chrono::{DateTime, Utc};
 const MAGIC: &[u8; 4] = b"SEGB";
 
 const V1_HEADER_LENGTH: usize = 56;
+const V1_RECORD_HEADER_LENGTH: usize = 32;
+const V1_ALIGNMENT: usize = 8;
 const V2_HEADER_LENGTH: usize = 32;
 const V2_TRAILER_ENTRY_LENGTH: usize = 16;
 const V2_ENTRY_HEADER_LENGTH: usize = 8;
@@ -63,10 +74,11 @@ pub enum SegbVersion {
 
 /// Mirrors `ccl_segb_common.py`'s `EntryState` IntEnum exactly: `Written`
 /// (1) and `Deleted` (3) both carry real, readable record data; `Unknown`
-/// (4) is v2-specific and marks a trailer slot that was never written to
-/// (see [`read_v2_records`]'s doc comment on why those are skipped rather
-/// than surfaced as empty records). Any other raw value isn't a valid
-/// state at all.
+/// (4) marks a v2 trailer slot that was never written to (see
+/// [`read_v2_records`]'s doc comment on why those are skipped rather than
+/// surfaced as empty records). In v1 every state sits in a record header
+/// in front of its own payload bytes, so a v1 `Unknown` record is kept
+/// like any other. Any other raw value isn't a valid state at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryState {
     Written,
@@ -113,6 +125,19 @@ pub struct SegbRecord {
     /// implementation itself only exposes this as an inspectable property,
     /// never raises on it.
     pub crc_valid: bool,
+    /// Header values only SEGB v1 records carry; `None` for v2.
+    pub v1: Option<SegbV1Extra>,
+}
+
+/// The two v1 record-header values with no v2 counterpart, kept as read so
+/// nothing from the header is lost. `timestamp_utc` on [`SegbRecord`] is
+/// v1's `timestamp1`, the one iLEAPP's Biome modules use as the record's
+/// time; `timestamp2` stays raw (Cocoa seconds) because its meaning is not
+/// documented by the reference implementation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SegbV1Extra {
+    pub timestamp2_raw: f64,
+    pub unknown_value: i32,
 }
 
 /// Sniffs which SEGB variant (if any) `bytes` starts with, checking v1's
@@ -143,8 +168,8 @@ fn read_f64(bytes: &[u8], offset: usize) -> f64 {
 /// Decodes a Cocoa/Mac Absolute Time value (seconds since 2001-01-01) into
 /// a UTC timestamp — matches `ccl_segb_common.py::decode_cocoa_time`. Kept
 /// fallible (rather than clamping/guessing) since a garbage timestamp is a
-/// sign of real corruption worth surfacing per CLAUDE.md's error-visibility
-/// principle, not silently coercing to some default instant.
+/// sign of real corruption worth surfacing as a visible error, not silently
+/// coercing to some default instant.
 pub(super) fn decode_cocoa_time(seconds: f64) -> anyhow::Result<DateTime<Utc>> {
     if !seconds.is_finite() {
         bail!("Cocoa timestamp {seconds} is not a finite number");
@@ -264,6 +289,7 @@ pub fn read_v2_records(bytes: &[u8]) -> anyhow::Result<Vec<anyhow::Result<SegbRe
                     payload: prev_record.payload.clone(),
                     record_offset: prev_record.record_offset,
                     crc_valid: prev_record.crc_valid,
+                    v1: None,
                 })),
                 Err(err) => records.push(Err(err)),
             }
@@ -288,8 +314,8 @@ pub fn read_v2_records(bytes: &[u8]) -> anyhow::Result<Vec<anyhow::Result<SegbRe
             // Python `stream.read(n)` past EOF just silently returns fewer
             // bytes. Surfacing it as a visible per-record error instead
             // (and stopping, since there's no safe offset to resync to)
-            // fits CLAUDE.md's error-visibility principle better than
-            // silently accepting truncated data.
+            // makes the truncation visible rather than silently accepting
+            // truncated data.
             records.push(Err(anyhow!(
                 "record ending at data-area offset {} would read past the end of the file",
                 entry.end_offset
@@ -321,11 +347,118 @@ pub fn read_v2_records(bytes: &[u8]) -> anyhow::Result<Vec<anyhow::Result<SegbRe
                     payload,
                     record_offset,
                     crc_valid: crc32_stored == crc32_calculated,
+                    v1: None,
                 };
                 previous = Some((entry.end_offset, record.clone()));
                 records.push(Ok(record));
             }
             Err(err) => records.push(Err(err)),
+        }
+    }
+
+    Ok(records)
+}
+
+/// Reads every record out of a SEGB v1 buffer, following `ccl_segb1.py`'s
+/// `read_segb1_stream`: records are walked from the end of the 56-byte
+/// header while the position is below the header's `end_of_data_offset`,
+/// each record's payload is `record_length` bytes after its 32-byte
+/// header, and the next header starts at the next 8-byte boundary.
+///
+/// Same `Result` contract as [`read_v2_records`]. Where the reference
+/// implementation has no check, this reader adds one and makes the problem
+/// visible instead:
+/// - a record header or payload that would run past the end of the file
+///   (Python's `read(n)` would silently return fewer bytes) and a negative
+///   `record_length` are a per-record error that ends the walk, since
+///   there is no trustworthy offset to continue from;
+/// - an unrecognized state raw value or an undecodable `timestamp1` (where
+///   the reference raises and aborts the whole file) is a per-record error,
+///   and the walk continues with the next record, because the record's
+///   length — and therefore where the next one starts — is still known.
+///
+/// Unlike v2, `Unknown` (4) records are returned, not skipped: in v1 the
+/// state sits in front of the record's own payload bytes, so there is data
+/// behind it.
+pub fn read_v1_records(bytes: &[u8]) -> anyhow::Result<Vec<anyhow::Result<SegbRecord>>> {
+    if bytes.len() < V1_HEADER_LENGTH {
+        bail!("file is shorter than the {V1_HEADER_LENGTH}-byte SEGB v1 header");
+    }
+    if bytes[52..56] != *MAGIC {
+        bail!(
+            "unexpected file magic: expected {:02x?} at offset 52, got {:02x?}",
+            MAGIC,
+            &bytes[52..56]
+        );
+    }
+    let end_of_data_offset = read_u32(bytes, 0) as usize;
+
+    let mut records: Vec<anyhow::Result<SegbRecord>> = Vec::new();
+    let mut pos = V1_HEADER_LENGTH;
+
+    while pos < end_of_data_offset {
+        let header_end = pos + V1_RECORD_HEADER_LENGTH;
+        if header_end > bytes.len() {
+            records.push(Err(anyhow!(
+                "record header at offset {pos} would read past the end of the file \
+                 (end of data per file header: {end_of_data_offset}, file size: {})",
+                bytes.len()
+            )));
+            break;
+        }
+        let record_length = read_i32(bytes, pos);
+        let state_raw = read_i32(bytes, pos + 4);
+        let timestamp1_raw = read_f64(bytes, pos + 8);
+        let timestamp2_raw = read_f64(bytes, pos + 16);
+        let crc32_stored = read_u32(bytes, pos + 24);
+        let unknown_value = read_i32(bytes, pos + 28);
+
+        if record_length < 0 {
+            records.push(Err(anyhow!(
+                "record at offset {pos} has a negative length ({record_length})"
+            )));
+            break;
+        }
+        let record_offset = header_end;
+        let Some(data_end) = record_offset
+            .checked_add(record_length as usize)
+            .filter(|&end| end <= bytes.len())
+        else {
+            records.push(Err(anyhow!(
+                "record at offset {pos} ({record_length} bytes) would read past the end of \
+                 the file"
+            )));
+            break;
+        };
+
+        let payload = bytes[record_offset..data_end].to_vec();
+        pos = data_end;
+        let remainder = pos % V1_ALIGNMENT;
+        if remainder != 0 {
+            pos += V1_ALIGNMENT - remainder;
+        }
+
+        let Some(state) = EntryState::from_raw(state_raw) else {
+            records.push(Err(anyhow!(
+                "record at offset {record_offset} has an unrecognized state ({state_raw})"
+            )));
+            continue;
+        };
+        match decode_cocoa_time(timestamp1_raw) {
+            Ok(timestamp_utc) => records.push(Ok(SegbRecord {
+                state,
+                timestamp_utc,
+                crc_valid: crc32_stored == crc32fast::hash(&payload),
+                payload,
+                record_offset: record_offset as u64,
+                v1: Some(SegbV1Extra {
+                    timestamp2_raw,
+                    unknown_value,
+                }),
+            })),
+            Err(err) => records.push(Err(
+                err.context(format!("timestamp1 of record at offset {record_offset}"))
+            )),
         }
     }
 
@@ -388,6 +521,237 @@ mod tests {
     fn detect_version_rejects_neither_signature() {
         let bytes = vec![0u8; 64];
         assert!(detect_version(&bytes).is_err());
+    }
+
+    /// One synthetic v1 record: payload, raw state, raw `timestamp1`, and
+    /// whether to store the payload's real CRC32.
+    struct V1Entry<'a> {
+        payload: &'a [u8],
+        state_raw: i32,
+        timestamp1: f64,
+        valid_crc: bool,
+    }
+
+    fn v1(payload: &[u8], state_raw: i32) -> V1Entry<'_> {
+        V1Entry {
+            payload,
+            state_raw,
+            timestamp1: 700_000_000.0,
+            valid_crc: true,
+        }
+    }
+
+    /// Builds a SEGB v1 buffer the way `ccl_segb1.py` reads it: 56-byte
+    /// header (end-of-data offset first, magic at 52), then per record a
+    /// 32-byte header, the payload and padding to the next 8-byte boundary.
+    /// `end_of_data_offset` is the position after the last payload.
+    fn build_segb1(entries: &[V1Entry]) -> Vec<u8> {
+        let mut out = vec![0u8; V1_HEADER_LENGTH];
+        out[52..56].copy_from_slice(MAGIC);
+        let mut end_of_data = V1_HEADER_LENGTH;
+        for entry in entries {
+            let remainder = out.len() % V1_ALIGNMENT;
+            if remainder != 0 {
+                out.extend(std::iter::repeat_n(0u8, V1_ALIGNMENT - remainder));
+            }
+            let crc = if entry.valid_crc {
+                crc32fast::hash(entry.payload)
+            } else {
+                crc32fast::hash(entry.payload) ^ 1
+            };
+            out.extend_from_slice(&(entry.payload.len() as i32).to_le_bytes());
+            out.extend_from_slice(&entry.state_raw.to_le_bytes());
+            out.extend_from_slice(&entry.timestamp1.to_le_bytes());
+            out.extend_from_slice(&(entry.timestamp1 + 1.0).to_le_bytes());
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&0i32.to_le_bytes());
+            out.extend_from_slice(entry.payload);
+            end_of_data = out.len();
+        }
+        out[0..4].copy_from_slice(&(end_of_data as u32).to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn v1_records_are_read_in_order_with_8_byte_alignment() {
+        // "first" is 5 bytes, so 3 padding bytes follow it before the next
+        // record header (56 + 32 + 5 = 93 -> 96).
+        let bytes = build_segb1(&[v1(b"first", 1), v1(b"second-entry", 3)]);
+
+        let records = read_v1_records(&bytes).unwrap();
+
+        assert_eq!(records.len(), 2);
+        let first = records[0].as_ref().unwrap();
+        let second = records[1].as_ref().unwrap();
+        assert_eq!(first.payload, b"first");
+        assert_eq!(first.state, EntryState::Written);
+        assert_eq!(first.record_offset, 88);
+        assert!(first.crc_valid);
+        assert_eq!(second.payload, b"second-entry");
+        assert_eq!(second.state, EntryState::Deleted);
+        assert_eq!(second.record_offset, 96 + 32);
+        let extra = first.v1.unwrap();
+        assert_eq!(extra.timestamp2_raw, 700_000_001.0);
+        assert_eq!(extra.unknown_value, 0);
+        assert_eq!(
+            first.timestamp_utc,
+            decode_cocoa_time(700_000_000.0).unwrap()
+        );
+    }
+
+    /// A real v1 file (see `tests/fixtures/biome/README.md`). Expected
+    /// values are `ccl_segb1.py`'s output for the same file.
+    #[test]
+    fn decodes_the_real_device_segb1_fixture() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/biome/Device.Wireless.Bluetooth.segb1"
+        ))
+        .unwrap();
+        assert_eq!(detect_version(&bytes).unwrap(), SegbVersion::V1);
+
+        let records: Vec<SegbRecord> = read_v1_records(&bytes)
+            .unwrap()
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+
+        let expected = [
+            (88, EntryState::Deleted, "2024-01-21T18:37:21.769812", false),
+            (
+                184,
+                EntryState::Deleted,
+                "2024-01-21T20:09:53.319835",
+                false,
+            ),
+            (280, EntryState::Written, "2024-07-28T17:26:30.785707", true),
+            (376, EntryState::Written, "2024-07-28T17:48:12.543322", true),
+        ];
+        assert_eq!(records.len(), expected.len());
+        for (record, (offset, state, time, crc_valid)) in records.iter().zip(expected) {
+            assert_eq!(record.record_offset, offset);
+            assert_eq!(record.state, state);
+            // The reference rounds to whole microseconds, Peach keeps
+            // nanoseconds, so compare within half a microsecond.
+            let expected_time =
+                chrono::NaiveDateTime::parse_from_str(time, "%Y-%m-%dT%H:%M:%S%.6f")
+                    .unwrap()
+                    .and_utc();
+            let diff = (record.timestamp_utc - expected_time)
+                .num_nanoseconds()
+                .unwrap();
+            assert!(diff.abs() <= 500, "{time}: off by {diff} ns");
+            assert_eq!(record.crc_valid, crc_valid);
+            assert_eq!(record.payload.len(), 57);
+            // In this file both timestamps of every record are equal.
+            assert_eq!(
+                decode_cocoa_time(record.v1.unwrap().timestamp2_raw).unwrap(),
+                record.timestamp_utc
+            );
+        }
+        // Deleted records are zeroed; the written ones carry the device.
+        assert!(records[0].payload.iter().all(|&b| b == 0));
+        let written = String::from_utf8_lossy(&records[2].payload);
+        assert!(written.contains("08:65:18:75:5E:75"));
+        assert!(written.contains("AirPods"));
+    }
+
+    #[test]
+    fn v1_header_without_records_yields_nothing() {
+        let bytes = build_segb1(&[]);
+        assert!(read_v1_records(&bytes).unwrap().is_empty());
+    }
+
+    #[test]
+    fn v1_unknown_state_records_are_kept_because_they_carry_data() {
+        let bytes = build_segb1(&[v1(b"data", 4)]);
+
+        let records = read_v1_records(&bytes).unwrap();
+
+        assert_eq!(records.len(), 1);
+        let record = records[0].as_ref().unwrap();
+        assert_eq!(record.state, EntryState::Unknown);
+        assert_eq!(record.payload, b"data");
+    }
+
+    #[test]
+    fn v1_crc_mismatch_is_reported_not_rejected() {
+        let mut entry = v1(b"payload", 1);
+        entry.valid_crc = false;
+        let bytes = build_segb1(&[entry]);
+
+        let records = read_v1_records(&bytes).unwrap();
+
+        assert!(!records[0].as_ref().unwrap().crc_valid);
+    }
+
+    #[test]
+    fn v1_unrecognized_state_is_an_error_and_the_walk_continues() {
+        let bytes = build_segb1(&[v1(b"bad", 9), v1(b"good", 1)]);
+
+        let records = read_v1_records(&bytes).unwrap();
+
+        assert_eq!(records.len(), 2);
+        let err = records[0].as_ref().unwrap_err();
+        assert!(format!("{err:#}").contains("unrecognized state (9)"));
+        assert_eq!(records[1].as_ref().unwrap().payload, b"good");
+    }
+
+    #[test]
+    fn v1_undecodable_timestamp1_is_an_error_and_the_walk_continues() {
+        let mut bad = v1(b"bad", 1);
+        bad.timestamp1 = f64::NAN;
+        let bytes = build_segb1(&[bad, v1(b"good", 1)]);
+
+        let records = read_v1_records(&bytes).unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert!(records[0].is_err());
+        assert_eq!(records[1].as_ref().unwrap().payload, b"good");
+    }
+
+    #[test]
+    fn v1_payload_past_end_of_file_is_an_error_and_stops() {
+        let mut bytes = build_segb1(&[v1(b"first", 1), v1(b"second-entry", 1)]);
+        bytes.truncate(bytes.len() - 4);
+
+        let records = read_v1_records(&bytes).unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert!(records[0].is_ok());
+        let err = records[1].as_ref().unwrap_err();
+        assert!(format!("{err:#}").contains("past the end of the file"));
+    }
+
+    #[test]
+    fn v1_record_header_past_end_of_file_is_an_error() {
+        let mut bytes = build_segb1(&[]);
+        // Claims data up to offset 200, but the file ends right after the
+        // file header.
+        bytes[0..4].copy_from_slice(&200u32.to_le_bytes());
+
+        let records = read_v1_records(&bytes).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert!(records[0].is_err());
+    }
+
+    #[test]
+    fn v1_negative_record_length_is_an_error_and_stops() {
+        let mut bytes = build_segb1(&[v1(b"first", 1), v1(b"second", 1)]);
+        bytes[56..60].copy_from_slice(&(-5i32).to_le_bytes());
+
+        let records = read_v1_records(&bytes).unwrap();
+
+        assert_eq!(records.len(), 1);
+        let err = records[0].as_ref().unwrap_err();
+        assert!(format!("{err:#}").contains("negative length (-5)"));
+    }
+
+    #[test]
+    fn v1_short_file_or_wrong_magic_fails_the_whole_file() {
+        assert!(read_v1_records(&[0u8; 40]).is_err());
+        assert!(read_v1_records(&[0u8; 64]).is_err());
     }
 
     #[test]

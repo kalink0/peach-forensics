@@ -41,11 +41,15 @@
 #   https://thesisfriday.com/thesis-friday-28-what-a-busy-phone-forgets/
 #   The volume notification carries the state as written (unlocked, locked
 #   or "cx expired"), so it also tags locks.
-# - "is now UN-locked": the kernel keybag endpoint as iLEAPP collects it
-#   (commit 055b35a, 2026-10-03; "apfs Data is now UN-locked" on iOS 12.4,
-#   "apfs is now UN-locked" later), from Tim Korver's "Apple Unified Log
-#   search term and process cheatsheet", which is not published on
-#   thesisfriday.com — iLEAPP is the citable source.
+# - "is now UN-locked": the kernel keybag endpoint, from Tim Korver's
+#   "Apple Unified Log search term and process cheatsheet" (v2, published
+#   with Thesis Friday #31 on 2026-10-16, CC BY-NC-ND 4.0):
+#   https://thesisfriday.com/unified-log-search-terms-cheatsheet/
+#   The cheatsheet counts two lines per unlock on iOS and one on macOS; the
+#   #31 post itself says three on macOS, so do not derive a macOS unlock
+#   count from a fixed lines-per-unlock ratio. iLEAPP (commit 055b35a,
+#   2026-10-03) collects it as "apfs Data is now UN-locked" on iOS 12.4 and
+#   "apfs is now UN-locked" later: https://github.com/abrignoni/iLEAPP
 # - "Unlock attempt succeeded": SpringBoard's outcome line after "Processed
 #   authentication request", documented by Lionel Notari, who also shows
 #   success=YES with type 1 logged for a wrong passcode — the outcome is the
@@ -60,6 +64,21 @@
 #   Friday #27 recorded successful Touch ID matches on a machine that was
 #   already unlocked), so it gets its own tag.
 #
+# Version 3 (cheatsheet, see above):
+# - "Unlock succeeded, with password": loginwindow's macOS password-unlock
+#   message (function _authSuccessUsingPassword, LWScreenLockAuthentication;
+#   the cheatsheet says to search the message, not the function name).
+#   Measured on macOS 26.6.2; DLEAPP also documents it on macOS 11.2.1 and
+#   15.4.
+# - Caveat, not a predicate change: "Transition: locked ->" is written by
+#   three to five processes per unlock (SpringBoard, chronod, duetexpertd,
+#   WidgetRenderer_Default, remindd, ControlCenter), sometimes with
+#   different text, and per the cheatsheet it is absent on a biometric
+#   unlock. Its rows are neither an unlock count nor complete; count at the
+#   kernel's "is now UN-locked" instead. Likewise SpringBoard's
+#   "success=YES" (not matched here) also fires on a rejected passcode and
+#   on Face ID.
+#
 # Acquisition caveat (Thesis Friday, "The stop rule"): in one 67-minute
 # acquisition window the author counted 158 kernel keybag unlock lines and
 # 370 keybag transition lines in an hour with no unlock in the reference
@@ -69,7 +88,7 @@
 [rule]
 name = "aul_unlock_sessions"
 description = "Unlock session duration, authentication method and outcome, kernel keybag/volume unlock endpoint"
-version = "2"
+version = "3"
 
 [rule.match]
 sourcetype = "aul"
@@ -91,6 +110,7 @@ message_contains = [
     "password is CORRECT",
     "ODRecordVerifyPassword failed",
     "pam_authenticate failed",
+    "Unlock succeeded, with password",
 ]
 
 [rule.tag]

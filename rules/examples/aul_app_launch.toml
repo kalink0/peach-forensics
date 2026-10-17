@@ -3,11 +3,25 @@
 # Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
 # (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive executed apps".
+#
+# Version 2 adds three search terms from Tim Korver's "Apple Unified Log
+# search term and process cheatsheet" (v2, published with Thesis Friday #31
+# on 2026-10-16, CC BY-NC-ND 4.0), as given there:
+# https://thesisfriday.com/unified-log-search-terms-cheatsheet/
+# - "SBIconLocationDock" / "SBIconLocationRoot" (SpringBoard): where the
+#   icon was — dock or home screen. On the iPad also
+#   SBIconLocationAppLibraryCategoryPod, which the cheatsheet names only in
+#   its note, not as a search term.
+# - "AppSandbox request successful" (macOS, secinitd): one of three
+#   processes writing three moments of the same launch.
+# Per the cheatsheet, "Allowing tap for icon view" appears twice per launch
+# (press down and release); count launches on "Launching application".
+# "Prewarming" is not matched: a prewarmed app is not a launched app.
 
 [rule]
 name = "aul_app_launch"
-description = "App icon taps and application launches"
-version = "1"
+description = "App icon taps and application launches (incl. icon location, macOS sandbox init)"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
@@ -15,6 +29,9 @@ message_contains = [
     "Allowing tap for icon view",
     "Launching application",
     "transition source:",
+    "SBIconLocationDock",
+    "SBIconLocationRoot",
+    "AppSandbox request successful",
 ]
 
 [rule.tag]

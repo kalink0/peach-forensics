@@ -14,15 +14,26 @@
 # images only and none of the four on its iOS 26.5.2 image; whether that is
 # a property of the iOS version or of retention is not established.
 #
-# Source: iLEAPP `logarchive_usb_host` (commit 055b35a, 2026-10-03), from
-# Tim Korver's "Apple Unified Log search term and process cheatsheet",
-# which is not published on thesisfriday.com — iLEAPP is the citable
-# source: https://github.com/abrignoni/iLEAPP
+# Per the cheatsheet, the cable (kernel), the host type, the lockdownd
+# session and powerd's charging state give four different counts for the
+# same cable; the lockdownd session does not always appear while the
+# kernel does see a host. Note at which level a count was taken.
+#
+# Sources: Tim Korver's "Apple Unified Log search term and process
+# cheatsheet" (v2, published with Thesis Friday #31 on 2026-10-16, CC
+# BY-NC-ND 4.0) for "AppleUSBCableType", "usb_host_connected" and
+# "bump_connection_count":
+# https://thesisfriday.com/unified-log-search-terms-cheatsheet/
+# iLEAPP `logarchive_usb_host` (commit 055b35a, 2026-10-03) for "launching
+# clients due to connectType": https://github.com/abrignoni/iLEAPP
+#
+# Version 2 adds the cheatsheet's own search term for UserEventAgent,
+# "connectType: 2" (a computer), as given there.
 
 [rule]
 name = "aul_usb_host"
 description = "USB connection to a computer (cable type, connect type, lockdownd host session) — an acquisition produces these too"
-version = "1"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
@@ -31,6 +42,7 @@ message_contains = [
     "launching clients due to connectType",
     "usb_host_connected",
     "bump_connection_count",
+    "connectType: 2",
 ]
 
 [rule.tag]

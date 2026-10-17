@@ -7,19 +7,29 @@
 # SpringBoard's recognizer lines, which name the gesture, are the companion
 # rule aul_system_gestures_springboard.toml, same tag value.
 #
-# Source: iLEAPP `logarchive_system_gestures` (commit 055b35a, 2026-10-03),
-# from Tim Korver's "Apple Unified Log search term and process cheatsheet",
-# which is not published on thesisfriday.com — iLEAPP is the citable
-# source: https://github.com/abrignoni/iLEAPP
+# Source: Tim Korver's "Apple Unified Log search term and process
+# cheatsheet" (v2, published with Thesis Friday #31 on 2026-10-16, CC
+# BY-NC-ND 4.0), which also names the one-line-is-not-a-swipe pitfall:
+# https://thesisfriday.com/unified-log-search-terms-cheatsheet/
+# Adopted via iLEAPP `logarchive_system_gestures` (commit 055b35a,
+# 2026-10-03): https://github.com/abrignoni/iLEAPP
+#
+# Version 2 adds SpringBoard's "SBGrabberTongue", which the cheatsheet
+# lists in the same "Swipe from the edge" row, as given there. The same
+# reading applies: count the lines in the window before calling it a
+# swipe.
 
 [rule]
 name = "aul_system_gestures"
-description = "Touches taken over by a system edge gesture (backboardd) — one entry is an edge touch, a swipe writes many"
-version = "1"
+description = "Touches taken over by a system edge gesture (backboardd, SpringBoard grabber tongue) — one entry is an edge touch, a swipe writes many"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
-message_contains = "system gesture stealing the touches"
+message_contains = [
+    "system gesture stealing the touches",
+    "SBGrabberTongue",
+]
 
 [rule.tag]
 value = "system_gestures"

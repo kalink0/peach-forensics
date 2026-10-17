@@ -12,11 +12,19 @@
 # post; observed via MobileNotes/MobileMail/MobileSafari, so the process
 # name ties an entry to the app being typed into:
 # https://thesisfriday.com/thesis-friday-17-touch-events-on-the-ios-on-screen-keyboard/
+#
+# Version 2 changes only the description: the category match has always
+# covered "touch up" as well, which Tim Korver's "Apple Unified Log search
+# term and process cheatsheet" (v2, published with Thesis Friday #31 on
+# 2026-10-16, CC BY-NC-ND 4.0) lists next to "touch down" and "touch drag".
+# Per the cheatsheet the process name names the app; the typed text is not
+# in the line:
+# https://thesisfriday.com/unified-log-search-terms-cheatsheet/
 
 [rule]
 name = "aul_keyboard_activity_touch"
-description = "Raw on-screen-keyboard touch down/drag (subsystem UIKitCore / com.apple.UIKit:KeyboardTouch)"
-version = "1"
+description = "Raw on-screen-keyboard touch down/drag/up (subsystem UIKitCore / com.apple.UIKit:KeyboardTouch) — not the typed text"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"

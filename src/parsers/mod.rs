@@ -60,7 +60,7 @@ pub struct StreamingProgress<'a> {
 
 /// One record a parser couldn't make sense of, kept rather than silently
 /// dropped when `skip_bad_records` is enabled (see [`LogParser::parse`]) —
-/// CLAUDE.md's "no silent data manipulation" principle applies just as much
+/// the "no silent data manipulation" principle applies just as much
 /// to what a lenient parse leaves out as to what it keeps.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkippedRecord {

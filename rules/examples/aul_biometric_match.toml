@@ -21,13 +21,17 @@
 #   https://thesisfriday.com/thesis-friday-26-same-unlock-three-different-stories/
 # - "Base unlock behavior received biometric event": Lionel Notari,
 #   https://www.ios-unifiedlogs.com/post/ios-unified-logs-unlock
-# - "matchResultHandler: MATCH": iLEAPP `logarchive_biometric_match`
-#   (commit 055b35a, 2026-10-03), from Tim Korver's "Apple Unified Log search
-#   term and process cheatsheet", which is not published on thesisfriday.com.
-#   Per iLEAPP the cheatsheet reads "MATCH -1" as firing on a wrong passcode
-#   and on a failed Face ID alike (the surrounding lines decide which), and
-#   the kernel line appeared on its iOS 12.4, 17.2.1 and 18.3.2 images but
-#   not on 18.7 or 26.5.2. https://github.com/abrignoni/iLEAPP
+# - "matchResultHandler: MATCH": Tim Korver's "Apple Unified Log search
+#   term and process cheatsheet" (v2, published with Thesis Friday #31 on
+#   2026-10-16, CC BY-NC-ND 4.0), measured on iOS 26.6.1:
+#   https://thesisfriday.com/unified-log-search-terms-cheatsheet/
+#   The cheatsheet lists "matchResultHandler: MATCH -1", "matchResult:
+#   timestamp: NO-MATCH" and "has received no-match" as firing on a wrong
+#   passcode and on a failed Face ID alike — the cluster around the line
+#   decides which. Adopted via iLEAPP `logarchive_biometric_match` (commit
+#   055b35a, 2026-10-03), whose kernel line appeared on its iOS 12.4, 17.2.1
+#   and 18.3.2 images but not on 18.7 or 26.5.2:
+#   https://github.com/abrignoni/iLEAPP
 
 [rule]
 name = "aul_biometric_match"

@@ -10,10 +10,16 @@
 # counts tie "SOS button gesture" lines to ordinary presses; the line alone
 # is not an Emergency SOS call (that is aul_emergency_sos.toml).
 #
-# Source: iLEAPP `logarchive_hardware_buttons` (commit 055b35a, 2026-10-03),
-# from Tim Korver's "Apple Unified Log search term and process cheatsheet",
-# which is not published on thesisfriday.com — iLEAPP is the citable
-# source: https://github.com/abrignoni/iLEAPP. iLEAPP anchors the three
+# Per the cheatsheet, "SBSOSClawGestureObserver" appears on every button
+# press and "SS disabled: YES, reason: SOSTriggered" also when the
+# power-off menu is opened; neither is matched by any rule here.
+#
+# Source: Tim Korver's "Apple Unified Log search term and process
+# cheatsheet" (v2, published with Thesis Friday #31 on 2026-10-16, CC
+# BY-NC-ND 4.0; press type codes the same on iOS 18.2.1 and 26):
+# https://thesisfriday.com/unified-log-search-terms-cheatsheet/
+# Adopted via iLEAPP `logarchive_hardware_buttons` (commit 055b35a,
+# 2026-10-03): https://github.com/abrignoni/iLEAPP. iLEAPP anchors the three
 # texts at the start of the message; Peach matches them as substrings
 # within the subsystem.
 

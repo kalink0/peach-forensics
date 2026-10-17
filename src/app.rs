@@ -2906,8 +2906,8 @@ const LOAD_BATCH_SIZE: usize = 10_000;
 /// AUL/intrusion_log, each individual SEGB file becomes its own
 /// independent source here — there's no cross-file resolution need
 /// forcing the whole folder to be one atomic unit the way AUL's
-/// `dsc`/`uuidtext` lookups do, so one bad/unreadable file (e.g. a
-/// currently-unsupported SEGB v1 file) only takes down that one source,
+/// `dsc`/`uuidtext` lookups do, so one bad/unreadable file only takes down
+/// that one source,
 /// not the whole load, and multiple files load in parallel like EVTX/
 /// journald. Text has no fixed extension (fully TOML-configurable), so
 /// every regular file is attempted — no mandatory auto-detection, the
@@ -3835,7 +3835,7 @@ fn record_load_activity_entry(
 
 /// Sorted by rule name for determinism — a `HashMap`'s iteration order
 /// isn't stable, and the forensic principle of "same inputs, same result"
-/// (see CLAUDE.md) applies just as much to what lands in the Activity Log
+/// applies just as much to what lands in the Activity Log
 /// as to anything else recorded about a load. `rule_versions` is looked up
 /// by [`rule_version_lookup`] from whatever rule set actually ran — a rule
 /// absent from it (shouldn't happen, since `tags_by_rule` only ever

@@ -15,11 +15,28 @@
 # predicate here; correlate the "usb_power_connections" tag with
 # screen-state entries at the same timestamp instead.
 # https://thesisfriday.com/thesis-friday-9-aul-connecting-a-usb-cable/
+#
+# Version 2 adds the kernel's "AppleUSBCableDetect" (1 connected, 0
+# disconnected), the cable level in Tim Korver's "Apple Unified Log search
+# term and process cheatsheet" (v2, published with Thesis Friday #31 on
+# 2026-10-16, CC BY-NC-ND 4.0):
+# https://thesisfriday.com/unified-log-search-terms-cheatsheet/
+# Matched without the digit so both attach and detach are tagged. Per the
+# cheatsheet, the cable, the host type (aul_usb_host.toml), the lockdownd
+# session and powerd's charging state give four different counts for the
+# same cable — note the level a count was taken at. Not checked against
+# real AUL data.
+#
+# Also from the cheatsheet's USB block (its "Confirmation" row), as given
+# there: powerd's "handleChargingStateUpdate" and
+# powerd:batterychargingstate's "State:Charging" / "State:Disconnected".
+# They record charging status changes, not connections, and give a
+# different count.
 
 [rule]
 name = "aul_usb_power_connections"
-description = "USB/power cable attach and detach"
-version = "1"
+description = "USB/power cable attach and detach, charging state changes"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
@@ -27,6 +44,10 @@ message_contains = [
     "plugin state changed to",
     "IOAccessoryUSBConnectShim",
     "pluggedIn 1",
+    "AppleUSBCableDetect",
+    "handleChargingStateUpdate",
+    "State:Charging",
+    "State:Disconnected",
 ]
 
 [rule.tag]

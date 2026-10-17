@@ -22,18 +22,28 @@
 # occur, so a match here is a digitizer state change, not necessarily a
 # finger on the glass.
 #
-# Version 3 adds backboardd's "Touch entered", which iLEAPP added on
-# 2026-10-03 (commit 055b35a) from Tim Korver's "Apple Unified Log search
-# term and process cheatsheet". The cheatsheet is not published on
-# thesisfriday.com, so iLEAPP is the citable source. Per iLEAPP, the
-# rectangle in the line is the screen size, not the finger position, and
-# the line appeared only on its iOS 26.5.2 image of five tested images
-# (iOS 12.4 to 26.5.2).
+# Version 3 adds backboardd's "Touch entered", from Tim Korver's "Apple
+# Unified Log search term and process cheatsheet" (v2, published with
+# Thesis Friday #31 on 2026-10-16, CC BY-NC-ND 4.0):
+# https://thesisfriday.com/unified-log-search-terms-cheatsheet/
+# The rectangle in the line is the screen size, not the position of the
+# finger: treat the entry as a touch, not as a location. Adopted via iLEAPP
+# (commit 055b35a, 2026-10-03), where the line appeared only on its iOS
+# 26.5.2 image of five tested images (iOS 12.4 to 26.5.2):
+# https://github.com/abrignoni/iLEAPP
+#
+# Version 4 adds "send tapToWake" and "tapToWakeDidRecognize" (SpringBoard
+# / Backlight), the cheatsheet's other two tap-to-wake lines next to
+# backboardd's "received tapToWake". The bare word "tapToWake" is
+# deliberately not matched: it also appears in ProximitySensor lines as a
+# mode label, which is not a touch. A touch line carries no position,
+# gesture type or repetition; a double tap is two touches with the same
+# contact index.
 
 [rule]
 name = "aul_touchscreen_events"
 description = "Touchscreen digitizer activity — per-finger contact presence changes (touching, within range, none), touch entered, touch statistics, tap-to-wake"
-version = "3"
+version = "4"
 
 [rule.match]
 sourcetype = "aul"
@@ -50,6 +60,8 @@ message_contains = [
     "contact 9 presence:",
     "touchstats",
     "received tapToWake",
+    "send tapToWake",
+    "tapToWakeDidRecognize",
     "AttentionAwareness.Touch",
     "Touch entered",
 ]

@@ -8,11 +8,17 @@
 # Predicates in iLEAPP: The Reference" (Alexis Brignoni):
 # leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive app focus and lifecycle".
+#
+# Version 2 adds "Icon touch began", which Tim Korver's "Apple Unified Log
+# search term and process cheatsheet" (v2, published with Thesis Friday #31
+# on 2026-10-16, CC BY-NC-ND 4.0) lists with "Icon tapped" (SpringBoard:Icon):
+# the app appears as <private>, so these lines are usable for the moment,
+# not for which app: https://thesisfriday.com/unified-log-search-terms-cheatsheet/
 
 [rule]
 name = "aul_app_focus_lifecycle"
 description = "Foreground app focus changes, cold starts vs. resumes, force-kills"
-version = "1"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
@@ -23,6 +29,7 @@ message_contains = [
     "killed from app switcher",
     "elementWithFocusBundleID changed",
     "Icon tapped",
+    "Icon touch began",
     "Initiating launch from icon view",
     "Scene lifecycle state did change",
 ]

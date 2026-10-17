@@ -81,6 +81,15 @@ fn about_tab(ui: &mut egui::Ui) {
          crush, then continues completely independently (no IPC).",
     );
     ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(
+            "Thank you to someone special \u{2014} for every word of encouragement, \
+             for believing in me, for motivating me, and for the inspiration.",
+        )
+        .small()
+        .italics(),
+    );
+    ui.add_space(6.0);
     ui.label("Licensed under the Apache License 2.0");
     ui.hyperlink(REPO_URL);
     ui.hyperlink_to("Report a bug or request a feature", ISSUES_URL);
@@ -162,9 +171,10 @@ fn acknowledgements_tab(ui: &mut egui::Ui) {
     ui.add_space(4.0);
     ui.label(
         "A handful of newer AUL predicates (dialed-number recovery, device \
-         orientation, Apple Watch Crown/button, CarPlay handshake) are from \
-         Tim Korver's Thesis Friday series, rather than re-derived from \
-         scratch \u{2014} thesisfriday.com.",
+         orientation, Apple Watch Crown/button, CarPlay handshake, unlock \
+         endpoint, hardware buttons, USB host) are from Tim Korver's Thesis \
+         Friday series and his search term and process cheatsheet, rather \
+         than re-derived from scratch \u{2014} thesisfriday.com.",
     );
     ui.add_space(4.0);
     ui.label(
@@ -188,7 +198,7 @@ fn acknowledgements_tab(ui: &mut egui::Ui) {
         "The built-in Apple Biome (SEGB) tagging rule pack \
          (rules/examples/biome_*.toml) sources stream names and field \
          semantics from iLEAPP's biome*.py artifact modules (Apache-2.0). \
-         The SEGB v2 envelope format is a Rust port of CCL Forensics' \
+         The SEGB v1/v2 envelope format is a Rust port of CCL Forensics' \
          ccl_segb project (MIT) \u{2014} github.com/cclgroupltd/ccl-segb.",
     );
 

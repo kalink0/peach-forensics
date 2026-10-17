@@ -12,23 +12,23 @@
 //! for which files even qualify). There's no cross-file resolution need
 //! for Biome the way AUL's `dsc`/`uuidtext` lookups have, so nothing is
 //! lost by keeping every file independent — and a lot is gained: one bad
-//! or unsupported file (a currently-unimplemented SEGB v1 file, say)
-//! only takes down that one source instead of the entire folder, the
+//! or unsupported file only takes down that one source instead of the
+//! entire folder, the
 //! `Source` column shows each record's *actual* originating file
 //! directly (`sources.path`) rather than the whole folder, and a
 //! multi-file load can run in parallel like EVTX/journald.
 //!
-//! Only SEGB v2 is decoded — see `segb`'s module doc comment and
-//! `docs/design/biome-rule-pack-research.md` for why v1 is deliberately
-//! left unimplemented rather than guessed at. A v1 file is detected and
-//! surfaces a clear, visible error instead of being silently misread or
-//! skipped.
+//! Both SEGB v1 and v2 files are decoded (see `segb`); one stream folder
+//! can contain both.
 //!
 //! `fields` shape per record: a flat `"stream"` key (the stream name
 //! derived purely from the file's path — see [`stream_name_from_path`]),
-//! `"entry_state"` (`"written"`/`"deleted"`), `"crc_valid"` (bool),
-//! `"record_offset"` (byte offset within the source file, for forensic
-//! traceability), `"payload_hex"` (the entire undecoded payload, always
+//! `"entry_state"` (`"written"`/`"deleted"`, `"unknown"` for v1 only),
+//! `"crc_valid"` (bool), `"record_offset"` (byte offset within the source
+//! file, for forensic traceability), `"segb_version"` (`"v1"`/`"v2"`),
+//! for v1 additionally `"timestamp2_raw"` (Cocoa seconds as read),
+//! `"timestamp2"` (RFC 3339, only when decodable) and `"v1_unknown_value"`,
+//! `"payload_hex"` (the entire undecoded payload, always
 //! present regardless of decode success), and `"payload"` (the
 //! [`protobuf::decode_message`] output tree, field-number-keyed). Unlike
 //! iLEAPP's own curated extraction (which only attempts a protobuf decode
@@ -43,7 +43,7 @@ pub mod segb;
 
 use std::path::Path;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use serde_json::{Map, Value, json};
 
 use crate::model::log_entry::ParsedRecord;
@@ -66,30 +66,23 @@ impl LogParser for BiomeParser {
         let bytes = std::fs::read(path)
             .with_context(|| format!("failed to read {} as a binary file", path.display()))?;
 
-        match segb::detect_version(&bytes)? {
-            segb::SegbVersion::V1 => bail!(
-                "SEGB v1 file — not yet supported by Peach (only v2 is currently \
-                 implemented; see docs/design/biome-rule-pack-research.md)"
-            ),
-            segb::SegbVersion::V2 => {
-                let segb_records = segb::read_v2_records(&bytes)?;
-                let mut records = Vec::new();
-                let mut skipped = Vec::new();
-                for (index, result) in segb_records.into_iter().enumerate() {
-                    match result {
-                        Ok(record) => {
-                            records.push(segb_record_to_parsed_record(record, stream.as_deref()))
-                        }
-                        Err(err) if skip_bad_records => skipped.push(SkippedRecord {
-                            location: format!("record {index}"),
-                            reason: format!("{err:#}"),
-                        }),
-                        Err(err) => return Err(err.context(format!("record {index}"))),
-                    }
-                }
-                Ok((records, skipped))
+        let segb_records = match segb::detect_version(&bytes)? {
+            segb::SegbVersion::V1 => segb::read_v1_records(&bytes)?,
+            segb::SegbVersion::V2 => segb::read_v2_records(&bytes)?,
+        };
+        let mut records = Vec::new();
+        let mut skipped = Vec::new();
+        for (index, result) in segb_records.into_iter().enumerate() {
+            match result {
+                Ok(record) => records.push(segb_record_to_parsed_record(record, stream.as_deref())),
+                Err(err) if skip_bad_records => skipped.push(SkippedRecord {
+                    location: format!("record {index}"),
+                    reason: format!("{err:#}"),
+                }),
+                Err(err) => return Err(err.context(format!("record {index}"))),
             }
         }
+        Ok((records, skipped))
     }
 }
 
@@ -169,6 +162,20 @@ fn segb_record_to_parsed_record(record: segb::SegbRecord, stream: Option<&str>) 
     );
     fields.insert("crc_valid".to_string(), Value::Bool(record.crc_valid));
     fields.insert("record_offset".to_string(), json!(record.record_offset));
+    fields.insert(
+        "segb_version".to_string(),
+        Value::String(if record.v1.is_some() { "v1" } else { "v2" }.to_string()),
+    );
+    if let Some(v1) = record.v1 {
+        fields.insert("timestamp2_raw".to_string(), json!(v1.timestamp2_raw));
+        if let Ok(timestamp2) = segb::decode_cocoa_time(v1.timestamp2_raw) {
+            fields.insert(
+                "timestamp2".to_string(),
+                Value::String(timestamp2.to_rfc3339()),
+            );
+        }
+        fields.insert("v1_unknown_value".to_string(), json!(v1.unknown_value));
+    }
     fields.insert(
         "payload_hex".to_string(),
         Value::String(hex_encode(&record.payload)),
@@ -537,18 +544,45 @@ mod tests {
     }
 
     #[test]
-    fn a_segb_v1_file_produces_a_clear_not_yet_supported_error() {
+    fn a_segb_v1_file_is_parsed_with_its_v1_header_fields() {
         let dir = write_temp_dir();
         let local_dir = dir.join("restricted/Some.Stream/local");
         std::fs::create_dir_all(&local_dir).unwrap();
         let file = local_dir.join("0.segb");
-        let mut v1_header = vec![0u8; 56];
-        v1_header[52..56].copy_from_slice(b"SEGB");
-        std::fs::write(&file, v1_header).unwrap();
+        // One Written record, payload = field 2, string "test".
+        let payload = [0x12, 0x04, b't', b'e', b's', b't'];
+        let timestamp1 = 700_000_000.0_f64;
+        let timestamp2 = 700_000_123.5_f64;
+        let mut bytes = vec![0u8; 56];
+        bytes[52..56].copy_from_slice(b"SEGB");
+        bytes.extend_from_slice(&(payload.len() as i32).to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.extend_from_slice(&timestamp1.to_le_bytes());
+        bytes.extend_from_slice(&timestamp2.to_le_bytes());
+        bytes.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+        bytes.extend_from_slice(&7i32.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        let end_of_data = bytes.len() as u32;
+        bytes[0..4].copy_from_slice(&end_of_data.to_le_bytes());
+        std::fs::write(&file, bytes).unwrap();
 
-        let result = BiomeParser.parse(&file, &dummy_config(), false);
-        let err = result.unwrap_err();
-        assert!(format!("{err:#}").contains("v1"));
+        let (records, skipped) = BiomeParser.parse(&file, &dummy_config(), false).unwrap();
+
+        assert!(skipped.is_empty());
+        assert_eq!(records.len(), 1);
+        let fields = &records[0].fields;
+        assert_eq!(fields["stream"], "Some.Stream");
+        assert_eq!(fields["segb_version"], "v1");
+        assert_eq!(fields["entry_state"], "written");
+        assert_eq!(fields["crc_valid"], true);
+        assert_eq!(fields["record_offset"], 88);
+        assert_eq!(fields["timestamp2_raw"], timestamp2);
+        assert!(fields["timestamp2"].is_string());
+        assert_eq!(fields["v1_unknown_value"], 7);
+        assert_eq!(
+            records[0].timestamp_utc,
+            segb::decode_cocoa_time(timestamp1).unwrap()
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

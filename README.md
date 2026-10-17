@@ -141,7 +141,10 @@ version format if you just want the rules for something other than Peach:
   releases, with a handful of
   newer ones (dialed-number recovery, device orientation, Apple Watch
   Crown/button, CarPlay handshake, unlock endpoint and retention) from Tim
-  Korver's [Thesis Friday](https://thesisfriday.com/) series and Lionel
+  Korver's [Thesis Friday](https://thesisfriday.com/) series and [search
+  term and process
+  cheatsheet](https://thesisfriday.com/unified-log-search-terms-cheatsheet/),
+  and Lionel
   Notari's [ios-unifiedlogs.com](https://www.ios-unifiedlogs.com/).
 - **EVTX** — cross-checked against [Microsoft's official Security Auditing
   event

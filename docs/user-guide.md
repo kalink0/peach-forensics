@@ -35,10 +35,10 @@ own Cancel/Close/OK button, or the small **✕** in its title bar.
      `lock`/`metadata` housekeeping files every stream carries and
      anything under a `tombstone` folder). Unlike AUL/Android Intrusion
      Log, the folder is **not** one atomic source: each individual SEGB
-     file becomes its own independent source, so a bad/unsupported file
-     (a SEGB v1 file, currently unimplemented — see
-     [supported-sources.md](supported-sources.md)) only affects that one
-     file, and loading parallelizes across files like EVTX/journald.
+     file becomes its own independent source, so a bad or unreadable file
+     only affects that one file, and loading parallelizes across files
+     like EVTX/journald. SEGB v1 and v2 files are both read (see
+     [supported-sources.md](supported-sources.md)).
    - EVTX/journald/Text's **"Choose ... file(s)..."** button supports
      selecting several files at once (e.g. `Application.evtx` +
      `Security.evtx` + `System.evtx` together) — the first one becomes the
@@ -236,7 +236,7 @@ Values compare by type, so the TOML has to use the type the record carries:
 with `event_id`/`provider`, since field names repeat across events. An empty
 table never matches, and it never matches a non-EVTX entry.
 
-`rules/examples/aul_*.toml` is a pattern-of-life rule pack for AUL (41 rule
+`rules/examples/aul_*.toml` is a pattern-of-life rule pack for AUL (51 rule
 files covering human presence/handling, communication and input, application
 activity, connectivity, device state and power, media/audio/camera, motion
 and vehicle, and emergency SOS) — most predicates are sourced from "Apple
@@ -244,8 +244,10 @@ Unified Log Predicates in iLEAPP: The Reference" (Alexis Brignoni),
 leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference, with a
 handful of newer, higher-precision ones (dialed-number recovery via
 CommCenter, device orientation, Apple Watch Crown/button, CarPlay
-handshake) from Tim Korver's [Thesis Friday](https://thesisfriday.com/)
-series instead — see each rule file's own header comment for its specific
+handshake, unlock endpoint, hardware buttons, USB host) from Tim Korver's
+[Thesis Friday](https://thesisfriday.com/) series and his [search term and
+process cheatsheet](https://thesisfriday.com/unified-log-search-terms-cheatsheet/)
+instead — see each rule file's own header comment for its specific
 citation either way, rather than re-deriving predicates from scratch.
 SMS/message *content* is still out of scope — that lives in a separate
 SQLite database Peach doesn't parse — but call tracking itself

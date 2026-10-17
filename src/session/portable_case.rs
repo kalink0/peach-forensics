@@ -22,8 +22,8 @@
 //! than erroring.
 //!
 //! Every filter and every unreadable-but-referenced parser config is
-//! recorded in [`PortableCaseManifest`] rather than silently dropped (see
-//! CLAUDE.md §0.1: no silent data manipulation), and a corrupted or
+//! recorded in [`PortableCaseManifest`] rather than silently dropped (no
+//! silent data manipulation), and a corrupted or
 //! tampered bundle fails loudly on import (format-version and SHA-256
 //! checks) rather than proceeding best-effort.
 

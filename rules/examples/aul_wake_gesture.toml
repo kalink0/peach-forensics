@@ -17,10 +17,14 @@
 #
 # Sources: verbatim line in Thesis Friday #25 (Tim Korver):
 # https://thesisfriday.com/thesis-friday-25-proximity-is-not-causality/
-# Value list, process list and the "picked up" reading: iLEAPP
-# `logarchive_orientation` (commit 055b35a, 2026-10-03), which quotes Tim
-# Korver's "Apple Unified Log search term and process cheatsheet" (not
-# published on thesisfriday.com): https://github.com/abrignoni/iLEAPP
+# Process list and the "picked up" reading: Tim Korver's "Apple Unified Log
+# search term and process cheatsheet" (v2, published with Thesis Friday #31
+# on 2026-10-16, CC BY-NC-ND 4.0), which says to pick one process or to
+# count at the kernel's "[TTW] Orientation changed"
+# (aul_device_orientation.toml) instead:
+# https://thesisfriday.com/unified-log-search-terms-cheatsheet/
+# Value list: iLEAPP `logarchive_orientation` (commit 055b35a, 2026-10-03):
+# https://github.com/abrignoni/iLEAPP
 
 [rule]
 name = "aul_wake_gesture"

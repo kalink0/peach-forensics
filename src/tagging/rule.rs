@@ -501,6 +501,10 @@ mod tests {
         assert!(any("contact 0 presence: touching"));
         assert!(any("contact 6 presence: withinRange"));
         assert!(any("received tapToWake"));
+        assert!(any("send tapToWake"));
+        assert!(any("tapToWakeDidRecognize"));
+        // The bare word is also a ProximitySensor mode label, not a touch.
+        assert!(!any("ProximitySensor mode: tapToWake"));
         assert!(!any("#I Local emergency numbers presence: 1"));
         assert!(!any("#I SIM card emergency numbers presence: 0"));
     }
@@ -552,7 +556,51 @@ mod tests {
             "ODRecordVerifyPassword failed with result ODErrorCredentialsInvalid"
         ));
         assert!(any("pam_authenticate failed: 9"));
+        assert!(any("Unlock succeeded, with password"));
         assert!(!any("Attempt #: 2"));
+    }
+
+    /// Search terms added from the published cheatsheet. No full verbatim
+    /// line is published for them, so only the term itself is checked.
+    #[test]
+    fn shipped_rules_match_cheatsheet_search_terms() {
+        let sensor = shipped_rule("aul_biometric_sensor_events.toml");
+        assert!(aul(&sensor, "", "isFaceDetected=1"));
+        assert!(!aul(&sensor, "", "isFaceDetected=0"));
+
+        let usb = shipped_rule("aul_usb_power_connections.toml");
+        assert!(aul(&usb, "", "AppleUSBCableDetect 1"));
+        assert!(aul(&usb, "", "AppleUSBCableDetect 0"));
+        assert!(aul(&usb, "", "handleChargingStateUpdate"));
+        assert!(aul(&usb, "", "State:Charging"));
+        assert!(aul(&usb, "", "State:Disconnected"));
+
+        let host = shipped_rule("aul_usb_host.toml");
+        assert!(aul(&host, "", "connectType: 2"));
+
+        let launch = shipped_rule("aul_app_launch.toml");
+        assert!(aul(&launch, "", "SBIconLocationDock"));
+        assert!(aul(&launch, "", "SBIconLocationRoot"));
+        assert!(aul(&launch, "", "AppSandbox request successful"));
+        assert!(!aul(&launch, "", "Prewarming"));
+
+        let focus = shipped_rule("aul_app_focus_lifecycle.toml");
+        assert!(aul(&focus, "", "Icon touch began"));
+
+        let keyboard = shipped_rule("aul_keyboard_activity_touch.toml");
+        assert!(aul(&keyboard, "KeyboardTouch", "touch up"));
+        assert!(!aul(&keyboard, "Keyboard", "touch up"));
+
+        let passcode = shipped_rule("aul_passcode_field.toml");
+        assert!(aul(
+            &passcode,
+            "KeyboardSceneDelegate",
+            "Suppress Scanning State"
+        ));
+
+        let gestures = shipped_rule("aul_system_gestures.toml");
+        assert!(aul(&gestures, "", "SBGrabberTongue"));
+        assert!(aul(&gestures, "", "system gesture stealing the touches"));
     }
 
     /// Every keybag transition counts, not only those leaving `locked`, but
