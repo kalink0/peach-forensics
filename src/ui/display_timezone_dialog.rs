@@ -52,14 +52,14 @@ impl DisplayTimezoneDialog {
             close = show_dialog_window(
                 ctx,
                 "peach_display_timezone_dialog",
-                "Display Timezone",
+                &crate::fl!("display-timezone-title"),
                 [380.0, 150.0],
                 true,
                 |ui, close| {
-                    ui.label("How the timeline and export show timestamps:");
+                    ui.label(crate::fl!("display-timezone-prompt"));
                     let response = ui.add(
                         egui::TextEdit::singleline(input)
-                            .hint_text("+0100, +02:00, UTC, or Europe/Berlin — blank means UTC"),
+                            .hint_text(crate::fl!("display-timezone-hint")),
                     );
                     match parse_timezone_field(input) {
                         Ok(value) => {
@@ -72,7 +72,7 @@ impl DisplayTimezoneDialog {
                         }
                     }
                     ui.separator();
-                    if ui.button("Close").clicked() {
+                    if ui.button(crate::fl!("common-close")).clicked() {
                         *close = true;
                     }
                 },

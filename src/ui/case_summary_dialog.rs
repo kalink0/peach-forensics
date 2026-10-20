@@ -83,7 +83,7 @@ impl CaseSummaryDialog {
     /// buttons instead of a single "Close" — see [`CaseSummaryDialogOutcome`].
     pub fn open_export_confirm(summary: CaseSummary, display_tz: &TimezoneSpec) -> Self {
         Self::new(
-            "Export portable case".to_string(),
+            crate::fl!("case-summary-export-title"),
             summary,
             None,
             CaseSummaryPurpose::ExportConfirm,
@@ -155,16 +155,19 @@ impl CaseSummaryDialog {
                 ui.separator();
                 match purpose {
                     CaseSummaryPurpose::Info => {
-                        if ui.button("Close").clicked() {
+                        if ui.button(crate::fl!("common-close")).clicked() {
                             *close = true;
                         }
                     }
                     CaseSummaryPurpose::ExportConfirm => {
                         ui.horizontal(|ui| {
-                            if ui.button("Cancel").clicked() {
+                            if ui.button(crate::fl!("common-cancel")).clicked() {
                                 *close = true;
                             }
-                            if ui.button("Export...").clicked() {
+                            if ui
+                                .button(crate::fl!("case-summary-export-button"))
+                                .clicked()
+                            {
                                 outcome = Some(CaseSummaryDialogOutcome::ExportConfirmed);
                                 *close = true;
                             }
@@ -195,34 +198,40 @@ fn render_summary(
         } else {
             0.0
         };
-        ui.label(format!(
-            "{} entries across {} source(s), {} sourcetype(s)",
-            summary.total_entries,
-            summary.sources.len(),
-            summary.sourcetype_counts.len(),
+        ui.label(crate::fl!(
+            "case-summary-totals",
+            entries = summary.total_entries,
+            sources = summary.sources.len(),
+            sourcetypes = summary.sourcetype_counts.len()
         ));
-        ui.label(format!(
-            "{} tagged ({tagged_pct:.1}%), {untagged} untagged",
-            summary.tagged_entries,
+        // Pre-formatted rather than a Fluent number: one fixed decimal in
+        // every language, same digits the analyst would get from a query.
+        ui.label(crate::fl!(
+            "case-summary-tagged",
+            tagged = summary.tagged_entries,
+            percent = format!("{tagged_pct:.1}"),
+            untagged = untagged
         ));
         if let Some(skipped) = skipped_files {
-            ui.label(format!(
-                "{skipped} file(s) skipped during loading (see Activity Log for why)"
-            ));
+            ui.label(crate::fl!("case-summary-skipped-files", count = skipped));
         }
         match (earliest_label, latest_label) {
             (Some(earliest), Some(latest)) => {
-                ui.label(format!("Time range: {earliest} \u{2192} {latest}"));
+                ui.label(crate::fl!(
+                    "case-summary-time-range",
+                    earliest = earliest,
+                    latest = latest
+                ));
             }
             _ => {
-                ui.weak("No timestamped entries.");
+                ui.weak(crate::fl!("case-summary-no-timestamps"));
             }
         }
 
         ui.add_space(8.0);
-        ui.strong("Entries per sourcetype");
+        ui.strong(crate::fl!("case-summary-per-sourcetype"));
         if summary.sourcetype_counts.is_empty() {
-            ui.weak("(none)");
+            ui.weak(crate::fl!("case-summary-none"));
         } else {
             horizontal_bar_chart(
                 ui,
@@ -235,9 +244,9 @@ fn render_summary(
         }
 
         ui.add_space(8.0);
-        ui.strong("Entries per source");
+        ui.strong(crate::fl!("case-summary-per-source"));
         if summary.sources.is_empty() {
-            ui.weak("(none)");
+            ui.weak(crate::fl!("case-summary-none"));
         } else {
             let shown = summary.sources.len().min(MAX_SOURCE_ROWS);
             horizontal_bar_chart(
@@ -250,17 +259,19 @@ fn render_summary(
             if summary.sources.len() > shown {
                 let remaining_entries: usize =
                     summary.sources[shown..].iter().map(|s| s.entry_count).sum();
-                ui.weak(format!(
-                    "+{} more source(s) ({remaining_entries} entries, not shown above)",
-                    summary.sources.len() - shown
+                let hidden_sources: usize = summary.sources.len() - shown;
+                ui.weak(crate::fl!(
+                    "case-summary-more-sources",
+                    count = hidden_sources,
+                    entries = remaining_entries
                 ));
             }
         }
 
         ui.add_space(8.0);
-        ui.strong("Level breakdown");
+        ui.strong(crate::fl!("case-summary-levels"));
         if summary.level_counts.is_empty() {
-            ui.weak("No leveled entries.");
+            ui.weak(crate::fl!("case-summary-no-levels"));
         } else {
             horizontal_bar_chart(
                 ui,
@@ -274,7 +285,7 @@ fn render_summary(
 
         if let Some(histogram) = &summary.daily_histogram {
             ui.add_space(8.0);
-            ui.strong("Daily activity (UTC days)");
+            ui.strong(crate::fl!("case-summary-daily"));
             daily_histogram_chart(ui, histogram);
         }
     });

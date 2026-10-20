@@ -37,13 +37,17 @@ impl AboutDialog {
             close = show_dialog_window(
                 ctx,
                 "peach_about_dialog",
-                "About Peach",
+                &crate::fl!("about-title"),
                 [480.0, 420.0],
                 true,
                 |ui, close| {
                     ui.horizontal(|ui| {
-                        ui.selectable_value(tab, AboutTab::About, "About");
-                        ui.selectable_value(tab, AboutTab::Acknowledgements, "Acknowledgements");
+                        ui.selectable_value(tab, AboutTab::About, crate::fl!("about-tab-about"));
+                        ui.selectable_value(
+                            tab,
+                            AboutTab::Acknowledgements,
+                            crate::fl!("about-tab-acknowledgements"),
+                        );
                     });
                     ui.separator();
 
@@ -53,7 +57,7 @@ impl AboutDialog {
                     }
 
                     ui.separator();
-                    if ui.button("Close").clicked() {
+                    if ui.button(crate::fl!("common-close")).clicked() {
                         *close = true;
                     }
                 },
@@ -68,77 +72,71 @@ impl AboutDialog {
 
 fn about_tab(ui: &mut egui::Ui) {
     ui.heading(format!("Peach {}", display_version()));
-    ui.label("DFIR Log Workbench  ·  © 2026 Marco Neumann (kalink0)");
+    ui.label(format!(
+        "{}  ·  © 2026 Marco Neumann (kalink0)",
+        crate::fl!("about-tagline")
+    ));
+    ui.add_space(6.0);
+    ui.label(crate::fl!("about-description"));
+    ui.label(crate::fl!("about-crush"));
     ui.add_space(6.0);
     ui.label(
-        "A lean, local-first DFIR log workbench. Parses log \
-         sources — AUL, EVTX, journald, and TOML-configurable text logs — \
-         into a normalized, taggable timeline, with a Splunk-inspired \
-         search syntax and semantic tagging.",
-    );
-    ui.label(
-        "Runs standalone, or can be started and handed evidence paths by \
-         crush, then continues completely independently (no IPC).",
+        egui::RichText::new(crate::fl!("about-dedication"))
+            .small()
+            .italics(),
     );
     ui.add_space(6.0);
-    ui.label(
-        egui::RichText::new(
-            "Thank you to someone special \u{2014} for every word of encouragement, \
-             for believing in me, for motivating me, and for the inspiration.",
-        )
-        .small()
-        .italics(),
-    );
-    ui.add_space(6.0);
-    ui.label("Licensed under the Apache License 2.0");
+    ui.label(crate::fl!("about-license"));
     ui.hyperlink(REPO_URL);
-    ui.hyperlink_to("Report a bug or request a feature", ISSUES_URL);
+    ui.hyperlink_to(crate::fl!("about-report-bug"), ISSUES_URL);
 }
 
 fn acknowledgements_tab(ui: &mut egui::Ui) {
-    ui.label("Peach is built on the shoulders of the open-source and DFIR community.");
+    ui.label(crate::fl!("acknowledgements-intro"));
     ui.add_space(8.0);
 
-    ui.strong("Rust crate dependencies");
+    ui.strong(crate::fl!("acknowledgements-dependencies"));
     egui::Grid::new("about_dependencies")
         .num_columns(4)
         .striped(true)
         .spacing([12.0, 4.0])
         .show(ui, |ui| {
-            let rows: [(&str, &str, &str, &str); 6] = [
+            // Crate names, licenses and sources are identifiers, only the
+            // role column is UI text.
+            let rows: [(&str, String, &str, &str); 6] = [
                 (
                     "egui / eframe / egui_extras",
-                    "GUI framework",
+                    crate::fl!("acknowledgements-role-gui"),
                     "MIT OR Apache-2.0",
                     "egui.rs",
                 ),
                 (
                     "duckdb",
-                    "Bulk timeline storage (bundles DuckDB itself)",
+                    crate::fl!("acknowledgements-role-duckdb"),
                     "MIT",
                     "duckdb.org",
                 ),
                 (
                     "rusqlite",
-                    "Session DB (bundles SQLite, Public Domain)",
+                    crate::fl!("acknowledgements-role-rusqlite"),
                     "MIT",
                     "github.com/rusqlite/rusqlite",
                 ),
                 (
                     "macos-unifiedlogs",
-                    "AUL (.logarchive) parsing",
+                    crate::fl!("acknowledgements-role-aul"),
                     "Apache-2.0",
                     "github.com/mandiant/macos-UnifiedLogs",
                 ),
                 (
                     "evtx",
-                    "Windows EVTX parsing",
+                    crate::fl!("acknowledgements-role-evtx"),
                     "MIT/Apache-2.0",
                     "github.com/omerbenamram/evtx",
                 ),
                 (
                     "rfd",
-                    "Native file dialogs",
+                    crate::fl!("acknowledgements-role-rfd"),
                     "MIT",
                     "github.com/PolyMeilex/rfd",
                 ),
@@ -153,66 +151,53 @@ fn acknowledgements_tab(ui: &mut egui::Ui) {
         });
 
     ui.add_space(10.0);
-    ui.strong("Research");
-    ui.label(
-        "The built-in AUL rule pack (rules/examples/aul_*.toml) \
-         is built on predicates from \"Apple Unified Log Predicates in \
-         iLEAPP: The Reference\" by Alexis Brignoni, rather than re-derived \
-         from scratch \u{2014} leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference.",
-    );
+    // Paths, URLs and the publication title are placeholders, not part of
+    // the translatable text: citations have to stay exact in every language.
+    ui.strong(crate::fl!("acknowledgements-research"));
+    ui.label(crate::fl!(
+        "acknowledgements-research-aul",
+        files = "rules/examples/aul_*.toml",
+        title = "Apple Unified Log Predicates in iLEAPP: The Reference",
+        url = "leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference"
+    ));
     ui.add_space(4.0);
-    ui.label(
-        "The built-in EVTX message templates and tagging \
-         rule pack (message_templates/examples/evtx_*.toml, \
-         rules/examples/evtx_*.toml) are cross-checked against Microsoft's \
-         official Security Auditing event reference for each event ID \
-         \u{2014} learn.microsoft.com/windows/security/threat-protection/auditing/.",
-    );
+    ui.label(crate::fl!(
+        "acknowledgements-research-evtx",
+        files = "message_templates/examples/evtx_*.toml, rules/examples/evtx_*.toml",
+        url = "learn.microsoft.com/windows/security/threat-protection/auditing/"
+    ));
     ui.add_space(4.0);
-    ui.label(
-        "A handful of newer AUL predicates (dialed-number recovery, device \
-         orientation, Apple Watch Crown/button, CarPlay handshake, unlock \
-         endpoint, hardware buttons, USB host) are from Tim Korver's Thesis \
-         Friday series and his search term and process cheatsheet, rather \
-         than re-derived from scratch \u{2014} thesisfriday.com.",
-    );
+    ui.label(crate::fl!(
+        "acknowledgements-research-thesis-friday",
+        url = "thesisfriday.com"
+    ));
     ui.add_space(4.0);
-    ui.label(
-        "The built-in journald tagging rule pack (rules/examples/journald_*.toml) \
-         is sourced directly from OpenSSH, sudo, and shadow-utils' own \
-         logging code, not re-derived from memory \u{2014} see each rule \
-         file's header comment for its specific citation.",
-    );
+    ui.label(crate::fl!(
+        "acknowledgements-research-journald",
+        files = "rules/examples/journald_*.toml"
+    ));
     ui.add_space(4.0);
-    ui.label(
-        "The built-in Android Intrusion Log tagging rule pack \
-         (rules/examples/intrusion_log_*.toml) sources tag IDs and \
-         descriptions from Android's own AOSP SecurityLogTags.logtags / \
-         SecurityLog.java, cross-confirmed against two independent tools \
-         that parse the same real-world export format: the Mobile \
-         Verification Toolkit (Amnesty International's Security Lab) and \
-         ALEAPP.",
-    );
+    ui.label(crate::fl!(
+        "acknowledgements-research-intrusion-log",
+        files = "rules/examples/intrusion_log_*.toml"
+    ));
     ui.add_space(4.0);
-    ui.label(
-        "The built-in Apple Biome (SEGB) tagging rule pack \
-         (rules/examples/biome_*.toml) sources stream names and field \
-         semantics from iLEAPP's biome*.py artifact modules (Apache-2.0). \
-         The SEGB v1/v2 envelope format is a Rust port of CCL Forensics' \
-         ccl_segb project (MIT) \u{2014} github.com/cclgroupltd/ccl-segb.",
-    );
+    ui.label(crate::fl!(
+        "acknowledgements-research-biome",
+        files = "rules/examples/biome_*.toml",
+        url = "github.com/cclgroupltd/ccl-segb"
+    ));
 
     ui.add_space(10.0);
-    ui.strong("Special thanks");
-    ui.label(
-        "@dugeonlady — for suggesting the Rainbow theme in crush. Peach's \
-         Rainbow theme (View \u{2192} Theme \u{2192} Rainbow) carries over \
-         the same cycle and colors.",
-    );
+    ui.strong(crate::fl!("acknowledgements-special-thanks"));
+    ui.label(crate::fl!(
+        "acknowledgements-rainbow",
+        menu_path = "View \u{2192} Theme \u{2192} Rainbow"
+    ));
 
     ui.add_space(10.0);
-    ui.strong("Development tools");
-    ui.label("Claude / Claude Code — AI assistant used during development (Anthropic)");
+    ui.strong(crate::fl!("acknowledgements-development-tools"));
+    ui.label(crate::fl!("acknowledgements-claude"));
 }
 
 /// Version string for UI display — the plain crate version normally, with a

@@ -246,6 +246,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn english_plural_forms_follow_the_count() {
+        assert_eq!(
+            crate::fl!(
+                "case-summary-totals",
+                entries = 1usize,
+                sources = 1usize,
+                sourcetypes = 2usize
+            ),
+            "1 entry across 1 source, 2 sourcetypes"
+        );
+        assert_eq!(
+            crate::fl!("tag-preview-count", count = 0usize),
+            "Preview: 0 entries currently match"
+        );
+        assert_eq!(
+            crate::fl!(
+                "case-summary-more-sources",
+                count = 1usize,
+                entries = 1234usize
+            ),
+            "+1 more source (1234 entries, not shown above)"
+        );
+    }
+
     /// The same hard checks CI's `i18n_check` report applies, run on every
     /// platform as part of `cargo test`: a shipped translation with errors
     /// fails the build, a merely incomplete one doesn't.

@@ -82,14 +82,14 @@ impl TagPicker {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui) {
-        egui::ComboBox::from_label("Tag")
+        egui::ComboBox::from_label(crate::fl!("tag-picker-label"))
             .selected_text(
                 self.selected
                     .clone()
-                    .unwrap_or_else(|| "New tag...".to_string()),
+                    .unwrap_or_else(|| crate::fl!("tag-picker-new")),
             )
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.selected, None, "New tag...");
+                ui.selectable_value(&mut self.selected, None, crate::fl!("tag-picker-new"));
                 for tag in self.existing.clone() {
                     let label = tag.clone();
                     ui.selectable_value(&mut self.selected, Some(tag), label);
@@ -97,7 +97,7 @@ impl TagPicker {
             });
         if self.is_new() {
             ui.horizontal(|ui| {
-                ui.label("New tag name:");
+                ui.label(crate::fl!("tag-picker-new-name"));
                 ui.text_edit_singleline(&mut self.new_name);
             });
         }
@@ -220,7 +220,7 @@ impl TagDialog {
                 close = show_dialog_window(
                     ctx,
                     "peach_tag_single_dialog",
-                    "Tag this event",
+                    &crate::fl!("tag-single-title"),
                     [360.0, 160.0],
                     true,
                     |ui, close| {
@@ -228,7 +228,10 @@ impl TagDialog {
                         ui.horizontal(|ui| {
                             let tag_value = picker.tag_value();
                             if ui
-                                .add_enabled(tag_value.is_some(), egui::Button::new("Apply"))
+                                .add_enabled(
+                                    tag_value.is_some(),
+                                    egui::Button::new(crate::fl!("common-apply")),
+                                )
                                 .clicked()
                             {
                                 outcome = Some(TagDialogOutcome::TagSingleEvent {
@@ -237,7 +240,7 @@ impl TagDialog {
                                 });
                                 *close = true;
                             }
-                            if ui.button("Cancel").clicked() {
+                            if ui.button(crate::fl!("common-cancel")).clicked() {
                                 *close = true;
                             }
                         });
@@ -258,16 +261,16 @@ impl TagDialog {
                 close = show_dialog_window(
                     ctx,
                     "peach_tag_advanced_dialog",
-                    "Advanced tagging",
+                    &crate::fl!("tag-advanced-title"),
                     [460.0, 360.0],
                     true,
                     |ui, close| {
-                        ui.label("Match on:");
+                        ui.label(crate::fl!("tag-match-on"));
                         ui.horizontal_wrapped(|ui| {
                             if ui
                                 .radio(
                                     *match_kind == MatchKind::MessageContains,
-                                    "Message contains",
+                                    crate::fl!("tag-match-message-contains"),
                                 )
                                 .clicked()
                                 && *match_kind != MatchKind::MessageContains
@@ -288,22 +291,24 @@ impl TagDialog {
 
                         match match_kind {
                             MatchKind::MessageContains => {
-                                ui.label("Tag every entry whose message contains:");
+                                ui.label(crate::fl!("tag-message-contains-prompt"));
                                 ui.text_edit_singleline(pattern);
                             }
                             MatchKind::Field { label, .. } => {
-                                ui.label(format!(
-                                    "Tag every {sourcetype} entry whose {label} is exactly:"
+                                ui.label(crate::fl!(
+                                    "tag-field-equals-prompt",
+                                    sourcetype = sourcetype.clone(),
+                                    field = label.to_string()
                                 ));
                                 ui.text_edit_singleline(pattern);
                             }
                         }
                         match preview {
                             Some(count) => {
-                                ui.label(format!("Preview: {count} entries currently match"));
+                                ui.label(crate::fl!("tag-preview-count", count = count));
                             }
                             None if !pattern.trim().is_empty() => {
-                                ui.label("Preview: counting...");
+                                ui.label(crate::fl!("tag-preview-counting"));
                             }
                             None => {}
                         }
@@ -329,21 +334,19 @@ impl TagDialog {
                         if !picker.is_new() {
                             match extend_path {
                                 Some(path) => {
-                                    ui.label(format!(
-                                        "Will extend existing rule: {}",
-                                        path.display()
+                                    ui.label(crate::fl!(
+                                        "tag-extend-existing",
+                                        path = path.display().to_string()
                                     ));
                                 }
                                 None => {
-                                    ui.label(
-                                        "No single loaded rule produces this tag — a new rule will be created.",
-                                    );
+                                    ui.label(crate::fl!("tag-no-single-rule"));
                                 }
                             }
                         }
                         if needs_rule_name {
                             ui.horizontal(|ui| {
-                                ui.label("New rule name:");
+                                ui.label(crate::fl!("tag-new-rule-name"));
                                 ui.text_edit_singleline(rule_name);
                             });
                         }
@@ -353,7 +356,10 @@ impl TagDialog {
                                 && !pattern.trim().is_empty()
                                 && (!needs_rule_name || !rule_name.trim().is_empty());
                             if ui
-                                .add_enabled(can_apply, egui::Button::new("Apply"))
+                                .add_enabled(
+                                    can_apply,
+                                    egui::Button::new(crate::fl!("common-apply")),
+                                )
                                 .clicked()
                             {
                                 outcome = Some(match extend_path {
@@ -380,7 +386,7 @@ impl TagDialog {
                                 });
                                 *close = true;
                             }
-                            if ui.button("Cancel").clicked() {
+                            if ui.button(crate::fl!("common-cancel")).clicked() {
                                 *close = true;
                             }
                         });

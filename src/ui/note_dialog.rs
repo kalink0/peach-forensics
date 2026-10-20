@@ -81,12 +81,12 @@ impl NoteDialog {
             close = show_dialog_window(
                 ctx,
                 "peach_note_dialog",
-                "Notes",
+                &crate::fl!("notes-title"),
                 [420.0, 400.0],
                 true,
                 |ui, close| {
                     if notes.is_empty() {
-                        ui.weak("No notes on this event yet.");
+                        ui.weak(crate::fl!("notes-empty"));
                     }
                     for (note_id, text) in notes.iter() {
                         ui.separator();
@@ -107,8 +107,8 @@ impl NoteDialog {
                             let mut save_clicked = false;
                             let mut cancel_clicked = false;
                             ui.horizontal(|ui| {
-                                save_clicked = ui.button("Save").clicked();
-                                cancel_clicked = ui.button("Cancel").clicked();
+                                save_clicked = ui.button(crate::fl!("common-save")).clicked();
+                                cancel_clicked = ui.button(crate::fl!("common-cancel")).clicked();
                             });
                             if save_clicked {
                                 let trimmed = draft.trim();
@@ -127,10 +127,10 @@ impl NoteDialog {
                         } else {
                             ui.label(text);
                             ui.horizontal(|ui| {
-                                if ui.button("Edit").clicked() {
+                                if ui.button(crate::fl!("common-edit")).clicked() {
                                     *editing = Some((*note_id, text.clone()));
                                 }
-                                if ui.button("Delete").clicked() {
+                                if ui.button(crate::fl!("common-delete")).clicked() {
                                     outcome = Some(NoteDialogOutcome::Delete { note_id: *note_id });
                                 }
                             });
@@ -138,12 +138,15 @@ impl NoteDialog {
                     }
 
                     ui.separator();
-                    ui.label("New note:");
+                    ui.label(crate::fl!("notes-new"));
                     ui.text_edit_multiline(new_text);
                     ui.horizontal(|ui| {
                         let trimmed = new_text.trim();
                         if ui
-                            .add_enabled(!trimmed.is_empty(), egui::Button::new("Add"))
+                            .add_enabled(
+                                !trimmed.is_empty(),
+                                egui::Button::new(crate::fl!("common-add")),
+                            )
                             .clicked()
                         {
                             outcome = Some(NoteDialogOutcome::Add {
@@ -152,7 +155,7 @@ impl NoteDialog {
                             });
                             new_text.clear();
                         }
-                        if ui.button("Close").clicked() {
+                        if ui.button(crate::fl!("common-close")).clicked() {
                             *close = true;
                         }
                     });
