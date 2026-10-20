@@ -588,9 +588,20 @@ fn session_migration_warning_text(
     Some(text)
 }
 
+/// Switches the UI to the configured language. A language that's missing
+/// or whose file has errors leaves the UI in English — the Settings dialog
+/// says so next to the language list, so it isn't only on stderr.
+fn apply_language(settings: &config::Settings) {
+    if let Err(err) = crate::i18n::select_language(settings.language.as_deref()) {
+        eprintln!("peach: {err:#} — showing English");
+        let _ = crate::i18n::select_language(None);
+    }
+}
+
 impl PeachApp {
     fn new(add_sources: Vec<PathBuf>, cleanup_dirs: Vec<PathBuf>, ephemeral_session: bool) -> Self {
         let settings = config::load();
+        apply_language(&settings);
         let session_migration_warning = migrate_legacy_sessions_at_startup();
         // `--ephemeral-session` (crush handing off a temp-extracted or
         // decrypted source): use a one-off directory under the configured
@@ -1649,6 +1660,9 @@ impl PeachApp {
                     .default_source_timezone
                     .clone()
                     .unwrap_or_default();
+                if new_settings.language != self.settings.language {
+                    apply_language(&new_settings);
+                }
                 self.settings = new_settings;
             }
         }

@@ -1,0 +1,7 @@
+# Read at compile time by i18n-embed's `fluent_language_loader!()` and
+# i18n-embed-fl's `fl!()`: every `fl!("message-id")` in the code is checked
+# against the fallback language's file, i18n/en/peach.ftl.
+fallback_language = "en"
+
+[fluent]
+assets_dir = "i18n"

@@ -668,9 +668,19 @@ at, not picked from a list of every possible value up front.
 
 ## Settings
 
-**File > Settings...** covers where Peach writes things, and how a folder
-load parallelizes:
+**File > Settings...** covers the interface language, where Peach writes
+things, and how a folder load parallelizes:
 
+- **Language** — the language of the interface. English is the default.
+  Translations come from the community and can be incomplete: each entry
+  shows how much of it is translated, and anything not translated yet
+  appears in English. Only the interface changes. Log data, tags, rules,
+  the search syntax, exports and the activity log stay exactly the same
+  whatever language is selected, and so do error details (the technical
+  part of an error message). A translation whose file has errors is listed
+  but can't be selected. If the configured language can't be used, Peach
+  shows English and says so below the list. To contribute a translation,
+  see [i18n/README.md](../i18n/README.md).
 - **Sessions directory** — where new sessions' `.duckdb`/`.sqlite` files are
   created (see [Sessions](#sessions) below). Defaults to the OS-standard
   per-user data directory (on Windows the local one,
