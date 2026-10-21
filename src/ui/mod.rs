@@ -7,6 +7,7 @@ pub mod dialog_window;
 pub mod display_timezone_dialog;
 pub mod filter_bar;
 pub mod format_dialog;
+pub mod menu_path;
 pub mod note_dialog;
 pub mod raw_fields_dialog;
 pub(crate) mod reveal;

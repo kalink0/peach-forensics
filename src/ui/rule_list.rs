@@ -16,11 +16,6 @@ use eframe::egui;
 
 use crate::tagging::rule::Rule;
 
-/// Where rule packs are downloaded, as both rule dialogs point the analyst
-/// to it. A placeholder in their messages rather than part of the text, so
-/// it follows the menu's own wording once the menus are translated.
-pub const RULE_PACKS_MENU_PATH: &str = "File \u{2192} Rule packs...";
-
 /// Which rule pack a rule belongs to, decided by its own `sourcetype` match
 /// condition. Declaration order is the order the table sorts sources in
 /// (the order the packs were introduced), not alphabetical.

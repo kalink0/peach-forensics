@@ -16,6 +16,7 @@ use eframe::egui;
 use crate::model::event_id::EventId;
 use crate::tagging::rule_file::RuleCondition;
 use crate::ui::dialog_window::show_dialog_window;
+use crate::ui::timeline_view::column_filter_label;
 
 /// What the analyst confirmed — `app.rs` executes it.
 pub enum TagDialogOutcome {
@@ -112,10 +113,7 @@ impl TagPicker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchKind {
     MessageContains,
-    Field {
-        field: &'static str,
-        label: &'static str,
-    },
+    Field { field: &'static str },
 }
 
 pub enum TagDialog {
@@ -130,10 +128,10 @@ pub enum TagDialog {
         /// The clicked row's original message — restored into `pattern`
         /// when switching `match_kind` back to `MessageContains`.
         message: String,
-        /// The clicked row's other populated fields, `(field, label,
-        /// value)` — restored into `pattern` when switching `match_kind` to
-        /// that field.
-        available_fields: Vec<(&'static str, &'static str, String)>,
+        /// The clicked row's other populated fields, `(field, value)` —
+        /// restored into `pattern` when switching `match_kind` to that
+        /// field.
+        available_fields: Vec<(&'static str, String)>,
         match_kind: MatchKind,
         /// Current condition value: a substring (`MessageContains`) or an
         /// exact value (`Field`) — meaning depends on `match_kind`.
@@ -156,7 +154,7 @@ impl TagDialog {
         event_id: EventId,
         message: String,
         sourcetype: String,
-        available_fields: Vec<(&'static str, &'static str, String)>,
+        available_fields: Vec<(&'static str, String)>,
         existing_tags: Vec<String>,
     ) -> Self {
         Self::Advanced {
@@ -278,9 +276,11 @@ impl TagDialog {
                                 *match_kind = MatchKind::MessageContains;
                                 *pattern = message.clone();
                             }
-                            for (field, label, value) in available_fields.iter() {
-                                let this_kind = MatchKind::Field { field, label };
-                                if ui.radio(*match_kind == this_kind, *label).clicked()
+                            for (field, value) in available_fields.iter() {
+                                let this_kind = MatchKind::Field { field };
+                                if ui
+                                    .radio(*match_kind == this_kind, column_filter_label(field))
+                                    .clicked()
                                     && *match_kind != this_kind
                                 {
                                     *match_kind = this_kind;
@@ -294,11 +294,11 @@ impl TagDialog {
                                 ui.label(crate::fl!("tag-message-contains-prompt"));
                                 ui.text_edit_singleline(pattern);
                             }
-                            MatchKind::Field { label, .. } => {
+                            MatchKind::Field { field } => {
                                 ui.label(crate::fl!(
                                     "tag-field-equals-prompt",
                                     sourcetype = sourcetype.clone(),
-                                    field = label.to_string()
+                                    field = column_filter_label(field)
                                 ));
                                 ui.text_edit_singleline(pattern);
                             }

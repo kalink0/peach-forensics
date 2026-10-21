@@ -47,6 +47,9 @@ settings-language-unavailable = Language "{ $code }" is not available or its fil
 
 settings-sessions-dir = Sessions directory:
 settings-sessions-dir-help = New sessions only — the current session stays put.
+# The same setting's name without the colon, used when other texts point
+# to it (e.g. "Settings → Sessions directory").
+settings-sessions-dir-name = Sessions directory
 
 settings-rules-dir = Rules directory:
 settings-rules-dir-help = Where new rules get saved, and auto-loaded from on startup.
@@ -401,6 +404,7 @@ format-preview-empty = (source file has no lines to preview)
 format-invalid-regex = Invalid regex: { $error }
 format-invalid-assume-offset = Invalid assume offset: { $error }
 format-invalid-assume-year = Invalid assume year: { $error }
+format-no-parsers-dir = Could not determine the per-user parsers directory.
 
 
 ## Manage sessions dialog (menu: File > Manage sessions).
@@ -472,3 +476,261 @@ rule-packs-no-changes = No changes relative to what's currently active.
 rule-packs-diff-new = New ({ $count })
 rule-packs-diff-modified = Modified ({ $count })
 rule-packs-diff-removed = Removed ({ $count })
+
+
+## Timeline column names. Also used wherever Peach names one of these
+## fields: the "Filter by..." menu, active-filter chips, the tagging
+## dialog. The search syntax uses its own fixed lowercase keywords
+## (sourcetype=, event_id=, ...), which are not translated.
+
+column-timestamp = Timestamp
+column-level = Level
+column-source = Source
+column-sourcetype = Sourcetype
+column-host = Host
+column-process = Process
+column-event-id = Event ID
+column-subsystem = Subsystem
+column-category = Category
+column-tags = Tags
+column-notes = Notes
+column-message = Message
+
+
+## Search and filter bar (above the timeline).
+
+filter-search = Search:
+# Example query in the search syntax: keep it exactly as written.
+filter-search-hint = e.g. sourcetype=evtx tag=auth_failure NOT level=INFO "login"
+filter-clear = Clear
+filter-counts-whole-timeline = Counts are for the whole loaded timeline, not the current filter.
+# Small button next to one value: keep only that value selected.
+filter-only = only
+filter-show-all = Show all
+# Drop-down button with $count values selected, e.g. "Level (2)".
+filter-dropdown-selected = { $label } ({ $count })
+filter-level-only-help = Select only this value, deselecting every other one
+filter-tag = Tag
+filter-tag-selected = Tag ({ $selected })
+filter-tag-excluded = Tag ({ $excluded } excluded)
+filter-tag-selected-excluded = Tag ({ $selected }, { $excluded } excluded)
+filter-tag-only-help = Select only this tag, deselecting every other tag and Untagged
+# Short for "exclude": toggles hiding entries with this tag.
+filter-tag-exclude = excl.
+# "NOT tag=<value>" is search syntax: keep it as written.
+filter-tag-exclude-help = Hide entries that have this tag, even alongside others (NOT tag=<value>) — independent of the checkbox above
+filter-untagged = Untagged
+# "NOT tag=*" is search syntax: keep it as written.
+filter-untagged-help = Entries with no tag at all (NOT tag=*)
+filter-sources = Sources
+filter-sources-hidden = Sources ({ $hidden } hidden)
+filter-source-only-help = Show only this source, hide every other one
+filter-time-range = Time range
+# $count is how many of the two bounds (after/before) are set.
+filter-time-range-active = Time range ({ $count })
+# Checkboxes for the start and end of the time range.
+filter-time-after = After
+filter-time-before = Before
+filter-active-filters = Active filters:
+# Tooltip of an active-filter chip. $term is the search term it stands for,
+# e.g. "host=DESKTOP-1" (search syntax, not translated).
+filter-chip-remove-help = Remove this filter ({ $term })
+filter-clear-all = Clear all
+
+
+## Timeline table.
+
+timeline-events-loaded = { $count ->
+    [one] { $count } event loaded
+   *[other] { $count } events loaded
+}
+timeline-events-matching = { $matching } of { $total ->
+    [one] { $total } event loaded matches the filter
+   *[other] { $total } events loaded match the filter
+}
+timeline-filtering = Filtering…
+timeline-no-match = No entries match.
+# Menu for showing/hiding table columns.
+timeline-columns = Columns
+timeline-columns-reorder-hint = Drag a column header to reorder it.
+timeline-sort-newest-first = Timestamp ▼ (newest first)
+timeline-sort-oldest-first = Timestamp ▲ (oldest first)
+timeline-sort-help = Toggle sort direction
+
+## Timeline row right-click menu.
+
+row-menu-copy-message = Copy message
+# The copied text itself is not translated (like an export).
+row-menu-copy-event = Copy whole event as text
+# "raw" and "fields" are column names: keep them as written.
+row-menu-view-raw-fields = View raw/fields...
+row-menu-filter-by = Filter by...
+row-menu-show-context = Show context around this event
+# $minutes is 1, 5, 15 or 60.
+row-menu-context-minutes = ± { $minutes } min
+row-menu-tag-event = Tag this event...
+row-menu-tag-all-matching = Tag all matching (advanced)...
+row-menu-notes = Notes...
+
+
+## Menu bar. Other texts refer to menu entries by these names (e.g. "File →
+## Rule packs..."), built from the translations here.
+
+menu-file = File
+menu-new-session = New session
+menu-new-session-help = Starts a fresh, empty session — the one you're leaving stays on disk (via Manage sessions...) as long as it has data loaded into it.
+menu-manage-sessions = Manage sessions...
+menu-export = Export (current filter)...
+menu-export-help = Exports exactly what the timeline is showing right now — clear the search box first to export everything.
+menu-export-portable-case = Export portable case...
+menu-export-portable-case-help = Bundles this session (or, with an active search, just the matching subset) into a single file another analyst's Peach can import — unlike the row export above, raw data, tags, and notes all travel intact.
+menu-import-portable-case = Import portable case...
+# ".peachcase" is a file extension: keep it as written.
+menu-import-portable-case-help = Opens a .peachcase bundle as a brand-new session — the session you're in now is left untouched.
+menu-rule-packs = Rule packs...
+menu-settings = Settings...
+menu-quit = Quit
+menu-view = View
+menu-theme = Theme
+theme-system = System default
+theme-light = Light
+theme-dark = Dark
+theme-geek = Geek
+theme-rainbow = Rainbow
+menu-display-timezone = Display timezone...
+menu-activity-log = Activity Log...
+menu-case-summary = Case Summary...
+menu-case-summary-help = Entries per source/sourcetype/level, tag coverage, and the covered time range for the whole session.
+menu-help = Help
+menu-about = About Peach...
+menu-rules-reference = Rules reference...
+
+# Window title of the Case Summary dialog opened from the View menu.
+case-summary-title = Case Summary
+# Window title of the Case Summary shown after importing a portable case.
+# $name is the imported session's name.
+case-summary-imported-title = Imported: { $name }
+
+
+## Load controls (top of the main window).
+
+# $name is the session's name or id.
+load-session = Session: { $name }
+load-sourcetype = Sourcetype:
+# Source type for text logs parsed with a configurable format.
+load-source-text = Text (config-based)
+# "--add-source" is a command-line flag: keep it as written.
+load-queued-sources = { $count ->
+    [one] ({ $count } more source queued from --add-source)
+   *[other] ({ $count } more sources queued from --add-source)
+}
+# ".logarchive" is a folder type: keep it as written.
+load-choose-logarchive = Choose .logarchive folder...
+# "intrusion-logs" is a folder name: keep it as written.
+load-choose-intrusion-logs = Choose intrusion-logs folder...
+# "biome/streams" is a folder path: keep it as written.
+load-choose-biome = Choose biome/streams folder...
+load-choose-evtx = Choose .evtx file(s)...
+load-choose-journal = Choose .journal file(s)...
+load-choose-log-files = Choose log file(s)...
+# "Load" is the name of the button that starts loading.
+load-choose-files-help = Select several to queue them as separate sources, loaded one after another — each still needs its own "Load" click, same as a single file
+load-choose-folder = Choose folder...
+load-choose-folder-help = Recursively loads every matching file found in the folder (and its subfolders) as separate sources
+load-choose-parser-config = Choose parser config (TOML)...
+load-define-format = Define format...
+load-define-format-help = Build a parser config with a live preview against this source's own lines, instead of hand-editing TOML.
+# Input hint. The examples are values Peach accepts: keep them as written.
+load-source-timezone-hint = +0100, +02:00, UTC, or Europe/Berlin
+# "Assume offset" is the label of a field in the Define Text Format dialog;
+# use the same wording as that field's translation.
+load-source-timezone-help = Fallback when a text source's own "Assume offset" isn't set. Applies immediately.
+load-builtin-rules = Built-in rules...
+load-builtin-rules-help = Choose exactly which built-in AUL/EVTX rules apply on every load and re-tag, regardless of which rule files are also selected below. Every built-in rule is enabled by default.
+load-choose-rules = Choose tagging rules (TOML, optional)...
+load-no-rule-files = (no extra rule files selected)
+load-rule-files = { $count ->
+    [one] { $count } rule file selected
+   *[other] { $count } rule files selected
+}
+load-retag = Re-tag now
+# "import_tags" is a database table name: keep it as written.
+load-retag-help = Re-evaluate the selected rules against everything already loaded, replacing import_tags
+load-retagging = Re-tagging...
+load-retag-done = Re-tag applied { $count ->
+    [one] { $count } tag
+   *[other] { $count } tags
+}
+# Error frame: $error is the technical detail and stays in English.
+load-error = Error: { $error }
+load-exporting = Exporting... { $rows ->
+    [one] { $rows } row so far
+   *[other] { $rows } rows so far
+}
+load-export-done = Export complete: { $rows ->
+    [one] { $rows } row
+   *[other] { $rows } rows
+} to { $path }
+load-export-failed = Export failed: { $error }
+# $stage is one of the portable-case-stage-* texts below.
+load-portable-case-exporting = Exporting portable case... { $stage }
+load-portable-case-export-done = Portable case complete: { $entries ->
+    [one] { $entries } entry
+   *[other] { $entries } entries
+}, { $tags ->
+    [one] { $tags } tag
+   *[other] { $tags } tags
+}, to { $path }
+load-portable-case-export-failed = Portable case export failed: { $error }
+load-portable-case-importing = Importing portable case... { $stage }
+load-portable-case-import-done = Portable case imported and opened: { $name }
+load-portable-case-import-failed = Portable case import failed: { $error }
+load-portable-case-switch-failed = imported, but failed to switch into the new session: { $error }
+portable-case-stage-copying-timeline = copying timeline
+portable-case-stage-copying-session-data = copying tags and notes
+portable-case-stage-collecting-parser-configs = collecting parser configs
+portable-case-stage-verifying-integrity = verifying integrity
+portable-case-stage-packaging = packaging
+portable-case-stage-extracting = extracting
+portable-case-stage-verifying-format = verifying format
+portable-case-stage-registering-session = registering session
+load-dismiss = Dismiss
+# $legacy and $new are folder paths. $settings_path is where the setting
+# lives, e.g. "Settings → Sessions directory". A list of the items and
+# reasons follows on the next lines.
+load-session-migration-warning = { $count ->
+    [one] { $count } item could not be moved from the old sessions folder { $legacy } to { $new }. It was left unchanged. To open it, close Peach and move it yourself, or point { $settings_path } at the old folder:
+   *[other] { $count } items could not be moved from the old sessions folder { $legacy } to { $new }. They were left unchanged. To open them, close Peach and move them yourself, or point { $settings_path } at the old folder:
+}
+load-skip-bad-records = Skip bad records instead of failing
+load-skip-bad-records-help = If a line/record can't be parsed, skip it and keep going instead of aborting the whole file. Off by default — a bad record normally stops the file's load entirely, so nothing is ever silently incomplete. When on, how many records were skipped (and why) is recorded in the Activity Log, per file.
+load-load = Load
+load-abort = Abort
+load-abort-help = Stops after the file currently being parsed finishes (or, for a large single file, at the next internal checkpoint) — whatever's already inserted stays; nothing gets rolled back.
+# Progress bar text. $done and $total are already formatted with one
+# decimal, e.g. "12.5".
+load-parsing-progress = Parsing: { $done } / { $total } MB
+load-loading = Loading...
+load-loading-entries = Loading... { $count ->
+    [one] { $count } entry so far
+   *[other] { $count } entries so far
+}
+# $seconds is already formatted with one decimal, e.g. "3.2".
+load-done = Loaded { $entries ->
+    [one] { $entries } entry
+   *[other] { $entries } entries
+}, applied { $tags ->
+    [one] { $tags } tag
+   *[other] { $tags } tags
+} in { $seconds }s
+load-aborted = Aborted
+load-records-skipped = { $count ->
+    [one] { $count } record skipped (skip bad records was on)
+   *[other] { $count } records skipped (skip bad records was on)
+}
+# "Activity Log" is the name of a Peach window.
+load-records-skipped-help = See Activity Log for the per-file breakdown and reasons.
+load-files-skipped = { $count ->
+    [one] { $count } file skipped
+   *[other] { $count } files skipped
+}

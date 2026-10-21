@@ -39,8 +39,7 @@ use crate::tagging::pack_bundle;
 use crate::tagging::rule_file;
 use crate::ui::dialog_window::show_dialog_window;
 use crate::ui::rule_list::{
-    RULE_PACKS_MENU_PATH, RuleRow, SortColumn, ViewState, search_row, sort_header, source_dropdown,
-    visible_indices,
+    RuleRow, SortColumn, ViewState, search_row, sort_header, source_dropdown, visible_indices,
 };
 
 /// The GitHub copy of the build-time-generated reference doc — only ever
@@ -141,7 +140,7 @@ impl RulesReferenceDialog {
                     render_active_pack_line(ui, *active_pack_version);
                     ui.weak(crate::fl!(
                         "rules-reference-live-note",
-                        menu_path = RULE_PACKS_MENU_PATH
+                        menu_path = crate::ui::menu_path::rule_packs()
                     ));
 
                     search_row(ui, view, focus_search);
@@ -194,7 +193,7 @@ fn render_active_pack_line(ui: &mut egui::Ui, active_pack_version: Option<u32>) 
             ui.label(crate::fl!(
                 "rules-reference-pack-active",
                 version = version,
-                menu_path = RULE_PACKS_MENU_PATH
+                menu_path = crate::ui::menu_path::rule_packs()
             ));
         }
         None => {

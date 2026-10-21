@@ -192,7 +192,7 @@ fn acknowledgements_tab(ui: &mut egui::Ui) {
     ui.strong(crate::fl!("acknowledgements-special-thanks"));
     ui.label(crate::fl!(
         "acknowledgements-rainbow",
-        menu_path = "View \u{2192} Theme \u{2192} Rainbow"
+        menu_path = crate::ui::menu_path::rainbow_theme()
     ));
 
     ui.add_space(10.0);

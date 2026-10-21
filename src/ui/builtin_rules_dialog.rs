@@ -32,8 +32,8 @@ use crate::tagging::pack_bundle;
 use crate::tagging::rule_file;
 use crate::ui::dialog_window::show_dialog_window;
 use crate::ui::rule_list::{
-    RULE_PACKS_MENU_PATH, RuleRow, SortColumn, StatusFilter, ViewState, search_row, sort_header,
-    source_dropdown, visible_indices,
+    RuleRow, SortColumn, StatusFilter, ViewState, search_row, sort_header, source_dropdown,
+    visible_indices,
 };
 
 /// Enables or disables exactly the rules at `indices` (what the table
@@ -120,7 +120,7 @@ impl BuiltinRulesDialog {
                         Some(version) => ui.label(crate::fl!(
                             "builtin-rules-pack-active",
                             version = version,
-                            menu_path = RULE_PACKS_MENU_PATH
+                            menu_path = crate::ui::menu_path::rule_packs()
                         )),
                         None => ui.label(crate::fl!("builtin-rules-baseline")),
                     };

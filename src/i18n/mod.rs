@@ -42,13 +42,17 @@ pub static LOADER: LazyLock<FluentLanguageLoader> = LazyLock::new(|| {
 /// Looks up a UI message in the current language — `fl!("message-id")` or
 /// `fl!("message-id", name = value, ...)`. The message id and argument
 /// names are checked against `i18n/en/peach.ftl` at compile time.
+///
+/// Each value is passed on in parentheses: `i18n_embed_fl` appends
+/// `.into()` to it, which would otherwise bind tighter than a leading `*`
+/// (`count = *n` turning into `*n.into()`).
 #[macro_export]
 macro_rules! fl {
     ($message_id:literal) => {{
         i18n_embed_fl::fl!($crate::i18n::LOADER, $message_id)
     }};
-    ($message_id:literal, $($args:expr),*) => {{
-        i18n_embed_fl::fl!($crate::i18n::LOADER, $message_id, $($args),*)
+    ($message_id:literal, $($name:ident = $value:expr),* $(,)?) => {{
+        i18n_embed_fl::fl!($crate::i18n::LOADER, $message_id, $($name = ($value)),*)
     }};
 }
 

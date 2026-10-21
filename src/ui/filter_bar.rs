@@ -6,6 +6,7 @@ use egui_extras::DatePickerButton;
 use crate::db::timeline_queries::{self, COLUMN_FILTER_FIELDS, Query};
 use crate::ui::colors::categorical_color;
 use crate::ui::dialog_window::show_dialog_window;
+use crate::ui::timeline_view::column_filter_label;
 
 /// The time-range popup's own editable state — a date, an hour/minute/
 /// second, and an on/off checkbox, per bound. Unlike every other row in
@@ -156,20 +157,26 @@ impl FilterBar {
         let mut changed = false;
 
         ui.horizontal(|ui| {
-            ui.label("Search:");
+            ui.label(crate::fl!("filter-search"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.text)
-                    .hint_text(r#"e.g. sourcetype=evtx tag=auth_failure NOT level=INFO "login""#)
+                    .hint_text(crate::fl!("filter-search-hint"))
                     .desired_width(400.0),
             );
             changed |= response.changed();
-            if ui.button("Clear").clicked() && !self.text.is_empty() {
+            if ui.button(crate::fl!("filter-clear")).clicked() && !self.text.is_empty() {
                 self.text.clear();
                 changed = true;
             }
         });
 
-        changed |= self.quick_filter_row(ui, "Level", "level", available_levels, level_counts);
+        changed |= self.quick_filter_row(
+            ui,
+            &crate::fl!("column-level"),
+            "level",
+            available_levels,
+            level_counts,
+        );
         changed |= self.tag_filter_row(ui, available_tags, tag_counts);
         changed |= self.source_visibility_row(ui, available_sources, source_counts);
         changed |= self.time_range_row(ui);
@@ -184,8 +191,9 @@ impl FilterBar {
     /// what it *isn't*: see [`crate::db::timeline_queries::tag_counts`]'s
     /// doc comment for why a live, filter-relative count isn't what these
     /// are.
-    const COUNTS_ARE_WHOLE_TIMELINE_CAPTION: &'static str =
-        "Counts are for the whole loaded timeline, not the current filter.";
+    fn counts_are_whole_timeline_caption() -> String {
+        crate::fl!("filter-counts-whole-timeline")
+    }
 
     /// Popup height cap shared by every dropdown row below — long enough to
     /// show a good handful of values without scrolling, short enough that a
@@ -221,10 +229,14 @@ impl FilterBar {
         let button_label = if selected.is_empty() {
             label.to_string()
         } else {
-            format!("{label} ({})", selected.len())
+            crate::fl!(
+                "filter-dropdown-selected",
+                label = label.to_string(),
+                count = selected.len()
+            )
         };
         ui.menu_button(button_label, |ui| {
-            ui.weak(Self::COUNTS_ARE_WHOLE_TIMELINE_CAPTION);
+            ui.weak(Self::counts_are_whole_timeline_caption());
             egui::ScrollArea::vertical()
                 .max_height(Self::DROPDOWN_MAX_HEIGHT)
                 .show(ui, |ui| {
@@ -238,10 +250,8 @@ impl FilterBar {
                             }
                             ui.weak(format!("({count})"));
                             if ui
-                                .small_button("only")
-                                .on_hover_text(
-                                    "Select only this value, deselecting every other one",
-                                )
+                                .small_button(crate::fl!("filter-only"))
+                                .on_hover_text(crate::fl!("filter-level-only-help"))
                                 .clicked()
                             {
                                 self.set_term_values(field, std::slice::from_ref(value));
@@ -257,7 +267,7 @@ impl FilterBar {
             // scrolled content would need scrolling all the way down to
             // reach — most needed exactly when there's a lot to reset.
             ui.separator();
-            if ui.button("Show all").clicked() {
+            if ui.button(crate::fl!("filter-show-all")).clicked() {
                 self.set_term_values(field, &[]);
                 changed = true;
                 ui.close();
@@ -296,13 +306,17 @@ impl FilterBar {
             .filter(|value| self.has_tag_excluded_term(value))
             .count();
         let button_label = match (selected_count, excluded_count) {
-            (0, 0) => "Tag".to_string(),
-            (selected, 0) => format!("Tag ({selected})"),
-            (0, excluded) => format!("Tag ({excluded} excluded)"),
-            (selected, excluded) => format!("Tag ({selected}, {excluded} excluded)"),
+            (0, 0) => crate::fl!("filter-tag"),
+            (selected, 0) => crate::fl!("filter-tag-selected", selected = selected),
+            (0, excluded) => crate::fl!("filter-tag-excluded", excluded = excluded),
+            (selected, excluded) => crate::fl!(
+                "filter-tag-selected-excluded",
+                selected = selected,
+                excluded = excluded
+            ),
         };
         ui.menu_button(button_label, |ui| {
-            ui.weak(Self::COUNTS_ARE_WHOLE_TIMELINE_CAPTION);
+            ui.weak(Self::counts_are_whole_timeline_caption());
             egui::ScrollArea::vertical()
                 .max_height(Self::DROPDOWN_MAX_HEIGHT)
                 .show(ui, |ui| {
@@ -323,10 +337,8 @@ impl FilterBar {
                             }
                             ui.weak(format!("({count})"));
                             if ui
-                                .small_button("only")
-                                .on_hover_text(
-                                    "Select only this tag, deselecting every other tag and Untagged",
-                                )
+                                .small_button(crate::fl!("filter-only"))
+                                .on_hover_text(crate::fl!("filter-tag-only-help"))
                                 .clicked()
                             {
                                 self.set_tag_block(std::slice::from_ref(value), false);
@@ -337,11 +349,8 @@ impl FilterBar {
                                 ui.close();
                             }
                             if ui
-                                .selectable_label(excluded, "excl.")
-                                .on_hover_text(
-                                    "Hide entries that have this tag, even alongside others \
-                                     (NOT tag=<value>) — independent of the checkbox above",
-                                )
+                                .selectable_label(excluded, crate::fl!("filter-tag-exclude"))
+                                .on_hover_text(crate::fl!("filter-tag-exclude-help"))
                                 .clicked()
                             {
                                 if active {
@@ -355,8 +364,8 @@ impl FilterBar {
                     ui.separator();
                     let mut untagged_active = self.has_untagged_term();
                     if ui
-                        .checkbox(&mut untagged_active, "Untagged")
-                        .on_hover_text("Entries with no tag at all (NOT tag=*)")
+                        .checkbox(&mut untagged_active, crate::fl!("filter-untagged"))
+                        .on_hover_text(crate::fl!("filter-untagged-help"))
                         .changed()
                     {
                         self.toggle_untagged_term();
@@ -368,7 +377,7 @@ impl FilterBar {
             // tags are cleared too — "Show all" means "no tag filtering at
             // all", not "only reset the include half".
             ui.separator();
-            if ui.button("Show all").clicked() {
+            if ui.button(crate::fl!("filter-show-all")).clicked() {
                 self.set_tag_block(&[], false);
                 for value in available_tags {
                     if self.has_tag_excluded_term(value) {
@@ -418,13 +427,13 @@ impl FilterBar {
             .filter(|(id, _)| self.has_source_hidden_term(id))
             .count();
         let button_label = if hidden_count == 0 {
-            "Sources".to_string()
+            crate::fl!("filter-sources")
         } else {
-            format!("Sources ({hidden_count} hidden)")
+            crate::fl!("filter-sources-hidden", hidden = hidden_count)
         };
         let dark_mode = ui.visuals().dark_mode;
         ui.menu_button(button_label, |ui| {
-            ui.weak(Self::COUNTS_ARE_WHOLE_TIMELINE_CAPTION);
+            ui.weak(Self::counts_are_whole_timeline_caption());
             egui::ScrollArea::vertical()
                 .max_height(Self::DROPDOWN_MAX_HEIGHT)
                 .show(ui, |ui| {
@@ -442,8 +451,8 @@ impl FilterBar {
                             }
                             ui.weak(format!("({count})"));
                             if ui
-                                .small_button("only")
-                                .on_hover_text("Show only this source, hide every other one")
+                                .small_button(crate::fl!("filter-only"))
+                                .on_hover_text(crate::fl!("filter-source-only-help"))
                                 .clicked()
                             {
                                 self.solo_source(id, sources);
@@ -459,7 +468,7 @@ impl FilterBar {
             // the way down just to reach the one button that's most useful
             // exactly when there are many sources to reset at once.
             ui.separator();
-            if ui.button("Show all").clicked() {
+            if ui.button(crate::fl!("filter-show-all")).clicked() {
                 self.show_all_sources(sources);
                 changed = true;
                 ui.close();
@@ -515,9 +524,9 @@ impl FilterBar {
         let active_count = usize::from(self.bound_term_value("after").is_some())
             + usize::from(self.bound_term_value("before").is_some());
         let button_label = if active_count == 0 {
-            "Time range".to_string()
+            crate::fl!("filter-time-range")
         } else {
-            format!("Time range ({active_count})")
+            crate::fl!("filter-time-range-active", count = active_count)
         };
         if ui.button(button_label).clicked() {
             self.time_range_open = true;
@@ -531,12 +540,12 @@ impl FilterBar {
             let should_close = show_dialog_window(
                 &ctx,
                 "peach_time_range_window",
-                "Time range",
+                &crate::fl!("filter-time-range"),
                 [360.0, 170.0],
                 false,
                 |ui, close| {
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut draft.after_enabled, "After");
+                        ui.checkbox(&mut draft.after_enabled, crate::fl!("filter-time-after"));
                         ui.add_enabled(
                             draft.after_enabled,
                             DatePickerButton::new(&mut draft.after_date)
@@ -551,7 +560,7 @@ impl FilterBar {
                         );
                     });
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut draft.before_enabled, "Before");
+                        ui.checkbox(&mut draft.before_enabled, crate::fl!("filter-time-before"));
                         ui.add_enabled(
                             draft.before_enabled,
                             DatePickerButton::new(&mut draft.before_date)
@@ -567,11 +576,11 @@ impl FilterBar {
                     });
                     ui.separator();
                     ui.horizontal(|ui| {
-                        if ui.button("Apply").clicked() {
+                        if ui.button(crate::fl!("common-apply")).clicked() {
                             apply_clicked = true;
                             *close = true;
                         }
-                        if ui.button("Clear").clicked() {
+                        if ui.button(crate::fl!("filter-clear")).clicked() {
                             clear_clicked = true;
                             *close = true;
                         }
@@ -713,19 +722,23 @@ impl FilterBar {
         }
         let mut changed = false;
         ui.horizontal_wrapped(|ui| {
-            ui.label("Active filters:");
-            for (field, label, value) in &active {
+            ui.label(crate::fl!("filter-active-filters"));
+            for (field, value) in &active {
+                let label = column_filter_label(field);
                 if ui
                     .small_button(format!("{label} = {value} ✕"))
-                    .on_hover_text(format!("Remove this filter ({field}={value})"))
+                    .on_hover_text(crate::fl!(
+                        "filter-chip-remove-help",
+                        term = format!("{field}={value}")
+                    ))
                     .clicked()
                 {
                     self.set_single_value_term(field, None);
                     changed = true;
                 }
             }
-            if active.len() > 1 && ui.button("Clear all").clicked() {
-                for (field, _, _) in &active {
+            if active.len() > 1 && ui.button(crate::fl!("filter-clear-all")).clicked() {
+                for (field, _) in &active {
                     self.set_single_value_term(field, None);
                 }
                 changed = true;
@@ -734,24 +747,24 @@ impl FilterBar {
         changed
     }
 
-    /// Every currently-set [`COLUMN_FILTER_FIELDS`] term as
-    /// `(field, label, value)` triples, for [`Self::column_filter_chip_row`].
+    /// Every currently-set [`COLUMN_FILTER_FIELDS`] term as `(field, value)`
+    /// pairs, for [`Self::column_filter_chip_row`].
     /// Scans via the real [`timeline_queries::tokenize`], not
     /// `str::split_whitespace` like every other `*_term`/`*_value` helper
     /// in this file — these values (a process name, a hostname) routinely
     /// contain whitespace where Level/Tag values, `source_id` UUIDs, and
     /// ISO dates never do, so a naive whitespace split would see a quoted
     /// `host="My Host"` term as two separate (and wrong) tokens.
-    fn column_filter_terms(&self) -> Vec<(&'static str, &'static str, String)> {
+    fn column_filter_terms(&self) -> Vec<(&'static str, String)> {
         let tokens = timeline_queries::tokenize(&self.text);
         COLUMN_FILTER_FIELDS
             .iter()
-            .filter_map(|&(field, label)| {
+            .filter_map(|&field| {
                 let prefix = format!("{field}=");
                 tokens
                     .iter()
                     .find(|t| t.starts_with(&prefix))
-                    .map(|t| (field, label, t[prefix.len()..].to_string()))
+                    .map(|t| (field, t[prefix.len()..].to_string()))
             })
             .collect()
     }
@@ -1463,7 +1476,7 @@ mod tests {
         assert_eq!(bar.text(), "host=DESKTOP-ABC123");
         assert_eq!(
             bar.column_filter_terms(),
-            vec![("host", "Host", "DESKTOP-ABC123".to_string())]
+            vec![("host", "DESKTOP-ABC123".to_string())]
         );
     }
 
@@ -1480,7 +1493,7 @@ mod tests {
         assert_eq!(query.terms.len(), 1);
         assert_eq!(
             bar.column_filter_terms(),
-            vec![("process", "Process", "Windows Explorer".to_string())]
+            vec![("process", "Windows Explorer".to_string())]
         );
     }
 
@@ -1517,9 +1530,9 @@ mod tests {
         assert_eq!(
             terms,
             vec![
-                ("host", "Host", "DESKTOP-1".to_string()),
-                ("process", "Process", "explorer.exe".to_string()),
-                ("subsystem", "Subsystem", "com.apple.foo".to_string()),
+                ("host", "DESKTOP-1".to_string()),
+                ("process", "explorer.exe".to_string()),
+                ("subsystem", "com.apple.foo".to_string()),
             ]
         );
 
@@ -1530,8 +1543,8 @@ mod tests {
         assert_eq!(
             remaining,
             vec![
-                ("host", "Host", "DESKTOP-1".to_string()),
-                ("subsystem", "Subsystem", "com.apple.foo".to_string()),
+                ("host", "DESKTOP-1".to_string()),
+                ("subsystem", "com.apple.foo".to_string()),
             ]
         );
     }

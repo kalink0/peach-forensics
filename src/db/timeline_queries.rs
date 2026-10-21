@@ -112,8 +112,8 @@ impl Field {
     }
 }
 
-/// `(grammar keyword, display label)` pairs for every exact-match field
-/// that doesn't already have its own dedicated quick-filter UI
+/// Grammar keywords of every exact-match field that doesn't already have
+/// its own dedicated quick-filter UI
 /// (`ui::filter_bar`'s Level/Tag/Sources dropdowns) — Sourcetype, Host,
 /// Process, `event_id`, Subsystem, Category. Shared by two call sites that
 /// would otherwise drift apart: `ui::timeline_view`'s row context menu
@@ -121,13 +121,15 @@ impl Field {
 /// and `ui::filter_bar`'s "Active filters" chip row (scans the current
 /// query text for which of these are currently set). One list, so adding
 /// a seventh column-filterable field later only means editing this array.
-pub(crate) const COLUMN_FILTER_FIELDS: [(&str, &str); 6] = [
-    ("sourcetype", "Sourcetype"),
-    ("host", "Host"),
-    ("process", "Process"),
-    ("event_id", "Event ID"),
-    ("subsystem", "Subsystem"),
-    ("category", "Category"),
+/// Keywords only: what the UI calls each field is display-layer text
+/// (`ui::timeline_view::column_filter_label`), translated there.
+pub(crate) const COLUMN_FILTER_FIELDS: [&str; 6] = [
+    "sourcetype",
+    "host",
+    "process",
+    "event_id",
+    "subsystem",
+    "category",
 ];
 
 #[derive(Debug, Clone, PartialEq)]

@@ -574,13 +574,12 @@ fn session_migration_warning_text(
     if migration.failed.is_empty() {
         return None;
     }
-    let mut text = format!(
-        "{} item(s) could not be moved from the old sessions folder {} to {}. \
-         They were left unchanged. To open them, close Peach and move them yourself, \
-         or point Settings → Sessions directory at the old folder:",
-        migration.failed.len(),
-        legacy_dir.display(),
-        new_dir.display()
+    let mut text = crate::fl!(
+        "load-session-migration-warning",
+        count = migration.failed.len(),
+        legacy = legacy_dir.display().to_string(),
+        new = new_dir.display().to_string(),
+        settings_path = crate::ui::menu_path::sessions_dir_setting()
     );
     for (path, reason) in &migration.failed {
         text.push_str(&format!("\n• {}: {reason}", path.display()));
@@ -1213,7 +1212,7 @@ impl PeachApp {
         };
         let Ok(dir) = text_config_file::default_user_parsers_dir() else {
             self.format_dialog
-                .set_error("could not determine the per-user parsers directory".to_string());
+                .set_error(crate::fl!("format-no-parsers-dir"));
             return;
         };
         match outcome {
@@ -1739,22 +1738,34 @@ fn find_rule_producing_tag(rule_paths: &[PathBuf], tag_value: &str) -> Option<Pa
 /// row-count-based like `ExportState`'s progress display, since a single
 /// `INSERT ... SELECT` doesn't expose incremental row progress the way
 /// `export.rs`'s chunked CSV/JSON export does.
-fn portable_case_export_stage_label(stage: PortableCaseExportStage) -> &'static str {
+fn portable_case_export_stage_label(stage: PortableCaseExportStage) -> String {
     match stage {
-        PortableCaseExportStage::CopyingTimeline => "copying timeline",
-        PortableCaseExportStage::CopyingSessionData => "copying tags and notes",
-        PortableCaseExportStage::CollectingParserConfigs => "collecting parser configs",
-        PortableCaseExportStage::Hashing => "verifying integrity",
-        PortableCaseExportStage::Packaging => "packaging",
+        PortableCaseExportStage::CopyingTimeline => {
+            crate::fl!("portable-case-stage-copying-timeline")
+        }
+        PortableCaseExportStage::CopyingSessionData => {
+            crate::fl!("portable-case-stage-copying-session-data")
+        }
+        PortableCaseExportStage::CollectingParserConfigs => {
+            crate::fl!("portable-case-stage-collecting-parser-configs")
+        }
+        PortableCaseExportStage::Hashing => crate::fl!("portable-case-stage-verifying-integrity"),
+        PortableCaseExportStage::Packaging => crate::fl!("portable-case-stage-packaging"),
     }
 }
 
-fn portable_case_import_stage_label(stage: PortableCaseImportStage) -> &'static str {
+fn portable_case_import_stage_label(stage: PortableCaseImportStage) -> String {
     match stage {
-        PortableCaseImportStage::Extracting => "extracting",
-        PortableCaseImportStage::VerifyingFormat => "verifying format",
-        PortableCaseImportStage::VerifyingIntegrity => "verifying integrity",
-        PortableCaseImportStage::RegisteringSession => "registering session",
+        PortableCaseImportStage::Extracting => crate::fl!("portable-case-stage-extracting"),
+        PortableCaseImportStage::VerifyingFormat => {
+            crate::fl!("portable-case-stage-verifying-format")
+        }
+        PortableCaseImportStage::VerifyingIntegrity => {
+            crate::fl!("portable-case-stage-verifying-integrity")
+        }
+        PortableCaseImportStage::RegisteringSession => {
+            crate::fl!("portable-case-stage-registering-session")
+        }
     }
 }
 
@@ -2099,9 +2110,10 @@ impl eframe::App for PeachApp {
                                             PortableCaseImportState::Done {
                                                 display_name: self.session_display_name.clone(),
                                             };
-                                        let title = format!(
-                                            "Imported: {}",
-                                            self.session_display_name
+                                        let title = crate::fl!(
+                                            "case-summary-imported-title",
+                                            name = self
+                                                .session_display_name
                                                 .clone()
                                                 .unwrap_or_else(|| self.session_paths.id.clone())
                                         );
@@ -2109,9 +2121,9 @@ impl eframe::App for PeachApp {
                                     }
                                     Err(err) => {
                                         self.portable_case_import_state =
-                                            PortableCaseImportState::Failed(format!(
-                                                "imported, but failed to switch into the new \
-                                                 session: {err:#}"
+                                            PortableCaseImportState::Failed(crate::fl!(
+                                                "load-portable-case-switch-failed",
+                                                error = format!("{err:#}")
                                             ));
                                     }
                                 }
@@ -2152,21 +2164,23 @@ impl eframe::App for PeachApp {
 
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
+                ui.menu_button(crate::fl!("menu-file"), |ui| {
                     if ui
-                        .add_enabled(can_switch_session, egui::Button::new("New session"))
-                        .on_hover_text(
-                            "Starts a fresh, empty session — the one you're leaving stays on \
-                             disk (via Manage sessions...) as long as it has data loaded into \
-                             it.",
+                        .add_enabled(
+                            can_switch_session,
+                            egui::Button::new(crate::fl!("menu-new-session")),
                         )
+                        .on_hover_text(crate::fl!("menu-new-session-help"))
                         .clicked()
                     {
                         ui.close();
                         self.new_session();
                     }
                     if ui
-                        .add_enabled(can_switch_session, egui::Button::new("Manage sessions..."))
+                        .add_enabled(
+                            can_switch_session,
+                            egui::Button::new(crate::fl!("menu-manage-sessions")),
+                        )
                         .clicked()
                     {
                         ui.close();
@@ -2185,11 +2199,8 @@ impl eframe::App for PeachApp {
                             PortableCaseImportState::Running(_)
                         );
                     if ui
-                        .add_enabled(can_export, egui::Button::new("Export (current filter)..."))
-                        .on_hover_text(
-                            "Exports exactly what the timeline is showing right now — clear \
-                             the search box first to export everything.",
-                        )
+                        .add_enabled(can_export, egui::Button::new(crate::fl!("menu-export")))
+                        .on_hover_text(crate::fl!("menu-export-help"))
                         .clicked()
                     {
                         ui.close();
@@ -2211,14 +2222,9 @@ impl eframe::App for PeachApp {
                     if ui
                         .add_enabled(
                             can_export_portable_case,
-                            egui::Button::new("Export portable case..."),
+                            egui::Button::new(crate::fl!("menu-export-portable-case")),
                         )
-                        .on_hover_text(
-                            "Bundles this session (or, with an active search, just the \
-                             matching subset) into a single file another analyst's Peach can \
-                             import — unlike the row export above, raw data, tags, and notes \
-                             all travel intact.",
-                        )
+                        .on_hover_text(crate::fl!("menu-export-portable-case-help"))
                         .clicked()
                     {
                         ui.close();
@@ -2230,12 +2236,9 @@ impl eframe::App for PeachApp {
                     if ui
                         .add_enabled(
                             can_import_portable_case,
-                            egui::Button::new("Import portable case..."),
+                            egui::Button::new(crate::fl!("menu-import-portable-case")),
                         )
-                        .on_hover_text(
-                            "Opens a .peachcase bundle as a brand-new session — the session \
-                             you're in now is left untouched.",
-                        )
+                        .on_hover_text(crate::fl!("menu-import-portable-case-help"))
                         .clicked()
                     {
                         ui.close();
@@ -2252,38 +2255,34 @@ impl eframe::App for PeachApp {
                         ));
                     }
                     ui.separator();
-                    if ui.button("Rule packs...").clicked() {
+                    if ui.button(crate::fl!("menu-rule-packs")).clicked() {
                         self.rule_pack_dialog = RulePackDialog::open();
                         ui.close();
                     }
-                    if ui.button("Settings...").clicked() {
+                    if ui.button(crate::fl!("menu-settings")).clicked() {
                         self.settings_dialog = SettingsDialog::open(self.settings.clone());
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Quit").clicked() {
+                    if ui.button(crate::fl!("menu-quit")).clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
 
-                ui.menu_button("View", |ui| {
-                    ui.menu_button("Theme", |ui| {
+                ui.menu_button(crate::fl!("menu-view"), |ui| {
+                    ui.menu_button(crate::fl!("menu-theme"), |ui| {
                         let mut theme_changed = false;
-                        theme_changed |= ui
-                            .radio_value(&mut self.settings.theme, Theme::System, "System default")
-                            .changed();
-                        theme_changed |= ui
-                            .radio_value(&mut self.settings.theme, Theme::Light, "Light")
-                            .changed();
-                        theme_changed |= ui
-                            .radio_value(&mut self.settings.theme, Theme::Dark, "Dark")
-                            .changed();
-                        theme_changed |= ui
-                            .radio_value(&mut self.settings.theme, Theme::Geek, "Geek")
-                            .changed();
-                        theme_changed |= ui
-                            .radio_value(&mut self.settings.theme, Theme::Rainbow, "Rainbow")
-                            .changed();
+                        for (theme, label) in [
+                            (Theme::System, crate::fl!("theme-system")),
+                            (Theme::Light, crate::fl!("theme-light")),
+                            (Theme::Dark, crate::fl!("theme-dark")),
+                            (Theme::Geek, crate::fl!("theme-geek")),
+                            (Theme::Rainbow, crate::fl!("theme-rainbow")),
+                        ] {
+                            theme_changed |= ui
+                                .radio_value(&mut self.settings.theme, theme, label)
+                                .changed();
+                        }
                         if theme_changed {
                             theme::apply(ui.ctx(), self.settings.theme);
                             if let Err(err) = config::save(&self.settings) {
@@ -2292,38 +2291,35 @@ impl eframe::App for PeachApp {
                         }
                     });
                     ui.separator();
-                    if ui.button("Display timezone...").clicked() {
+                    if ui.button(crate::fl!("menu-display-timezone")).clicked() {
                         self.display_timezone_dialog =
                             DisplayTimezoneDialog::open(self.settings.display_timezone.as_deref());
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Activity Log...").clicked() {
+                    if ui.button(crate::fl!("menu-activity-log")).clicked() {
                         self.open_activity_log_dialog();
                         ui.close();
                     }
                     if ui
                         .add_enabled(
                             self.timeline.total_rows() > 0,
-                            egui::Button::new("Case Summary..."),
+                            egui::Button::new(crate::fl!("menu-case-summary")),
                         )
-                        .on_hover_text(
-                            "Entries per source/sourcetype/level, tag coverage, and the \
-                             covered time range for the whole session.",
-                        )
+                        .on_hover_text(crate::fl!("menu-case-summary-help"))
                         .clicked()
                     {
-                        self.open_case_summary_dialog("Case Summary".to_string());
+                        self.open_case_summary_dialog(crate::fl!("case-summary-title"));
                         ui.close();
                     }
                 });
 
-                ui.menu_button("Help", |ui| {
-                    if ui.button("About Peach...").clicked() {
+                ui.menu_button(crate::fl!("menu-help"), |ui| {
+                    if ui.button(crate::fl!("menu-about")).clicked() {
                         self.about_dialog = AboutDialog::open();
                         ui.close();
                     }
-                    if ui.button("Rules reference...").clicked() {
+                    if ui.button(crate::fl!("menu-rules-reference")).clicked() {
                         self.rules_reference_dialog = RulesReferenceDialog::open();
                         ui.close();
                     }
@@ -2333,9 +2329,10 @@ impl eframe::App for PeachApp {
 
         egui::Panel::top("controls").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(format!(
-                    "Session: {}",
-                    self.session_display_name
+                ui.label(crate::fl!(
+                    "load-session",
+                    name = self
+                        .session_display_name
                         .as_deref()
                         // An empty string means the analyst cleared a
                         // previously-set name (see `session_dialog`'s
@@ -2343,9 +2340,13 @@ impl eframe::App for PeachApp {
                         // raw id as `SessionEntry::label()` uses.
                         .filter(|name| !name.is_empty())
                         .unwrap_or(&self.session_paths.id)
+                        .to_string()
                 ));
                 if ui
-                    .add_enabled(can_switch_session, egui::Button::new("Manage sessions..."))
+                    .add_enabled(
+                        can_switch_session,
+                        egui::Button::new(crate::fl!("menu-manage-sessions")),
+                    )
                     .clicked()
                 {
                     self.open_session_manager_dialog();
@@ -2353,14 +2354,14 @@ impl eframe::App for PeachApp {
             });
 
             ui.horizontal(|ui| {
-                ui.label("Sourcetype:");
+                ui.label(crate::fl!("load-sourcetype"));
                 ui.selectable_value(&mut self.source_kind, SourceKind::Aul, "AUL (.logarchive)");
                 ui.selectable_value(&mut self.source_kind, SourceKind::Evtx, "EVTX");
                 ui.selectable_value(&mut self.source_kind, SourceKind::Journald, "journald");
                 ui.selectable_value(
                     &mut self.source_kind,
                     SourceKind::Text,
-                    "Text (config-based)",
+                    crate::fl!("load-source-text"),
                 );
                 ui.selectable_value(
                     &mut self.source_kind,
@@ -2373,9 +2374,9 @@ impl eframe::App for PeachApp {
                     "Apple Biome (SEGB)",
                 );
                 if !self.pending_cli_sources.is_empty() {
-                    ui.label(format!(
-                        "({} more source(s) queued from --add-source)",
-                        self.pending_cli_sources.len()
+                    ui.label(crate::fl!(
+                        "load-queued-sources",
+                        count = self.pending_cli_sources.len()
                     ));
                 }
             });
@@ -2386,9 +2387,9 @@ impl eframe::App for PeachApp {
                     SourceKind::Aul | SourceKind::IntrusionLog | SourceKind::Biome
                 ) {
                     let folder_label = match self.source_kind {
-                        SourceKind::Aul => "Choose .logarchive folder...",
-                        SourceKind::IntrusionLog => "Choose intrusion-logs folder...",
-                        SourceKind::Biome => "Choose biome/streams folder...",
+                        SourceKind::Aul => crate::fl!("load-choose-logarchive"),
+                        SourceKind::IntrusionLog => crate::fl!("load-choose-intrusion-logs"),
+                        SourceKind::Biome => crate::fl!("load-choose-biome"),
                         _ => unreachable!("handled by the outer matches! above"),
                     };
                     if ui
@@ -2404,22 +2405,21 @@ impl eframe::App for PeachApp {
                     }
                 } else {
                     let (file_label, extension_filter) = match self.source_kind {
-                        SourceKind::Evtx => ("Choose .evtx file(s)...", Some(("EVTX", "evtx"))),
-                        SourceKind::Journald => {
-                            ("Choose .journal file(s)...", Some(("journald", "journal")))
+                        SourceKind::Evtx => {
+                            (crate::fl!("load-choose-evtx"), Some(("EVTX", "evtx")))
                         }
-                        SourceKind::Text => ("Choose log file(s)...", None),
+                        SourceKind::Journald => (
+                            crate::fl!("load-choose-journal"),
+                            Some(("journald", "journal")),
+                        ),
+                        SourceKind::Text => (crate::fl!("load-choose-log-files"), None),
                         SourceKind::Aul | SourceKind::IntrusionLog | SourceKind::Biome => {
                             unreachable!("handled above")
                         }
                     };
                     if ui
                         .add_enabled(self.file_pick_rx.is_none(), egui::Button::new(file_label))
-                        .on_hover_text(
-                            "Select several to queue them as separate sources, loaded one \
-                             after another — each still needs its own \"Load\" click, same as \
-                             a single file",
-                        )
+                        .on_hover_text(crate::fl!("load-choose-files-help"))
                         .clicked()
                     {
                         let mut dialog = rfd::AsyncFileDialog::new();
@@ -2438,12 +2438,9 @@ impl eframe::App for PeachApp {
                     if ui
                         .add_enabled(
                             self.file_pick_rx.is_none(),
-                            egui::Button::new("Choose folder..."),
+                            egui::Button::new(crate::fl!("load-choose-folder")),
                         )
-                        .on_hover_text(
-                            "Recursively loads every matching file found in the folder \
-                             (and its subfolders) as separate sources",
-                        )
+                        .on_hover_text(crate::fl!("load-choose-folder-help"))
                         .clicked()
                     {
                         let task = rfd::AsyncFileDialog::new().pick_folder();
@@ -2464,7 +2461,7 @@ impl eframe::App for PeachApp {
                     if ui
                         .add_enabled(
                             self.file_pick_rx.is_none(),
-                            egui::Button::new("Choose parser config (TOML)..."),
+                            egui::Button::new(crate::fl!("load-choose-parser-config")),
                         )
                         .clicked()
                     {
@@ -2485,23 +2482,20 @@ impl eframe::App for PeachApp {
                     if ui
                         .add_enabled(
                             self.source_path.is_some(),
-                            egui::Button::new("Define format..."),
+                            egui::Button::new(crate::fl!("load-define-format")),
                         )
-                        .on_hover_text(
-                            "Build a parser config with a live preview against this source's \
-                             own lines, instead of hand-editing TOML.",
-                        )
+                        .on_hover_text(crate::fl!("load-define-format-help"))
                         .clicked()
                     {
                         self.open_format_dialog();
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Assume timezone for logs with no timezone of their own:");
+                    ui.label(crate::fl!("settings-source-timezone"));
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.default_source_timezone_input)
                             .desired_width(160.0)
-                            .hint_text("+0100, +02:00, UTC, or Europe/Berlin"),
+                            .hint_text(crate::fl!("load-source-timezone-hint")),
                     );
                     match settings_dialog::parse_timezone_field(&self.default_source_timezone_input)
                     {
@@ -2529,21 +2523,14 @@ impl eframe::App for PeachApp {
                     }
                 })
                 .response
-                .on_hover_text(
-                    "Fallback when a text source's own \"Assume offset\" isn't set. \
-                     Applies immediately.",
-                );
+                .on_hover_text(crate::fl!("load-source-timezone-help"));
             }
 
             ui.horizontal(|ui| {
                 if builtin_rules_button_is_relevant(self.source_kind, &self.loaded_sources)
                     && ui
-                        .button("Built-in rules...")
-                        .on_hover_text(
-                            "Choose exactly which built-in AUL/EVTX rules apply on every load \
-                             and re-tag, regardless of which rule files are also selected \
-                             below. Every built-in rule is enabled by default.",
-                        )
+                        .button(crate::fl!("load-builtin-rules"))
+                        .on_hover_text(crate::fl!("load-builtin-rules-help"))
                         .clicked()
                 {
                     self.builtin_rules_dialog = BuiltinRulesDialog::open();
@@ -2552,7 +2539,7 @@ impl eframe::App for PeachApp {
                 if ui
                     .add_enabled(
                         self.file_pick_rx.is_none(),
-                        egui::Button::new("Choose tagging rules (TOML, optional)..."),
+                        egui::Button::new(crate::fl!("load-choose-rules")),
                     )
                     .clicked()
                 {
@@ -2572,9 +2559,9 @@ impl eframe::App for PeachApp {
                     }));
                 }
                 if self.rule_paths.is_empty() {
-                    ui.label("(no extra rule files selected)");
+                    ui.label(crate::fl!("load-no-rule-files"));
                 } else {
-                    ui.label(format!("{} rule file(s) selected", self.rule_paths.len()));
+                    ui.label(crate::fl!("load-rule-files", count = self.rule_paths.len()));
                 }
 
                 let can_retag = !matches!(self.load_state, LoadState::Loading { .. })
@@ -2590,11 +2577,8 @@ impl eframe::App for PeachApp {
                     && (!self.rule_paths.is_empty() || !self.enabled_builtin_rules.is_empty())
                     && self.timeline.total_rows() > 0;
                 if ui
-                    .add_enabled(can_retag, egui::Button::new("Re-tag now"))
-                    .on_hover_text(
-                        "Re-evaluate the selected rules against everything already loaded, \
-                         replacing import_tags",
-                    )
+                    .add_enabled(can_retag, egui::Button::new(crate::fl!("load-retag")))
+                    .on_hover_text(crate::fl!("load-retag-help"))
                     .clicked()
                 {
                     self.start_retag();
@@ -2603,13 +2587,13 @@ impl eframe::App for PeachApp {
                     RetagState::Idle => {}
                     RetagState::Running => {
                         ui.spinner();
-                        ui.label("Re-tagging...");
+                        ui.label(crate::fl!("load-retagging"));
                     }
                     RetagState::Done {
                         applied,
                         tags_by_rule,
                     } => {
-                        let response = ui.label(format!("Re-tag applied {applied} tags"));
+                        let response = ui.label(crate::fl!("load-retag-done", count = *applied));
                         if !tags_by_rule.is_empty() {
                             response.on_hover_ui(|ui| {
                                 let mut rules: Vec<(&String, &usize)> =
@@ -2622,7 +2606,10 @@ impl eframe::App for PeachApp {
                         }
                     }
                     RetagState::Failed(err) => {
-                        ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            crate::fl!("load-error", error = err.clone()),
+                        );
                     }
                 }
             });
@@ -2632,17 +2619,21 @@ impl eframe::App for PeachApp {
                 ExportState::Running { rows_written, .. } => {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(format!("Exporting... {rows_written} rows so far"));
+                        ui.label(crate::fl!("load-exporting", rows = *rows_written));
                     });
                 }
                 ExportState::Done { rows_written, path } => {
-                    ui.label(format!(
-                        "Export complete: {rows_written} rows to {}",
-                        path.display()
+                    ui.label(crate::fl!(
+                        "load-export-done",
+                        rows = *rows_written,
+                        path = path.display().to_string()
                     ));
                 }
                 ExportState::Failed(err) => {
-                    ui.colored_label(egui::Color32::RED, format!("Export failed: {err}"));
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        crate::fl!("load-export-failed", error = err.clone()),
+                    );
                 }
             }
 
@@ -2651,24 +2642,24 @@ impl eframe::App for PeachApp {
                 PortableCaseExportState::Running { stage, .. } => {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(format!(
-                            "Exporting portable case... {}",
-                            portable_case_export_stage_label(*stage)
+                        ui.label(crate::fl!(
+                            "load-portable-case-exporting",
+                            stage = portable_case_export_stage_label(*stage)
                         ));
                     });
                 }
                 PortableCaseExportState::Done { summary, path } => {
-                    ui.label(format!(
-                        "Portable case complete: {} entries, {} tags, to {}",
-                        summary.entries_written,
-                        summary.tags_written,
-                        path.display()
+                    ui.label(crate::fl!(
+                        "load-portable-case-export-done",
+                        entries = summary.entries_written,
+                        tags = summary.tags_written,
+                        path = path.display().to_string()
                     ));
                 }
                 PortableCaseExportState::Failed(err) => {
                     ui.colored_label(
                         egui::Color32::RED,
-                        format!("Portable case export failed: {err}"),
+                        crate::fl!("load-portable-case-export-failed", error = err.clone()),
                     );
                 }
             }
@@ -2678,22 +2669,25 @@ impl eframe::App for PeachApp {
                 PortableCaseImportState::Running(stage) => {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(format!(
-                            "Importing portable case... {}",
-                            portable_case_import_stage_label(*stage)
+                        ui.label(crate::fl!(
+                            "load-portable-case-importing",
+                            stage = portable_case_import_stage_label(*stage)
                         ));
                     });
                 }
                 PortableCaseImportState::Done { display_name } => {
-                    ui.label(format!(
-                        "Portable case imported and opened: {}",
-                        display_name.as_deref().unwrap_or(&self.session_paths.id)
+                    ui.label(crate::fl!(
+                        "load-portable-case-import-done",
+                        name = display_name
+                            .as_deref()
+                            .unwrap_or(&self.session_paths.id)
+                            .to_string()
                     ));
                 }
                 PortableCaseImportState::Failed(err) => {
                     ui.colored_label(
                         egui::Color32::RED,
-                        format!("Portable case import failed: {err}"),
+                        crate::fl!("load-portable-case-import-failed", error = err.clone()),
                     );
                 }
             }
@@ -2702,7 +2696,7 @@ impl eframe::App for PeachApp {
                 let mut dismiss = false;
                 ui.horizontal(|ui| {
                     ui.colored_label(egui::Color32::from_rgb(230, 160, 0), warning);
-                    dismiss = ui.button("Dismiss").clicked();
+                    dismiss = ui.button(crate::fl!("load-dismiss")).clicked();
                 });
                 if dismiss {
                     self.session_migration_warning = None;
@@ -2726,31 +2720,22 @@ impl eframe::App for PeachApp {
                 !matches!(self.load_state, LoadState::Loading { .. }),
                 egui::Checkbox::new(
                     &mut self.skip_bad_records,
-                    "Skip bad records instead of failing",
+                    crate::fl!("load-skip-bad-records"),
                 ),
             )
-            .on_hover_text(
-                "If a line/record can't be parsed, skip it and keep going instead of aborting \
-                 the whole file. Off by default — a bad record normally stops the file's load \
-                 entirely, so nothing is ever silently incomplete. When on, how many records \
-                 were skipped (and why) is recorded in the Activity Log, per file.",
-            );
+            .on_hover_text(crate::fl!("load-skip-bad-records-help"));
 
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(can_load, egui::Button::new("Load"))
+                    .add_enabled(can_load, egui::Button::new(crate::fl!("load-load")))
                     .clicked()
                 {
                     self.start_load();
                 }
                 if matches!(self.load_state, LoadState::Loading { .. })
                     && ui
-                        .button("Abort")
-                        .on_hover_text(
-                            "Stops after the file currently being parsed finishes (or, for a \
-                             large single file, at the next internal checkpoint) — whatever's \
-                             already inserted stays; nothing gets rolled back.",
-                        )
+                        .button(crate::fl!("load-abort"))
+                        .on_hover_text(crate::fl!("load-abort-help"))
                         .clicked()
                     && let Some(cancel) = &self.load_cancel
                 {
@@ -2773,17 +2758,17 @@ impl eframe::App for PeachApp {
                         if *bytes_total > 0 {
                             let fraction = *bytes_done as f32 / *bytes_total as f32;
                             ui.add(egui::ProgressBar::new(fraction).desired_width(200.0).text(
-                                format!(
-                                    "Parsing: {:.1} / {:.1} MB",
-                                    *bytes_done as f64 / 1_000_000.0,
-                                    *bytes_total as f64 / 1_000_000.0
+                                crate::fl!(
+                                    "load-parsing-progress",
+                                    done = format!("{:.1}", *bytes_done as f64 / 1_000_000.0),
+                                    total = format!("{:.1}", *bytes_total as f64 / 1_000_000.0)
                                 ),
                             ));
                         }
                         if *inserted_so_far > 0 {
-                            ui.label(format!("Loading... {inserted_so_far} entries so far"));
+                            ui.label(crate::fl!("load-loading-entries", count = *inserted_so_far));
                         } else {
-                            ui.label("Loading...");
+                            ui.label(crate::fl!("load-loading"));
                         }
                     }
                     LoadState::Done {
@@ -2794,28 +2779,29 @@ impl eframe::App for PeachApp {
                         records_skipped,
                         cancelled,
                     } => {
-                        ui.label(format!(
-                            "Loaded {inserted} entries, applied {tags_applied} tags in {:.1}s",
-                            elapsed.as_secs_f64()
+                        ui.label(crate::fl!(
+                            "load-done",
+                            entries = *inserted,
+                            tags = *tags_applied,
+                            seconds = format!("{:.1}", elapsed.as_secs_f64())
                         ));
                         if *cancelled {
-                            ui.colored_label(egui::Color32::from_rgb(230, 160, 0), "Aborted");
+                            ui.colored_label(
+                                egui::Color32::from_rgb(230, 160, 0),
+                                crate::fl!("load-aborted"),
+                            );
                         }
                         if *records_skipped > 0 {
                             ui.colored_label(
                                 egui::Color32::from_rgb(230, 160, 0),
-                                format!(
-                                    "{records_skipped} record(s) skipped (skip bad records was on)"
-                                ),
+                                crate::fl!("load-records-skipped", count = *records_skipped),
                             )
-                            .on_hover_text(
-                                "See Activity Log for the per-file breakdown and reasons.",
-                            );
+                            .on_hover_text(crate::fl!("load-records-skipped-help"));
                         }
                         if !skipped.is_empty() {
                             ui.colored_label(
                                 egui::Color32::from_rgb(230, 160, 0),
-                                format!("{} file(s) skipped", skipped.len()),
+                                crate::fl!("load-files-skipped", count = skipped.len()),
                             )
                             .on_hover_ui(|ui| {
                                 for file in skipped {
@@ -2825,7 +2811,10 @@ impl eframe::App for PeachApp {
                         }
                     }
                     LoadState::Failed(err) => {
-                        ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            crate::fl!("load-error", error = err.clone()),
+                        );
                     }
                 }
             });
@@ -4117,7 +4106,8 @@ mod tests {
             failed: vec![(legacy.join("session-b"), "access denied".to_string())],
         };
         let text = session_migration_warning_text(&partial, legacy, new).unwrap();
-        assert!(text.starts_with("1 item(s) could not be moved"));
+        assert!(text.starts_with("1 item could not be moved"));
+        assert!(text.contains("Settings \u{2192} Sessions directory"));
         assert!(text.contains(&legacy.display().to_string()));
         assert!(text.contains(&format!(
             "{}: access denied",
