@@ -32,8 +32,8 @@ use crate::tagging::pack_bundle;
 use crate::tagging::rule_file;
 use crate::ui::dialog_window::show_dialog_window;
 use crate::ui::rule_list::{
-    RuleRow, SortColumn, StatusFilter, ViewState, search_row, sort_header, source_dropdown,
-    visible_indices,
+    RULE_PACKS_MENU_PATH, RuleRow, SortColumn, StatusFilter, ViewState, search_row, sort_header,
+    source_dropdown, visible_indices,
 };
 
 /// Enables or disables exactly the rules at `indices` (what the table
@@ -97,7 +97,7 @@ impl BuiltinRulesDialog {
             close = show_dialog_window(
                 ctx,
                 "peach_builtin_rules_dialog",
-                "Built-in Rules",
+                &crate::fl!("builtin-rules-title"),
                 [900.0, 640.0],
                 true,
                 |ui, close| {
@@ -110,29 +110,40 @@ impl BuiltinRulesDialog {
                     // own space up front regardless of source order.
                     egui::Panel::bottom("peach_builtin_rules_dialog_bottom_bar").show(ui, |ui| {
                         ui.add_space(4.0);
-                        if ui.button("Close").clicked() {
+                        if ui.button(crate::fl!("common-close")).clicked() {
                             *close = true;
                         }
                         ui.add_space(4.0);
                     });
 
-                    match active_pack_version {
-                        Some(version) => ui.label(format!(
-                            "Rule pack version {version} (downloaded via File \u{2192} Rule \
-                             packs...). Checked rules apply on every load and re-tag."
+                    match *active_pack_version {
+                        Some(version) => ui.label(crate::fl!(
+                            "builtin-rules-pack-active",
+                            version = version,
+                            menu_path = RULE_PACKS_MENU_PATH
                         )),
-                        None => ui.label(
-                            "Built-in baseline. Checked rules apply on every load and re-tag.",
-                        ),
+                        None => ui.label(crate::fl!("builtin-rules-baseline")),
                     };
 
                     search_row(ui, view, focus_search);
                     ui.horizontal(|ui| {
                         source_dropdown(ui, rows, view);
-                        ui.label("Show:");
-                        ui.selectable_value(&mut view.status, StatusFilter::All, "All");
-                        ui.selectable_value(&mut view.status, StatusFilter::Enabled, "Enabled");
-                        ui.selectable_value(&mut view.status, StatusFilter::Disabled, "Disabled");
+                        ui.label(crate::fl!("builtin-rules-show"));
+                        ui.selectable_value(
+                            &mut view.status,
+                            StatusFilter::All,
+                            crate::fl!("builtin-rules-show-all"),
+                        );
+                        ui.selectable_value(
+                            &mut view.status,
+                            StatusFilter::Enabled,
+                            crate::fl!("builtin-rules-show-enabled"),
+                        );
+                        ui.selectable_value(
+                            &mut view.status,
+                            StatusFilter::Disabled,
+                            crate::fl!("builtin-rules-show-disabled"),
+                        );
                     });
                     let visible = visible_indices(rows, Some(enabled), view);
                     bulk_toolbar(ui, rows, &visible, enabled);
@@ -140,7 +151,7 @@ impl BuiltinRulesDialog {
 
                     if visible.is_empty() {
                         ui.add_space(6.0);
-                        ui.label("No rules match the current filters.");
+                        ui.label(crate::fl!("rule-list-no-match"));
                     } else {
                         rule_table(ui, rows, &visible, enabled, view);
                     }
@@ -167,9 +178,12 @@ fn bulk_toolbar(
         if ui
             .add_enabled(
                 !visible.is_empty(),
-                egui::Button::new(format!("Enable shown ({})", visible.len())),
+                egui::Button::new(crate::fl!(
+                    "builtin-rules-enable-shown",
+                    count = visible.len()
+                )),
             )
-            .on_hover_text("Enable every rule the table currently lists")
+            .on_hover_text(crate::fl!("builtin-rules-enable-shown-help"))
             .clicked()
         {
             set_enabled(enabled, rows, visible, true);
@@ -177,19 +191,22 @@ fn bulk_toolbar(
         if ui
             .add_enabled(
                 !visible.is_empty(),
-                egui::Button::new(format!("Disable shown ({})", visible.len())),
+                egui::Button::new(crate::fl!(
+                    "builtin-rules-disable-shown",
+                    count = visible.len()
+                )),
             )
-            .on_hover_text("Disable every rule the table currently lists")
+            .on_hover_text(crate::fl!("builtin-rules-disable-shown-help"))
             .clicked()
         {
             set_enabled(enabled, rows, visible, false);
         }
         let enabled_total = rows.iter().filter(|r| enabled.contains(&r.name)).count();
-        ui.weak(format!(
-            "{} of {} rules shown \u{00B7} {} enabled",
-            visible.len(),
-            rows.len(),
-            enabled_total
+        ui.weak(crate::fl!(
+            "builtin-rules-shown-count",
+            shown = visible.len(),
+            total = rows.len(),
+            enabled = enabled_total
         ));
     });
 }
@@ -219,16 +236,31 @@ fn rule_table(
                 sort_header(ui, "\u{2713}", SortColumn::Enabled, view);
             });
             header.col(|ui| {
-                sort_header(ui, "Source", SortColumn::Source, view);
+                sort_header(
+                    ui,
+                    &crate::fl!("rule-list-column-source"),
+                    SortColumn::Source,
+                    view,
+                );
             });
             header.col(|ui| {
-                sort_header(ui, "Rule", SortColumn::Rule, view);
+                sort_header(
+                    ui,
+                    &crate::fl!("rule-list-column-rule"),
+                    SortColumn::Rule,
+                    view,
+                );
             });
             header.col(|ui| {
-                sort_header(ui, "Tag", SortColumn::Tag, view);
+                sort_header(
+                    ui,
+                    &crate::fl!("rule-list-column-tag"),
+                    SortColumn::Tag,
+                    view,
+                );
             });
             header.col(|ui| {
-                ui.strong("Description");
+                ui.strong(crate::fl!("rule-list-column-description"));
             });
         })
         .body(|body| {

@@ -70,13 +70,46 @@ pub struct AppliedInfo {
     rule_versions: pack_diff::RuleVersions,
 }
 
+/// Where a candidate bundle came from — shown in the preview header so it's
+/// clear what is being reviewed. Kept as data rather than a finished
+/// sentence: the download path builds it on a worker thread, and the text
+/// is only put together in the UI language when it's shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateSource {
+    Dropped { file_name: String },
+    Browsed { file_name: String },
+    Downloaded { tag_name: String },
+}
+
+impl CandidateSource {
+    fn dropped(file_name: String) -> Self {
+        Self::Dropped { file_name }
+    }
+
+    fn browsed(file_name: String) -> Self {
+        Self::Browsed { file_name }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Dropped { file_name } => {
+                crate::fl!("rule-packs-source-dropped", file = file_name.clone())
+            }
+            Self::Browsed { file_name } => {
+                crate::fl!("rule-packs-source-browsed", file = file_name.clone())
+            }
+            Self::Downloaded { tag_name } => {
+                crate::fl!("rule-packs-source-downloaded", tag = tag_name.clone())
+            }
+        }
+    }
+}
+
 /// A verified candidate bundle staged for review, not yet applied.
 pub struct Candidate {
     bundle: LoadedPackBundle,
     diff: RulePackDiff,
-    /// "dropped file" vs. "downloaded update vN" — shown in the preview
-    /// header so it's clear where this candidate came from.
-    source_label: String,
+    source: CandidateSource,
 }
 
 pub enum Stage {
@@ -98,7 +131,7 @@ pub enum WorkOutcome {
     CheckedForUpdate(Result<Option<AvailableUpdate>, String>),
     Verified {
         result: Result<LoadedPackBundle, String>,
-        source_label: String,
+        source: CandidateSource,
     },
     Applied(Result<u32, String>),
 }
@@ -176,13 +209,13 @@ impl RulePackDialog {
             close = show_dialog_window(
                 ctx,
                 "peach_rule_pack_dialog",
-                "Rule Packs",
+                &crate::fl!("rule-packs-title"),
                 [640.0, 520.0],
                 true,
                 |ui, close| {
                     egui::Panel::bottom("peach_rule_pack_dialog_bottom_bar").show(ui, |ui| {
                         ui.add_space(4.0);
-                        if ui.button("Close").clicked() {
+                        if ui.button(crate::fl!("common-close")).clicked() {
                             *close = true;
                         }
                         ui.add_space(4.0);
@@ -236,7 +269,7 @@ impl RulePackDialog {
         if rx.is_some() {
             return;
         }
-        start_verify_file(path, "browsed file", stage, rx, error);
+        start_verify_file(path, CandidateSource::browsed, stage, rx, error);
     }
 
     /// Drains whatever background work has finished since the last frame
@@ -271,14 +304,14 @@ impl RulePackDialog {
             }
             Ok(WorkOutcome::Verified {
                 result: Ok(bundle),
-                source_label,
+                source,
             }) => {
                 let diff =
                     pack_diff::diff(&applied.rule_versions, &bundle.manifest.rule_versions());
                 **stage = Stage::Ready(Candidate {
                     bundle,
                     diff,
-                    source_label,
+                    source,
                 });
                 *rx = None;
             }
@@ -308,7 +341,10 @@ impl RulePackDialog {
 fn render_header(ui: &mut egui::Ui, applied: &AppliedInfo) {
     match applied.pack_version {
         Some(version) => {
-            ui.label(format!("Active rule pack: downloaded, version {version}"));
+            ui.label(crate::fl!(
+                "rule-packs-active-downloaded",
+                version = version
+            ));
         }
         None => {
             // No downloaded pack has ever been applied — there's no
@@ -320,18 +356,16 @@ fn render_header(ui: &mut egui::Ui, applied: &AppliedInfo) {
             // nightly) is offered instead — directly comparable to a
             // downloaded pack's own `released_at` date, unlike a bare
             // Peach version number on its own.
-            ui.label(format!(
-                "Active rule pack: built-in baseline — Peach {}, built {}. No pack \
-                 version number to compare; check the build date above against a \
-                 rule pack's release date to see which is more current.",
-                env!("CARGO_PKG_VERSION"),
-                env!("PEACH_BUILD_DATE"),
+            ui.label(crate::fl!(
+                "rule-packs-active-baseline",
+                version = env!("CARGO_PKG_VERSION"),
+                date = env!("PEACH_BUILD_DATE")
             ));
         }
     }
-    ui.label(format!(
-        "{} rules currently active.",
-        applied.rule_versions.len()
+    ui.label(crate::fl!(
+        "rule-packs-rule-count",
+        count = applied.rule_versions.len()
     ));
 }
 
@@ -361,15 +395,17 @@ fn render_drop_zone(
                         // Wayland, not this dialog's bug to fix, which is
                         // exactly why "Browse..." exists as a
                         // works-everywhere alternative right next to it.
-                        "Drag a peach-rules-vN.zip bundle here (or use Browse — \
-                         drag-and-drop isn't supported on every Linux desktop)"
+                        crate::fl!("rule-packs-drop-hint")
                     } else {
-                        "Drag-and-drop unavailable: couldn't determine the rule pack directory"
+                        crate::fl!("rule-packs-drop-unavailable")
                     });
                 });
                 if can_apply
                     && ui
-                        .add_enabled(!file_pick_in_flight, egui::Button::new("Browse..."))
+                        .add_enabled(
+                            !file_pick_in_flight,
+                            egui::Button::new(crate::fl!("rule-packs-browse")),
+                        )
                         .clicked()
                 {
                     *outcome = Some(RulePackDialogOutcome::BrowseRequested);
@@ -393,7 +429,7 @@ fn handle_drop(
     let Some(path) = dropped.into_iter().find_map(|f| f.path) else {
         return;
     };
-    start_verify_file(path, "dropped file", stage, rx, error);
+    start_verify_file(path, CandidateSource::dropped, stage, rx, error);
 }
 
 /// Shared by both ways a local bundle file reaches this dialog — dropped
@@ -401,10 +437,10 @@ fn handle_drop(
 /// Wayland as of winit 0.30 — see the module doc) and browsed
 /// (`RulePackDialog::begin_verify_file`, via `app.rs`'s shared native file
 /// dialog, which works everywhere `rfd`/`xdg-desktop-portal` does). Same
-/// verification path either way — only `source_label` differs.
+/// verification path either way — only the [`CandidateSource`] differs.
 fn start_verify_file(
     path: PathBuf,
-    source_kind: &str,
+    source_kind: fn(String) -> CandidateSource,
     stage: &mut Stage,
     rx: &mut Option<mpsc::Receiver<WorkOutcome>>,
     error: &mut Option<String>,
@@ -414,9 +450,7 @@ fn start_verify_file(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
     if path.extension().and_then(|e| e.to_str()) != Some("zip") {
-        *error = Some(format!(
-            "{file_name} isn't a .zip file — expected a rule pack bundle"
-        ));
+        *error = Some(crate::fl!("rule-packs-not-a-zip", file = file_name));
         return;
     }
 
@@ -424,13 +458,10 @@ fn start_verify_file(
     *rx = Some(receiver);
     *stage = Stage::VerifyingFile(file_name.clone());
     *error = None;
-    let source_label = format!("{source_kind}: {file_name}");
+    let source = source_kind(file_name);
     std::thread::spawn(move || {
         let result = pack_bundle::load_pack_bundle(&path).map_err(|err| format!("{err:#}"));
-        let _ = tx.send(WorkOutcome::Verified {
-            result,
-            source_label,
-        });
+        let _ = tx.send(WorkOutcome::Verified { result, source });
     });
 }
 
@@ -445,72 +476,71 @@ fn render_stage(
     match stage {
         Stage::Idle => {
             ui.horizontal(|ui| {
-                if ui.button("Check for updates...").clicked() {
+                if ui.button(crate::fl!("rule-packs-check")).clicked() {
                     start_check(applied, stage, rx);
                 }
-                ui.weak("Network request to GitHub — only runs when you click this.");
+                ui.weak(crate::fl!("rule-packs-check-help"));
             });
         }
         Stage::CheckingForUpdate => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Checking GitHub for a newer rule pack...");
+                ui.label(crate::fl!("rule-packs-checking"));
             });
         }
         Stage::NoUpdateAvailable => {
-            ui.label("No newer rule pack available.");
-            if ui.button("Check again").clicked() {
+            ui.label(crate::fl!("rule-packs-no-update"));
+            if ui.button(crate::fl!("rule-packs-check-again")).clicked() {
                 start_check(applied, stage, rx);
             }
         }
         Stage::UpdateAvailable(update) => {
-            ui.label(format!(
-                "Rule pack version {} is available ({}).",
-                update.pack_version, update.tag_name
+            ui.label(crate::fl!(
+                "rule-packs-update-available",
+                version = update.pack_version,
+                tag = update.tag_name.clone()
             ));
-            if ui.button("Download and verify").clicked() {
+            if ui.button(crate::fl!("rule-packs-download")).clicked() {
                 start_download(update.clone(), stage, rx);
             }
         }
         Stage::DownloadingAndVerifying(update) => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(format!(
-                    "Downloading and verifying version {}...",
-                    update.pack_version
+                ui.label(crate::fl!(
+                    "rule-packs-downloading",
+                    version = update.pack_version
                 ));
             });
         }
         Stage::VerifyingFile(name) => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(format!("Verifying {name}..."));
+                ui.label(crate::fl!("rule-packs-verifying", file = name.clone()));
             });
         }
         Stage::Ready(candidate) => {
             render_preview(ui, candidate);
             ui.separator();
-            if ui.button("Apply").clicked() {
+            if ui.button(crate::fl!("common-apply")).clicked() {
                 start_apply(stage, applied_pack_dir.clone(), rx);
             }
         }
         Stage::Applying => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Applying rule pack...");
+                ui.label(crate::fl!("rule-packs-applying"));
             });
         }
         Stage::Applied { pack_version } => {
-            ui.label(format!("Applied rule pack version {pack_version}."));
-            ui.label(
-                "Already-loaded sources keep whatever tags they have until re-tagged \
-                 — new rules apply automatically to anything loaded from now on.",
-            );
+            let version: u32 = *pack_version;
+            ui.label(crate::fl!("rule-packs-applied", version = version));
+            ui.label(crate::fl!("rule-packs-applied-help"));
             ui.horizontal(|ui| {
-                if ui.button("Re-tag now").clicked() {
+                if ui.button(crate::fl!("rule-packs-retag-now")).clicked() {
                     *outcome = Some(RulePackDialogOutcome::RetagRequested);
                 }
-                if ui.button("Not now").clicked() {
+                if ui.button(crate::fl!("rule-packs-not-now")).clicked() {
                     *stage = Stage::Idle;
                 }
             });
@@ -519,31 +549,41 @@ fn render_stage(
 }
 
 fn render_preview(ui: &mut egui::Ui, candidate: &Candidate) {
-    ui.label(format!(
-        "Reviewing: {} (pack version {})",
-        candidate.source_label, candidate.bundle.manifest.pack.pack_version
+    ui.label(crate::fl!(
+        "rule-packs-reviewing",
+        source = candidate.source.label(),
+        version = candidate.bundle.manifest.pack.pack_version
     ));
     if candidate.diff.is_empty() {
-        ui.label("No changes relative to what's currently active.");
+        ui.label(crate::fl!("rule-packs-no-changes"));
         return;
     }
     egui::ScrollArea::vertical()
         .max_height(240.0)
         .show(ui, |ui| {
             if !candidate.diff.new.is_empty() {
-                ui.strong(format!("New ({})", candidate.diff.new.len()));
+                ui.strong(crate::fl!(
+                    "rule-packs-diff-new",
+                    count = candidate.diff.new.len()
+                ));
                 for name in &candidate.diff.new {
                     ui.label(format!("  + {name}"));
                 }
             }
             if !candidate.diff.modified.is_empty() {
-                ui.strong(format!("Modified ({})", candidate.diff.modified.len()));
+                ui.strong(crate::fl!(
+                    "rule-packs-diff-modified",
+                    count = candidate.diff.modified.len()
+                ));
                 for name in &candidate.diff.modified {
                     ui.label(format!("  ~ {name}"));
                 }
             }
             if !candidate.diff.removed.is_empty() {
-                ui.strong(format!("Removed ({})", candidate.diff.removed.len()));
+                ui.strong(crate::fl!(
+                    "rule-packs-diff-removed",
+                    count = candidate.diff.removed.len()
+                ));
                 for name in &candidate.diff.removed {
                     ui.colored_label(egui::Color32::from_rgb(200, 120, 0), format!("  - {name}"));
                 }
@@ -579,7 +619,9 @@ fn start_download(
         let result = download_and_verify(&update);
         let _ = tx.send(WorkOutcome::Verified {
             result,
-            source_label: format!("downloaded update: {}", update.tag_name),
+            source: CandidateSource::Downloaded {
+                tag_name: update.tag_name.clone(),
+            },
         });
     });
 }
@@ -764,7 +806,7 @@ mod tests {
         };
         tx.send(WorkOutcome::Verified {
             result: Ok(bundle),
-            source_label: "dropped file: peach-rules-v5.zip".to_string(),
+            source: CandidateSource::dropped("peach-rules-v5.zip".to_string()),
         })
         .unwrap();
 
@@ -791,7 +833,7 @@ mod tests {
         *slot = Some(rx);
         tx.send(WorkOutcome::Verified {
             result: Err("integrity check failed".to_string()),
-            source_label: "dropped file: bad.zip".to_string(),
+            source: CandidateSource::dropped("bad.zip".to_string()),
         })
         .unwrap();
 
@@ -854,6 +896,21 @@ mod tests {
             unreachable!()
         };
         assert!(rx.is_none());
+    }
+
+    #[test]
+    fn the_candidate_source_is_named_with_its_file_or_release() {
+        assert_eq!(
+            CandidateSource::browsed("peach-rules-v5.zip".to_string()).label(),
+            "browsed file: peach-rules-v5.zip"
+        );
+        assert_eq!(
+            CandidateSource::Downloaded {
+                tag_name: "peach-rules-v5".to_string()
+            }
+            .label(),
+            "downloaded update: peach-rules-v5"
+        );
     }
 
     #[test]

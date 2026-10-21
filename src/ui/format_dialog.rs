@@ -147,221 +147,215 @@ impl FormatDialog {
                 default_source_timezone,
                 error,
             } = state.as_mut();
-            close =
-                show_dialog_window(
-                    ctx,
-                    "peach_format_dialog",
-                    "Define Text Format",
-                    [760.0, 620.0],
-                    true,
-                    |ui, close| {
-                        // Pinned to the bottom *before* everything else below —
-                        // same reasoning as the Activity Log dialog's own
-                        // "Close" button fix: `Panel::bottom` reserves its space
-                        // up front regardless of source order, so Save/Save &
-                        // Use/Cancel stay visible even when the form fields plus
-                        // the live preview add up to more than the window's
-                        // current height, instead of being pushed below the
-                        // visible area with no way to reach them short of
-                        // manually resizing the window.
-                        egui::Panel::bottom("peach_format_dialog_bottom_bar").show(ui, |ui| {
-                            ui.add_space(4.0);
-                            if let Some(message) = error {
-                                ui.colored_label(
-                                    egui::Color32::from_rgb(220, 80, 80),
-                                    message.as_str(),
-                                );
+            close = show_dialog_window(
+                ctx,
+                "peach_format_dialog",
+                &crate::fl!("format-title"),
+                [760.0, 620.0],
+                true,
+                |ui, close| {
+                    // Pinned to the bottom *before* everything else below —
+                    // same reasoning as the Activity Log dialog's own
+                    // "Close" button fix: `Panel::bottom` reserves its space
+                    // up front regardless of source order, so Save/Save &
+                    // Use/Cancel stay visible even when the form fields plus
+                    // the live preview add up to more than the window's
+                    // current height, instead of being pushed below the
+                    // visible area with no way to reach them short of
+                    // manually resizing the window.
+                    egui::Panel::bottom("peach_format_dialog_bottom_bar").show(ui, |ui| {
+                        ui.add_space(4.0);
+                        if let Some(message) = error {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(220, 80, 80),
+                                message.as_str(),
+                            );
+                        }
+                        ui.horizontal(|ui| {
+                            let saveable = draft.is_saveable();
+                            if ui
+                                .add_enabled(saveable, egui::Button::new(crate::fl!("common-save")))
+                                .clicked()
+                            {
+                                outcome = Some(FormatDialogOutcome::Save(draft.clone()));
                             }
+                            // Deliberately doesn't set `close` here, unlike
+                            // every other dialog's single-shot action
+                            // button — if the save fails, `app.rs` reports
+                            // it via `set_error` instead of closing, so the
+                            // failure stays visible rather than the dialog
+                            // just vanishing. `app.rs` closes this
+                            // explicitly once the write actually succeeds.
+                            if ui
+                                .add_enabled(
+                                    saveable,
+                                    egui::Button::new(crate::fl!("format-save-and-use")),
+                                )
+                                .clicked()
+                            {
+                                outcome = Some(FormatDialogOutcome::SaveAndUse(draft.clone()));
+                            }
+                            if ui.button(crate::fl!("common-cancel")).clicked() {
+                                *close = true;
+                            }
+                        });
+                        ui.add_space(4.0);
+                    });
+
+                    // Whatever's left above the pinned bottom bar — wrapped
+                    // in its own scroll area (distinct from the live
+                    // preview's own nested one below) so the form fields
+                    // themselves stay reachable by scrolling too, not just
+                    // the preview list, on a window short enough that even
+                    // the fields alone don't fit.
+                    egui::ScrollArea::vertical()
+                        .id_salt("format_dialog_form_scroll")
+                        .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                let saveable = draft.is_saveable();
+                                ui.label(crate::fl!("format-saved-configs"));
+                                let selected_name = selected_saved
+                                    .as_ref()
+                                    .and_then(|path| saved.iter().find(|s| &s.path == path))
+                                    .map(|s| s.name.clone())
+                                    .unwrap_or_else(|| crate::fl!("format-select"));
+                                egui::ComboBox::from_id_salt("format_dialog_saved_configs")
+                                    .selected_text(selected_name)
+                                    .show_ui(ui, |ui| {
+                                        for s in saved.iter() {
+                                            ui.selectable_value(
+                                                selected_saved,
+                                                Some(s.path.clone()),
+                                                format!("{} ({})", s.name, s.sourcetype),
+                                            );
+                                        }
+                                    });
                                 if ui
-                                    .add_enabled(saveable, egui::Button::new("Save"))
+                                    .add_enabled(
+                                        selected_saved.is_some(),
+                                        egui::Button::new(crate::fl!("format-load")),
+                                    )
                                     .clicked()
+                                    && let Some(path) = selected_saved.clone()
                                 {
-                                    outcome = Some(FormatDialogOutcome::Save(draft.clone()));
-                                }
-                                // Deliberately doesn't set `close` here, unlike
-                                // every other dialog's single-shot action
-                                // button — if the save fails, `app.rs` reports
-                                // it via `set_error` instead of closing, so the
-                                // failure stays visible rather than the dialog
-                                // just vanishing. `app.rs` closes this
-                                // explicitly once the write actually succeeds.
-                                if ui
-                                    .add_enabled(saveable, egui::Button::new("Save & Use"))
-                                    .clicked()
-                                {
-                                    outcome = Some(FormatDialogOutcome::SaveAndUse(draft.clone()));
-                                }
-                                if ui.button("Cancel").clicked() {
-                                    *close = true;
+                                    outcome = Some(FormatDialogOutcome::Load(path));
                                 }
                             });
-                            ui.add_space(4.0);
-                        });
 
-                        // Whatever's left above the pinned bottom bar — wrapped
-                        // in its own scroll area (distinct from the live
-                        // preview's own nested one below) so the form fields
-                        // themselves stay reachable by scrolling too, not just
-                        // the preview list, on a window short enough that even
-                        // the fields alone don't fit.
-                        egui::ScrollArea::vertical()
-                            .id_salt("format_dialog_form_scroll")
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label("Saved configs:");
-                                    let selected_name = selected_saved
-                                        .as_ref()
-                                        .and_then(|path| saved.iter().find(|s| &s.path == path))
-                                        .map(|s| s.name.clone())
-                                        .unwrap_or_else(|| "— select —".to_string());
-                                    egui::ComboBox::from_id_salt("format_dialog_saved_configs")
-                                        .selected_text(selected_name)
-                                        .show_ui(ui, |ui| {
-                                            for s in saved.iter() {
-                                                ui.selectable_value(
-                                                    selected_saved,
-                                                    Some(s.path.clone()),
-                                                    format!("{} ({})", s.name, s.sourcetype),
-                                                );
-                                            }
-                                        });
-                                    if ui
-                                        .add_enabled(
-                                            selected_saved.is_some(),
-                                            egui::Button::new("Load"),
+                            ui.horizontal(|ui| {
+                                ui.label(crate::fl!("format-builtin-formats"));
+                                let builtins =
+                                    crate::parsers::builtin_text_formats::builtin_text_formats();
+                                let selected_name = selected_builtin
+                                    .and_then(|toml| builtins.iter().find(|f| f.toml == toml))
+                                    .map(|f| f.name.clone())
+                                    .unwrap_or_else(|| crate::fl!("format-select"));
+                                egui::ComboBox::from_id_salt("format_dialog_builtin_formats")
+                                    .selected_text(selected_name)
+                                    .show_ui(ui, |ui| {
+                                        for f in &builtins {
+                                            ui.selectable_value(
+                                                selected_builtin,
+                                                Some(f.toml),
+                                                format!("{} ({})", f.name, f.sourcetype),
+                                            );
+                                        }
+                                    });
+                                if ui
+                                    .add_enabled(
+                                        selected_builtin.is_some(),
+                                        egui::Button::new(crate::fl!("format-load")),
+                                    )
+                                    .clicked()
+                                    && let Some(toml) = *selected_builtin
+                                {
+                                    outcome = Some(FormatDialogOutcome::LoadBuiltin(toml));
+                                }
+                            })
+                            .response
+                            .on_hover_text(crate::fl!("format-builtin-formats-help"));
+
+                            ui.separator();
+
+                            egui::Grid::new("format_dialog_fields")
+                                .num_columns(2)
+                                .spacing([8.0, 6.0])
+                                .show(ui, |ui| {
+                                    ui.label(crate::fl!("format-name"));
+                                    ui.text_edit_singleline(&mut draft.name);
+                                    ui.end_row();
+
+                                    ui.label(crate::fl!("format-sourcetype"));
+                                    ui.text_edit_singleline(&mut draft.sourcetype);
+                                    ui.end_row();
+
+                                    ui.label(crate::fl!("format-pattern-regex"));
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut draft.regex)
+                                            .font(egui::TextStyle::Monospace),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label(crate::fl!("format-timestamp-format"));
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut draft.timestamp_format)
+                                            .font(egui::TextStyle::Monospace),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label(crate::fl!("format-multiline-start"));
+                                    ui.add(
+                                        egui::TextEdit::singleline(
+                                            &mut draft.multiline_start_pattern,
                                         )
-                                        .clicked()
-                                        && let Some(path) = selected_saved.clone()
-                                    {
-                                        outcome = Some(FormatDialogOutcome::Load(path));
-                                    }
+                                        .font(egui::TextStyle::Monospace)
+                                        .hint_text(crate::fl!("format-optional")),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label(crate::fl!("format-assume-offset"));
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut draft.assume_offset)
+                                            .hint_text(crate::fl!("format-assume-offset-hint")),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label(crate::fl!("format-assume-year"));
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut draft.assume_year)
+                                            .hint_text(crate::fl!("format-assume-year-hint")),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label(crate::fl!("format-level-group"));
+                                    ui.text_edit_singleline(&mut draft.level_group);
+                                    ui.end_row();
+
+                                    ui.label(crate::fl!("format-message-group"));
+                                    ui.text_edit_singleline(&mut draft.message_group);
+                                    ui.end_row();
                                 });
 
-                                ui.horizontal(|ui| {
-                        ui.label("Built-in formats:");
-                        let builtins = crate::parsers::builtin_text_formats::builtin_text_formats();
-                        let selected_name = selected_builtin
-                            .and_then(|toml| builtins.iter().find(|f| f.toml == toml))
-                            .map(|f| f.name.clone())
-                            .unwrap_or_else(|| "— select —".to_string());
-                        egui::ComboBox::from_id_salt("format_dialog_builtin_formats")
-                            .selected_text(selected_name)
-                            .show_ui(ui, |ui| {
-                                for f in &builtins {
-                                    ui.selectable_value(
-                                        selected_builtin,
-                                        Some(f.toml),
-                                        format!("{} ({})", f.name, f.sourcetype),
+                            ui.weak(crate::fl!("format-capture-groups-help"));
+
+                            ui.separator();
+                            ui.label(crate::fl!(
+                                "format-preview-heading",
+                                count = preview_lines.len()
+                            ));
+                            egui::ScrollArea::vertical()
+                                .id_salt("format_dialog_preview_scroll")
+                                .max_height(260.0)
+                                .show(ui, |ui| {
+                                    render_preview(
+                                        ui,
+                                        preview_lines,
+                                        draft,
+                                        default_source_timezone.as_deref(),
                                     );
-                                }
-                            });
-                        if ui
-                            .add_enabled(selected_builtin.is_some(), egui::Button::new("Load"))
-                            .clicked()
-                            && let Some(toml) = *selected_builtin
-                        {
-                            outcome = Some(FormatDialogOutcome::LoadBuiltin(toml));
-                        }
-                    })
-                    .response
-                    .on_hover_text(
-                        "Starting points for common text-log shapes (generic timestamp, \
-                         syslog, logcat) — a real log's exact format varies too much to apply \
-                         one of these blindly, so this loads it into the fields below for you \
-                         to check against the live preview and adjust (timezone/year in \
-                         particular almost always need filling in) before saving.",
-                    );
-
-                                ui.separator();
-
-                                egui::Grid::new("format_dialog_fields")
-                                    .num_columns(2)
-                                    .spacing([8.0, 6.0])
-                                    .show(ui, |ui| {
-                                        ui.label("Name:");
-                                        ui.text_edit_singleline(&mut draft.name);
-                                        ui.end_row();
-
-                                        ui.label("Sourcetype:");
-                                        ui.text_edit_singleline(&mut draft.sourcetype);
-                                        ui.end_row();
-
-                                        ui.label("Pattern regex:");
-                                        ui.add(
-                                            egui::TextEdit::singleline(&mut draft.regex)
-                                                .font(egui::TextStyle::Monospace),
-                                        );
-                                        ui.end_row();
-
-                                        ui.label("Timestamp format:");
-                                        ui.add(
-                                            egui::TextEdit::singleline(&mut draft.timestamp_format)
-                                                .font(egui::TextStyle::Monospace),
-                                        );
-                                        ui.end_row();
-
-                                        ui.label("Multiline start pattern:");
-                                        ui.add(
-                                            egui::TextEdit::singleline(
-                                                &mut draft.multiline_start_pattern,
-                                            )
-                                            .font(egui::TextStyle::Monospace)
-                                            .hint_text("optional"),
-                                        );
-                                        ui.end_row();
-
-                                        ui.label("Assume offset:");
-                                        ui.add(
-                                egui::TextEdit::singleline(&mut draft.assume_offset)
-                                    .hint_text("e.g. +02:00 — only if the format has no timezone"),
-                            );
-                                        ui.end_row();
-
-                                        ui.label("Assume year:");
-                                        ui.add(
-                                            egui::TextEdit::singleline(&mut draft.assume_year)
-                                                .hint_text(
-                                                    "e.g. 2026 — only if the format has no year",
-                                                ),
-                                        );
-                                        ui.end_row();
-
-                                        ui.label("Level capture group:");
-                                        ui.text_edit_singleline(&mut draft.level_group);
-                                        ui.end_row();
-
-                                        ui.label("Message capture group:");
-                                        ui.text_edit_singleline(&mut draft.message_group);
-                                        ui.end_row();
-                                    });
-
-                                ui.weak(
-                        "Every named capture group becomes a searchable field regardless — \
-                         Level/Message above only control which two get promoted to Peach's \
-                         normalized columns.",
-                    );
-
-                                ui.separator();
-                                ui.label(format!(
-                                    "Live preview — first {} line(s) of the source file:",
-                                    preview_lines.len()
-                                ));
-                                egui::ScrollArea::vertical()
-                                    .id_salt("format_dialog_preview_scroll")
-                                    .max_height(260.0)
-                                    .show(ui, |ui| {
-                                        render_preview(
-                                            ui,
-                                            preview_lines,
-                                            draft,
-                                            default_source_timezone.as_deref(),
-                                        );
-                                    });
-                            });
-                    },
-                );
+                                });
+                        });
+                },
+            );
         }
 
         if close {
@@ -383,7 +377,7 @@ fn render_preview(
     default_source_timezone: Option<&str>,
 ) {
     if preview_lines.is_empty() {
-        ui.weak("(source file has no lines to preview)");
+        ui.weak(crate::fl!("format-preview-empty"));
         return;
     }
 
@@ -392,7 +386,7 @@ fn render_preview(
         Err(err) => {
             ui.colored_label(
                 egui::Color32::from_rgb(220, 80, 80),
-                format!("Invalid regex: {err}"),
+                crate::fl!("format-invalid-regex", error = err.to_string()),
             );
             return;
         }
@@ -413,7 +407,7 @@ fn render_preview(
             Err(err) => {
                 ui.colored_label(
                     egui::Color32::from_rgb(220, 80, 80),
-                    format!("Invalid assume offset: {err:#}"),
+                    crate::fl!("format-invalid-assume-offset", error = format!("{err:#}")),
                 );
                 return;
             }
@@ -428,7 +422,7 @@ fn render_preview(
             Err(err) => {
                 ui.colored_label(
                     egui::Color32::from_rgb(220, 80, 80),
-                    format!("Invalid assume year: {err}"),
+                    crate::fl!("format-invalid-assume-year", error = err.to_string()),
                 );
                 return;
             }

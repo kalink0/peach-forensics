@@ -45,7 +45,7 @@ impl ActivityLogDialog {
             close = show_dialog_window(
                 ctx,
                 "peach_activity_log_dialog",
-                "Activity Log",
+                &crate::fl!("activity-log-title"),
                 [640.0, 480.0],
                 true,
                 |ui, close| {
@@ -59,14 +59,14 @@ impl ActivityLogDialog {
                     // visible and the scroll area gets exactly what's left.
                     egui::Panel::bottom("peach_activity_log_dialog_bottom_bar").show(ui, |ui| {
                         ui.add_space(4.0);
-                        if ui.button("Close").clicked() {
+                        if ui.button(crate::fl!("common-close")).clicked() {
                             *close = true;
                         }
                         ui.add_space(4.0);
                     });
 
                     if entries.is_empty() {
-                        ui.weak("No load or re-tag operations recorded yet in this session.");
+                        ui.weak(crate::fl!("activity-log-empty"));
                     }
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for entry in entries.iter() {
@@ -94,37 +94,46 @@ fn format_utc(secs: i64) -> String {
         .unwrap_or_else(|| secs.to_string())
 }
 
+/// Display name of a stored operation code. The code itself stays as
+/// stored (English, in the session DB); one this build doesn't know is shown
+/// verbatim rather than guessed at.
+fn operation_label(operation: &str) -> String {
+    match operation {
+        "load" => crate::fl!("activity-log-operation-load"),
+        "retag" => crate::fl!("activity-log-operation-retag"),
+        "import" => crate::fl!("activity-log-operation-import"),
+        other => other.to_string(),
+    }
+}
+
 fn render_entry(ui: &mut egui::Ui, entry: &ActivityLogEntry) {
     ui.horizontal(|ui| {
-        let operation_label = match entry.operation.as_str() {
-            "load" => "Load",
-            "retag" => "Re-tag",
-            "import" => "Import",
-            other => other,
-        };
-        ui.strong(operation_label);
+        ui.strong(operation_label(&entry.operation));
         match entry.status.as_str() {
             "ok" => {
-                ui.colored_label(egui::Color32::from_rgb(0, 160, 0), "OK");
+                ui.colored_label(
+                    egui::Color32::from_rgb(0, 160, 0),
+                    crate::fl!("activity-log-status-ok"),
+                );
             }
             "cancelled" => {
-                ui.colored_label(egui::Color32::from_rgb(230, 160, 0), "Aborted")
-                    .on_hover_text(
-                        "Stopped early by the analyst — counts below are real, just less \
-                         than a full run would have produced.",
-                    );
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 160, 0),
+                    crate::fl!("activity-log-status-aborted"),
+                )
+                .on_hover_text(crate::fl!("activity-log-status-aborted-help"));
             }
             _ => {
-                ui.colored_label(egui::Color32::RED, "Failed");
+                ui.colored_label(egui::Color32::RED, crate::fl!("activity-log-status-failed"));
             }
         }
-        ui.label(format!(
-            "{} \u{2192} {}",
-            format_utc(entry.started_at),
-            format_utc(entry.finished_at)
+        ui.label(crate::fl!(
+            "activity-log-time-range",
+            start = format_utc(entry.started_at),
+            end = format_utc(entry.finished_at)
         ));
         if entry.skip_bad_records_enabled {
-            ui.weak("(skip bad records was on)");
+            ui.weak(crate::fl!("activity-log-skip-bad-records-on"));
         }
     });
 
@@ -133,7 +142,10 @@ fn render_entry(ui: &mut egui::Ui, entry: &ActivityLogEntry) {
             // `source_path` holds the portable case's `original_session_id`
             // for an import entry, not an evidence file path — see
             // `session::portable_case::import_portable_case`.
-            ui.label(format!("Imported from {source_path}"));
+            ui.label(crate::fl!(
+                "activity-log-imported-from",
+                session = source_path.clone()
+            ));
         } else {
             let sourcetype = entry.sourcetype.as_deref().unwrap_or("?");
             ui.label(format!("{source_path} ({sourcetype})"));
@@ -149,12 +161,15 @@ fn render_entry(ui: &mut egui::Ui, entry: &ActivityLogEntry) {
         ui.colored_label(egui::Color32::RED, err);
     } else {
         let summary = match entry.operation.as_str() {
-            "load" => format!(
-                "Loaded {} entries, applied {} tags",
-                entry.entries_inserted.unwrap_or(0),
-                entry.tags_applied.unwrap_or(0),
+            "load" => crate::fl!(
+                "activity-log-load-summary",
+                entries = entry.entries_inserted.unwrap_or(0),
+                tags = entry.tags_applied.unwrap_or(0)
             ),
-            "retag" => format!("Applied {} tags", entry.tags_applied.unwrap_or(0)),
+            "retag" => crate::fl!(
+                "activity-log-retag-summary",
+                tags = entry.tags_applied.unwrap_or(0)
+            ),
             _ => String::new(),
         };
         if !summary.is_empty() {
@@ -165,7 +180,7 @@ fn render_entry(ui: &mut egui::Ui, entry: &ActivityLogEntry) {
     if !entry.skipped.is_empty() {
         ui.colored_label(
             egui::Color32::from_rgb(230, 160, 0),
-            format!("{} file(s) skipped", entry.skipped.len()),
+            crate::fl!("activity-log-files-skipped", count = entry.skipped.len()),
         );
         for file in &entry.skipped {
             ui.label(format!("  {}: {}", file.path, file.reason));
@@ -176,7 +191,10 @@ fn render_entry(ui: &mut egui::Ui, entry: &ActivityLogEntry) {
     if total_records_skipped > 0 {
         ui.colored_label(
             egui::Color32::from_rgb(230, 160, 0),
-            format!("{total_records_skipped} record(s) skipped instead of failing their file"),
+            crate::fl!(
+                "activity-log-records-skipped",
+                count = total_records_skipped
+            ),
         );
     }
 
@@ -186,29 +204,43 @@ fn render_entry(ui: &mut egui::Ui, entry: &ActivityLogEntry) {
     // records count is the exception: worth showing even for one file,
     // since it's not duplicated anywhere else.
     if entry.per_file.len() > 1 || total_records_skipped > 0 {
-        ui.label("Per file:");
+        ui.label(crate::fl!("activity-log-per-file"));
         for file in &entry.per_file {
-            if file.records_skipped > 0 {
-                ui.label(format!(
-                    "  {}: {} entries, {} skipped",
-                    file.path, file.inserted, file.records_skipped
-                ));
+            let line = if file.records_skipped > 0 {
+                crate::fl!(
+                    "activity-log-file-entries-skipped",
+                    path = file.path.clone(),
+                    entries = file.inserted,
+                    skipped = file.records_skipped
+                )
             } else {
-                ui.label(format!("  {}: {} entries", file.path, file.inserted));
-            }
+                crate::fl!(
+                    "activity-log-file-entries",
+                    path = file.path.clone(),
+                    entries = file.inserted
+                )
+            };
+            ui.label(format!("  {line}"));
         }
     }
 
     if !entry.tags_by_rule.is_empty() {
-        ui.label("Per rule:");
+        ui.label(crate::fl!("activity-log-per-rule"));
         for rule in &entry.tags_by_rule {
-            match &rule.version {
-                Some(version) => ui.label(format!(
-                    "  {} (v{version}): {} tags",
-                    rule.rule_name, rule.count
-                )),
-                None => ui.label(format!("  {}: {} tags", rule.rule_name, rule.count)),
+            let line = match &rule.version {
+                Some(version) => crate::fl!(
+                    "activity-log-rule-tags-versioned",
+                    rule = rule.rule_name.clone(),
+                    version = version.clone(),
+                    count = rule.count
+                ),
+                None => crate::fl!(
+                    "activity-log-rule-tags",
+                    rule = rule.rule_name.clone(),
+                    count = rule.count
+                ),
             };
+            ui.label(format!("  {line}"));
         }
     }
 }
@@ -290,6 +322,24 @@ mod tests {
         dialog.set_entries(vec![sample_entry()]);
 
         assert!(!dialog.is_open());
+    }
+
+    #[test]
+    fn stored_operation_codes_get_a_display_name_and_unknown_ones_stay_verbatim() {
+        assert_eq!(operation_label("retag"), "Re-tag");
+        assert_eq!(operation_label("future_op"), "future_op");
+    }
+
+    #[test]
+    fn english_activity_lines_use_singular_and_plural() {
+        assert_eq!(
+            crate::fl!("activity-log-load-summary", entries = 1usize, tags = 0usize),
+            "Loaded 1 entry, applied 0 tags"
+        );
+        assert_eq!(
+            crate::fl!("activity-log-records-skipped", count = 1usize),
+            "1 record skipped instead of failing its file"
+        );
     }
 
     #[test]

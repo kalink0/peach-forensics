@@ -16,6 +16,11 @@ use eframe::egui;
 
 use crate::tagging::rule::Rule;
 
+/// Where rule packs are downloaded, as both rule dialogs point the analyst
+/// to it. A placeholder in their messages rather than part of the text, so
+/// it follows the menu's own wording once the menus are translated.
+pub const RULE_PACKS_MENU_PATH: &str = "File \u{2192} Rule packs...";
+
 /// Which rule pack a rule belongs to, decided by its own `sourcetype` match
 /// condition. Declaration order is the order the table sorts sources in
 /// (the order the packs were introduced), not alphabetical.
@@ -39,14 +44,16 @@ impl Source {
         Source::Other,
     ];
 
-    pub fn label(self) -> &'static str {
+    /// Format and product names stay as they are in every language; only
+    /// the catch-all is translated.
+    pub fn label(self) -> String {
         match self {
-            Source::Aul => "AUL",
-            Source::Evtx => "EVTX",
-            Source::Journald => "journald",
-            Source::IntrusionLog => "Android Intrusion Log",
-            Source::Biome => "Apple Biome",
-            Source::Other => "Other",
+            Source::Aul => "AUL".to_string(),
+            Source::Evtx => "EVTX".to_string(),
+            Source::Journald => "journald".to_string(),
+            Source::IntrusionLog => "Android Intrusion Log".to_string(),
+            Source::Biome => "Apple Biome".to_string(),
+            Source::Other => crate::fl!("rule-list-source-other"),
         }
     }
 
@@ -109,13 +116,15 @@ impl RuleRow {
         let tag = rule.rule.tag.value.clone();
         let description = rule.rule.description.clone().unwrap_or_default();
         let match_summary = format_match_fields(&rule.rule.match_fields);
-        let hover = format!(
-            "{}\n\nMatch: {match_summary}\nTag: {tag}",
-            if description.is_empty() {
-                "(no description)"
+        let hover = crate::fl!(
+            "rule-list-hover",
+            description = if description.is_empty() {
+                crate::fl!("rule-list-no-description")
             } else {
-                &description
+                description.clone()
             },
+            condition = match_summary.clone(),
+            tag = tag.clone()
         );
         let haystack = format!(
             "{name}\n{tag}\n{description}\n{}\n{}",
@@ -312,10 +321,10 @@ pub fn visible_indices(
 /// box the keyboard on the first frame and is cleared afterwards.
 pub fn search_row(ui: &mut egui::Ui, view: &mut ViewState, focus_search: &mut bool) {
     ui.horizontal(|ui| {
-        ui.label("Search:");
+        ui.label(crate::fl!("rule-list-search"));
         let search = ui.add(
             egui::TextEdit::singleline(&mut view.search)
-                .hint_text("name, tag, description or match text")
+                .hint_text(crate::fl!("rule-list-search-hint"))
                 .desired_width(340.0),
         );
         if *focus_search {
@@ -323,8 +332,11 @@ pub fn search_row(ui: &mut egui::Ui, view: &mut ViewState, focus_search: &mut bo
             *focus_search = false;
         }
         if ui
-            .add_enabled(!view.no_filter(), egui::Button::new("Reset filters"))
-            .on_hover_text("Clear the search and show every source and state again")
+            .add_enabled(
+                !view.no_filter(),
+                egui::Button::new(crate::fl!("rule-list-reset-filters")),
+            )
+            .on_hover_text(crate::fl!("rule-list-reset-filters-help"))
             .clicked()
         {
             view.reset_filters();
@@ -346,12 +358,12 @@ pub fn source_dropdown(ui: &mut egui::Ui, rows: &[RuleRow], view: &mut ViewState
         .filter(|s| view.hidden_sources.contains(*s))
         .count();
     let label = if hidden == 0 {
-        "Source".to_string()
+        crate::fl!("rule-list-source-filter")
     } else {
-        format!("Source ({hidden} hidden)")
+        crate::fl!("rule-list-source-filter-hidden", hidden = hidden)
     };
     ui.menu_button(label, |ui| {
-        ui.weak("Counts are all rules of that source, ignoring the other filters.");
+        ui.weak(crate::fl!("rule-list-source-counts-help"));
         for source in &present {
             let total = rows.iter().filter(|r| r.source == *source).count();
             ui.horizontal(|ui| {
@@ -361,8 +373,8 @@ pub fn source_dropdown(ui: &mut egui::Ui, rows: &[RuleRow], view: &mut ViewState
                 }
                 ui.weak(format!("({total})"));
                 if ui
-                    .small_button("only")
-                    .on_hover_text("Show only this source, hide every other one")
+                    .small_button(crate::fl!("rule-list-source-only"))
+                    .on_hover_text(crate::fl!("rule-list-source-only-help"))
                     .clicked()
                 {
                     view.solo_source(*source, &present);
@@ -371,7 +383,7 @@ pub fn source_dropdown(ui: &mut egui::Ui, rows: &[RuleRow], view: &mut ViewState
             });
         }
         ui.separator();
-        if ui.button("Show all").clicked() {
+        if ui.button(crate::fl!("rule-list-show-all")).clicked() {
             view.show_all_sources();
             ui.close();
         }
@@ -392,7 +404,7 @@ pub fn sort_header(ui: &mut egui::Ui, label: &str, column: SortColumn, view: &mu
         egui::Button::new(egui::RichText::new(format!("{label}{arrow}")).strong()).frame(false);
     if ui
         .add(button)
-        .on_hover_text("Click to sort, click again to reverse")
+        .on_hover_text(crate::fl!("rule-list-sort-help"))
         .clicked()
     {
         view.toggle_sort(column);
@@ -405,7 +417,8 @@ pub fn sort_header(ui: &mut egui::Ui, label: &str, column: SortColumn, view: &mu
 /// semantics, everything else is `key = value` with the value in the same
 /// syntax the source TOML itself uses (via `toml::Value`'s own `Display`),
 /// rather than re-deriving a presentation-only format — what's on screen
-/// matches what the rule file actually says.
+/// matches what the rule file actually says. Only the connecting words
+/// around keys and values are translated.
 pub fn format_match(match_fields: &toml::Table) -> String {
     let mut parts = Vec::new();
     for (key, value) in match_fields {
@@ -419,7 +432,7 @@ pub fn format_match(match_fields: &toml::Table) -> String {
         }
     }
     if parts.is_empty() {
-        "(sourcetype only)".to_string()
+        crate::fl!("rule-list-sourcetype-only")
     } else {
         parts.join("\n")
     }
@@ -429,9 +442,13 @@ fn format_message_contains(value: &toml::Value) -> String {
     match value {
         toml::Value::Array(items) => {
             let bullets: Vec<String> = items.iter().map(|v| format!("• {v}")).collect();
-            format!("message contains any of:\n{}", bullets.join("\n"))
+            format!(
+                "{}\n{}",
+                crate::fl!("rule-list-message-contains-any"),
+                bullets.join("\n")
+            )
         }
-        other => format!("message contains {other}"),
+        other => crate::fl!("rule-list-message-contains", value = other.to_string()),
     }
 }
 
@@ -450,13 +467,9 @@ pub fn format_match_fields(match_fields: &toml::Table) -> String {
             toml::Value::Array(items) => {
                 let strings: Vec<&str> = items.iter().filter_map(|v| v.as_str()).collect();
                 if strings.len() > 3 {
-                    format!(
-                        "{}, {}, {}, (+{} more)",
-                        strings[0],
-                        strings[1],
-                        strings[2],
-                        strings.len() - 3
-                    )
+                    let hidden: usize = strings.len() - 3;
+                    let more = crate::fl!("rule-list-more", count = hidden);
+                    format!("{}, {}, {}, {more}", strings[0], strings[1], strings[2])
                 } else {
                     strings.join(", ")
                 }
@@ -467,7 +480,7 @@ pub fn format_match_fields(match_fields: &toml::Table) -> String {
         parts.push(format!("{key} = {rendered}"));
     }
     if parts.is_empty() {
-        "(sourcetype only)".to_string()
+        crate::fl!("rule-list-sourcetype-only")
     } else {
         parts.join("; ")
     }
@@ -557,6 +570,17 @@ mod tests {
         assert_eq!(RuleRow::from_rule(&with).display_name, "aul_x (v3)");
         assert_eq!(RuleRow::from_rule(&with).name, "aul_x");
         assert_eq!(RuleRow::from_rule(&without).display_name, "aul_x");
+    }
+
+    #[test]
+    fn the_tooltip_puts_description_match_and_tag_on_their_own_lines() {
+        let described = RuleRow::from_rule(&rule("evtx_logon", "evtx", "logon", "Logon"));
+        assert_eq!(
+            described.hover,
+            "Logon\n\nMatch: (sourcetype only)\nTag: logon"
+        );
+        let undescribed = RuleRow::from_rule(&rule("evtx_logon", "evtx", "logon", ""));
+        assert!(undescribed.hover.starts_with("(no description)\n\n"));
     }
 
     #[test]
