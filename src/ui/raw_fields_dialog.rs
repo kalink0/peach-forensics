@@ -66,21 +66,20 @@ impl RawFieldsDialog {
         let close = show_dialog_window(
             ctx,
             "peach_raw_fields_dialog",
-            "Raw / Fields",
+            &crate::fl!("raw-fields-title"),
             [500.0, 500.0],
             true,
             |ui, close| {
-                ui.label(format!(
-                    "{} — {}",
-                    entry.timestamp_display,
-                    if entry.message.is_empty() {
-                        "(no message)"
-                    } else {
-                        &entry.message
-                    }
-                ));
+                let message = if entry.message.is_empty() {
+                    crate::fl!("raw-fields-no-message")
+                } else {
+                    entry.message.clone()
+                };
+                ui.label(format!("{} — {message}", entry.timestamp_display));
                 ui.separator();
 
+                // "raw"/"fields" are the timeline's column names, the same
+                // ones the search syntax and exports use — not translated.
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.strong("raw");
                     ui.add(
@@ -98,7 +97,7 @@ impl RawFieldsDialog {
                 });
 
                 ui.separator();
-                if ui.button("Close").clicked() {
+                if ui.button(crate::fl!("common-close")).clicked() {
                     *close = true;
                 }
             },

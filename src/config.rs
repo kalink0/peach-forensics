@@ -107,6 +107,13 @@ pub struct Settings {
     /// override field here has it.
     #[serde(default)]
     pub duckdb_memory_limit_mb: Option<u64>,
+    /// UI language code (a directory under `i18n/`, e.g. `"de"`). `None`
+    /// (the default) means English. UI text only — see `crate::i18n` for
+    /// why nothing stored or exported depends on it. `#[serde(default)]`
+    /// for the same backward-compat reason every override field here has
+    /// it.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// Default DuckDB `memory_limit`, in MiB. Without an explicit limit DuckDB
@@ -271,6 +278,7 @@ mod tests {
             display_timezone: Some("America/New_York".to_string()),
             staging_dir: Some(PathBuf::from("/tmp/some-case-drive/peach-staging")),
             duckdb_memory_limit_mb: Some(4096),
+            language: Some("de".to_string()),
         };
 
         save_to(&path, &settings).unwrap();
@@ -337,6 +345,17 @@ mod tests {
             loaded.effective_duckdb_memory_limit_mb(),
             DEFAULT_DUCKDB_MEMORY_LIMIT_MB
         );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn load_from_a_file_predating_the_language_field_defaults_to_english() {
+        let path = temp_config_path("no-language-field");
+        std::fs::write(&path, b"sessions_dir = \"/tmp/some-case-drive\"\n").unwrap();
+
+        let loaded = load_from(&path);
+
+        assert_eq!(loaded.language, None);
         std::fs::remove_file(path).unwrap();
     }
 

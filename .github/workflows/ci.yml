@@ -48,3 +48,9 @@ jobs:
         shell: pwsh
         run: ./scripts/check_windows_runtime_deps.ps1 target\debug\peach.exe
       - run: cargo test --all-features --verbose
+      # Per-language coverage, missing messages and errors as PR
+      # annotations + run summary — for translators, who don't run cargo
+      # locally. Platform-independent, so Linux only.
+      - name: Translation report
+        if: runner.os == 'Linux'
+        run: cargo run --all-features --example i18n_check

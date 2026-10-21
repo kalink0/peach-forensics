@@ -27,7 +27,7 @@ pub enum RowAction {
         event_id: EventId,
         message: String,
         sourcetype: String,
-        fields: Vec<(&'static str, &'static str, String)>,
+        fields: Vec<(&'static str, String)>,
     },
     /// "Notes..." — view/add/edit/delete free-text notes on this event,
     /// independent of any tag (see `session::persist`'s `*_event_note`
@@ -52,6 +52,14 @@ pub enum RowAction {
     /// other row action here — the submenu lists whichever of the row's
     /// fields are actually populated, not just the one under the pointer.
     FilterByColumn { field: &'static str, value: String },
+}
+
+/// What the UI calls one of `timeline_queries::COLUMN_FILTER_FIELDS` — the
+/// same name as that field's column header, so the "Filter by..." menu, the
+/// active-filter chips and the tagging dialog all say what the table says.
+/// An unknown keyword is shown as-is.
+pub fn column_filter_label(field: &str) -> String {
+    ColumnKind::of_filter_field(field).map_or_else(|| field.to_string(), ColumnKind::label)
 }
 
 /// How many rows to fetch per DuckDB query when the visible scroll window
@@ -86,7 +94,7 @@ enum ColumnKind {
 }
 
 impl ColumnKind {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
             // Not "Timestamp (UTC)" — the column can now show any
             // configured display timezone, not always UTC. Each cell is
@@ -94,18 +102,31 @@ impl ColumnKind {
             // always carries its own `%:z` offset via
             // `TimezoneSpec::format_utc`), so the header doesn't need to
             // name a specific zone.
-            Self::Timestamp => "Timestamp",
-            Self::Level => "Level",
-            Self::Source => "Source",
-            Self::Sourcetype => "Sourcetype",
-            Self::Host => "Host",
-            Self::Process => "Process",
-            Self::EventCode => "Event ID",
-            Self::Subsystem => "Subsystem",
-            Self::Category => "Category",
-            Self::Tags => "Tags",
-            Self::Notes => "Notes",
-            Self::Message => "Message",
+            Self::Timestamp => crate::fl!("column-timestamp"),
+            Self::Level => crate::fl!("column-level"),
+            Self::Source => crate::fl!("column-source"),
+            Self::Sourcetype => crate::fl!("column-sourcetype"),
+            Self::Host => crate::fl!("column-host"),
+            Self::Process => crate::fl!("column-process"),
+            Self::EventCode => crate::fl!("column-event-id"),
+            Self::Subsystem => crate::fl!("column-subsystem"),
+            Self::Category => crate::fl!("column-category"),
+            Self::Tags => crate::fl!("column-tags"),
+            Self::Notes => crate::fl!("column-notes"),
+            Self::Message => crate::fl!("column-message"),
+        }
+    }
+
+    /// The column showing one of `timeline_queries::COLUMN_FILTER_FIELDS`.
+    fn of_filter_field(field: &str) -> Option<Self> {
+        match field {
+            "sourcetype" => Some(Self::Sourcetype),
+            "host" => Some(Self::Host),
+            "process" => Some(Self::Process),
+            "event_id" => Some(Self::EventCode),
+            "subsystem" => Some(Self::Subsystem),
+            "category" => Some(Self::Category),
+            _ => None,
         }
     }
 
@@ -829,46 +850,54 @@ impl TimelineView {
         self.poll_total(ui.ctx());
 
         if self.query.is_empty() {
-            ui.label(format!("{} events loaded", self.total_unfiltered_rows));
+            ui.label(crate::fl!(
+                "timeline-events-loaded",
+                count = self.total_unfiltered_rows
+            ));
         } else {
-            ui.label(format!(
-                "{} of {} events loaded match the filter",
-                self.total_rows, self.total_unfiltered_rows
+            ui.label(crate::fl!(
+                "timeline-events-matching",
+                matching = self.total_rows,
+                total = self.total_unfiltered_rows
             ));
         }
 
         if self.counting {
-            ui.label("Filtering…");
+            ui.label(crate::fl!("timeline-filtering"));
         }
 
         if self.total_rows == 0 {
             if !self.counting {
-                ui.label("No entries match.");
+                ui.label(crate::fl!("timeline-no-match"));
             }
             return None;
         }
 
         ui.horizontal(|ui| {
-            ui.menu_button("Columns", |ui| {
-                ui.checkbox(&mut self.show_sourcetype_column, "Sourcetype");
-                ui.checkbox(&mut self.show_host_column, "Host");
-                ui.checkbox(&mut self.show_process_column, "Process");
-                ui.checkbox(&mut self.show_event_code_column, "Event ID");
-                ui.checkbox(&mut self.show_subsystem_column, "Subsystem");
-                ui.checkbox(&mut self.show_category_column, "Category");
-                ui.checkbox(&mut self.show_notes_column, "Notes");
+            ui.menu_button(crate::fl!("timeline-columns"), |ui| {
+                for (shown, kind) in [
+                    (&mut self.show_sourcetype_column, ColumnKind::Sourcetype),
+                    (&mut self.show_host_column, ColumnKind::Host),
+                    (&mut self.show_process_column, ColumnKind::Process),
+                    (&mut self.show_event_code_column, ColumnKind::EventCode),
+                    (&mut self.show_subsystem_column, ColumnKind::Subsystem),
+                    (&mut self.show_category_column, ColumnKind::Category),
+                    (&mut self.show_notes_column, ColumnKind::Notes),
+                ] {
+                    ui.checkbox(shown, kind.label());
+                }
                 ui.separator();
-                ui.weak("Drag a column header to reorder it.");
+                ui.weak(crate::fl!("timeline-columns-reorder-hint"));
             });
 
             let sort_label = if self.sort_descending {
-                "Timestamp ▼ (newest first)"
+                crate::fl!("timeline-sort-newest-first")
             } else {
-                "Timestamp ▲ (oldest first)"
+                crate::fl!("timeline-sort-oldest-first")
             };
             if ui
                 .button(sort_label)
-                .on_hover_text("Toggle sort direction")
+                .on_hover_text(crate::fl!("timeline-sort-help"))
                 .clicked()
             {
                 self.toggle_sort_direction();
@@ -1082,11 +1111,11 @@ impl TimelineView {
                                 }
 
                                 row_response.context_menu(|ui| {
-                                    if ui.button("Copy message").clicked() {
+                                    if ui.button(crate::fl!("row-menu-copy-message")).clicked() {
                                         ui.ctx().copy_text(message.clone());
                                         ui.close();
                                     }
-                                    if ui.button("Copy whole event as text").clicked() {
+                                    if ui.button(crate::fl!("row-menu-copy-event")).clicked() {
                                         // `.as_ref()`, not consuming `conn`
                                         // by value: "View raw/fields..."
                                         // below needs it too, and both
@@ -1110,7 +1139,7 @@ impl TimelineView {
                                         }
                                         ui.close();
                                     }
-                                    if ui.button("View raw/fields...").clicked() {
+                                    if ui.button(crate::fl!("row-menu-view-raw-fields")).clicked() {
                                         if let Some(entry) = conn
                                             .as_ref()
                                             .and_then(|conn| {
@@ -1127,10 +1156,10 @@ impl TimelineView {
                                         }
                                         ui.close();
                                     }
-                                    let filterable: Vec<(&'static str, &'static str, &str)> =
+                                    let filterable: Vec<(&'static str, &str)> =
                                         timeline_queries::COLUMN_FILTER_FIELDS
                                             .iter()
-                                            .filter_map(|&(field, label)| {
+                                            .filter_map(|&field| {
                                                 let value: &str = match field {
                                                     "sourcetype" => d.sourcetype.as_str(),
                                                     "host" => d.host.as_str(),
@@ -1143,12 +1172,13 @@ impl TimelineView {
                                                          list exactly the same fields"
                                                     ),
                                                 };
-                                                (!value.is_empty()).then_some((field, label, value))
+                                                (!value.is_empty()).then_some((field, value))
                                             })
                                             .collect();
                                     if !filterable.is_empty() {
-                                        ui.menu_button("Filter by...", |ui| {
-                                            for (field, label, value) in &filterable {
+                                        ui.menu_button(crate::fl!("row-menu-filter-by"), |ui| {
+                                            for (field, value) in &filterable {
+                                                let label = column_filter_label(field);
                                                 if ui.button(format!("{label} = {value}")).clicked()
                                                 {
                                                     requested = Some(RowAction::FilterByColumn {
@@ -1162,10 +1192,13 @@ impl TimelineView {
                                     }
                                     ui.separator();
                                     if let Some(timestamp) = timestamp {
-                                        ui.menu_button("Show context around this event", |ui| {
+                                        ui.menu_button(crate::fl!("row-menu-show-context"), |ui| {
                                             for minutes in [1, 5, 15, 60] {
-                                                if ui.button(format!("± {minutes} min")).clicked()
-                                                {
+                                                let label = crate::fl!(
+                                                    "row-menu-context-minutes",
+                                                    minutes = minutes
+                                                );
+                                                if ui.button(label).clicked() {
                                                     requested = Some(RowAction::ShowContext {
                                                         query_text: context_window_query(
                                                             timestamp, minutes,
@@ -1177,25 +1210,24 @@ impl TimelineView {
                                         });
                                     }
                                     ui.separator();
-                                    if ui.button("Tag this event...").clicked() {
+                                    if ui.button(crate::fl!("row-menu-tag-event")).clicked() {
                                         requested = Some(RowAction::TagSingle { event_id });
                                         ui.close();
                                     }
-                                    if ui.button("Tag all matching (advanced)...").clicked() {
+                                    if ui.button(crate::fl!("row-menu-tag-all-matching")).clicked()
+                                    {
                                         requested = Some(RowAction::TagAllMatching {
                                             event_id,
                                             message,
                                             sourcetype: d.sourcetype.clone(),
                                             fields: filterable
                                                 .iter()
-                                                .map(|&(field, label, value)| {
-                                                    (field, label, value.to_string())
-                                                })
+                                                .map(|&(field, value)| (field, value.to_string()))
                                                 .collect(),
                                         });
                                         ui.close();
                                     }
-                                    if ui.button("Notes...").clicked() {
+                                    if ui.button(crate::fl!("row-menu-notes")).clicked() {
                                         requested = Some(RowAction::ManageNotes { event_id });
                                         ui.close();
                                     }

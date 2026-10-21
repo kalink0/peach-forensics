@@ -185,7 +185,7 @@ impl SessionManagerDialog {
             close = show_dialog_window(
                 ctx,
                 "peach_session_dialog",
-                "Manage sessions",
+                &crate::fl!("sessions-title"),
                 [560.0, 420.0],
                 true,
                 |ui, close| {
@@ -193,7 +193,7 @@ impl SessionManagerDialog {
                         ui.colored_label(egui::Color32::RED, err.as_str());
                     }
                     if entries.is_empty() {
-                        ui.label("No saved sessions found.");
+                        ui.label(crate::fl!("sessions-none"));
                     }
 
                     let mut just_deleted = None;
@@ -203,7 +203,7 @@ impl SessionManagerDialog {
                             if renaming.as_ref().is_some_and(|(id, _)| *id == entry.id) {
                                 let (_, draft) = renaming.as_mut().expect("just checked above");
                                 ui.text_edit_singleline(draft);
-                                if ui.button("Save").clicked() {
+                                if ui.button(crate::fl!("common-save")).clicked() {
                                     match persist::open_session_db(&entry.sqlite_path).and_then(
                                         |conn| persist::save_display_name(&conn, draft.trim()),
                                     ) {
@@ -217,28 +217,22 @@ impl SessionManagerDialog {
                                     }
                                     *renaming = None;
                                 }
-                                if ui.button("Cancel").clicked() {
+                                if ui.button(crate::fl!("common-cancel")).clicked() {
                                     *renaming = None;
                                 }
                                 return;
                             }
 
-                            let suffix = if entry.has_data {
-                                let size = format_bytes(entry.size_bytes);
-                                match entry.event_count {
-                                    Some(count) => format!(" — {count} events, {size}"),
-                                    None => format!(" (counting…), {size}"),
-                                }
-                            } else {
-                                " (empty)".to_string()
-                            };
-                            ui.label(format!("{}{suffix}", entry.label()));
+                            ui.label(row_label(entry));
                             if is_current {
-                                ui.weak("(current)");
+                                ui.weak(crate::fl!("sessions-current"));
                             }
 
                             if ui
-                                .add_enabled(!is_current, egui::Button::new("Open"))
+                                .add_enabled(
+                                    !is_current,
+                                    egui::Button::new(crate::fl!("sessions-open")),
+                                )
                                 .clicked()
                             {
                                 outcome =
@@ -246,7 +240,7 @@ impl SessionManagerDialog {
                                 *close = true;
                             }
 
-                            if ui.button("Rename...").clicked() {
+                            if ui.button(crate::fl!("sessions-rename")).clicked() {
                                 *renaming = Some((
                                     entry.id.clone(),
                                     entry.display_name.clone().unwrap_or_default(),
@@ -254,11 +248,8 @@ impl SessionManagerDialog {
                             }
 
                             if ui
-                                .button("Open folder")
-                                .on_hover_text(
-                                    "Show this session's .sqlite/.duckdb files in the file \
-                                     manager — handy for copying the session elsewhere",
-                                )
+                                .button(crate::fl!("common-open-folder"))
+                                .on_hover_text(crate::fl!("sessions-open-folder-help"))
                                 .clicked()
                                 // `.sqlite_path` specifically: every one of a
                                 // session's files (`<id>.sqlite`, `<id>.duckdb`,
@@ -272,24 +263,28 @@ impl SessionManagerDialog {
                             }
 
                             if pending_delete.as_deref() == Some(entry.id.as_str()) {
-                                ui.colored_label(egui::Color32::RED, "Really delete?");
-                                if ui.button("Delete").clicked() {
+                                ui.colored_label(
+                                    egui::Color32::RED,
+                                    crate::fl!("sessions-really-delete"),
+                                );
+                                if ui.button(crate::fl!("common-delete")).clicked() {
                                     match delete_session_files(entry) {
                                         Ok(()) => just_deleted = Some(entry.id.clone()),
                                         Err(err) => *error = Some(format!("{err:#}")),
                                     }
                                     *pending_delete = None;
                                 }
-                                if ui.button("Cancel").clicked() {
+                                if ui.button(crate::fl!("common-cancel")).clicked() {
                                     *pending_delete = None;
                                 }
                             } else {
-                                let delete_button =
-                                    ui.add_enabled(!is_current, egui::Button::new("Delete..."));
+                                let delete_button = ui.add_enabled(
+                                    !is_current,
+                                    egui::Button::new(crate::fl!("sessions-delete")),
+                                );
                                 let delete_button = if is_current {
-                                    delete_button.on_hover_text(
-                                        "Cannot delete the session currently open in this window",
-                                    )
+                                    delete_button
+                                        .on_hover_text(crate::fl!("sessions-delete-current-help"))
                                 } else {
                                     delete_button
                                 };
@@ -304,7 +299,7 @@ impl SessionManagerDialog {
                     }
 
                     ui.separator();
-                    if ui.button("Close").clicked() {
+                    if ui.button(crate::fl!("common-close")).clicked() {
                         *close = true;
                     }
                 },
@@ -315,6 +310,25 @@ impl SessionManagerDialog {
             *self = Self::Closed;
         }
         outcome
+    }
+}
+
+/// One list row: the session's label, then its event count and size on disk
+/// once known, or that it's empty.
+fn row_label(entry: &SessionEntry) -> String {
+    let name = entry.label().to_string();
+    if !entry.has_data {
+        return crate::fl!("sessions-row-empty", name = name);
+    }
+    let size = format_bytes(entry.size_bytes);
+    match entry.event_count {
+        Some(count) => crate::fl!(
+            "sessions-row-counted",
+            name = name,
+            count = count,
+            size = size
+        ),
+        None => crate::fl!("sessions-row-counting", name = name, size = size),
     }
 }
 
@@ -616,6 +630,30 @@ mod tests {
 
         assert_eq!(entries[0].size_bytes, 400);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn row_label_shows_count_and_size_once_known_and_marks_empty_sessions() {
+        let mut entry = SessionEntry {
+            id: "session-20260101-000000".to_string(),
+            sqlite_path: PathBuf::new(),
+            duckdb_path: PathBuf::new(),
+            has_data: true,
+            display_name: None,
+            event_count: None,
+            size_bytes: 1_500,
+        };
+        assert_eq!(
+            row_label(&entry),
+            "session-20260101-000000 (counting…), 1.5 KB"
+        );
+        entry.event_count = Some(1);
+        assert_eq!(
+            row_label(&entry),
+            "session-20260101-000000 — 1 event, 1.5 KB"
+        );
+        entry.has_data = false;
+        assert_eq!(row_label(&entry), "session-20260101-000000 (empty)");
     }
 
     #[test]

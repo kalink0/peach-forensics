@@ -114,6 +114,8 @@ no durable unencrypted session copy should be left behind.
   (AUL/EVTX/journald/intrusion_log), generated from the actual shipped rule
   files; also available fully offline in-app via **Help → Rules reference...**
 - [CHANGELOG.md](CHANGELOG.md) — what changed in each release
+- [i18n/README.md](i18n/README.md) — translating the interface (no Rust
+  needed); English is the default, other languages are community-maintained
 
 ## Acknowledgements
 

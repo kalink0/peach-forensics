@@ -1,5 +1,5 @@
-//! "Settings" dialog — currently just the sessions-directory override (see
-//! [`crate::config::Settings`]). Same Closed/open-state-enum +
+//! "Settings" dialog — language, directory overrides, load/memory tuning
+//! and the default source timezone (see [`crate::config::Settings`]). Same Closed/open-state-enum +
 //! `ui() -> Option<Outcome>` pattern as `TagDialog`/`SessionManagerDialog`:
 //! this module only renders widgets and reports what the analyst
 //! confirmed, `app.rs` owns actually persisting it to disk.
@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::config::{self, Settings};
+use crate::i18n::{self, LanguageInfo};
 use crate::model::timezone_spec::TimezoneSpec;
 use crate::session::persist;
 use crate::tagging::rule_file;
@@ -66,6 +67,10 @@ pub struct OpenSettingsDialog {
     /// selected — View is always reachable, so Display timezone doesn't
     /// need that same second door).
     default_source_timezone_input: String,
+    /// Shipped translations with their coverage/error status — computed
+    /// once on open, they're embedded in the binary and can't change while
+    /// the dialog is open.
+    languages: Vec<LanguageInfo>,
 }
 
 impl SettingsDialog {
@@ -82,6 +87,7 @@ impl SettingsDialog {
             default_rules_dir: rule_file::default_user_rules_dir().unwrap_or_default(),
             default_staging_dir: std::env::temp_dir(),
             default_source_timezone_input,
+            languages: i18n::available_languages(),
         }))
     }
 
@@ -96,47 +102,61 @@ impl SettingsDialog {
                 default_rules_dir,
                 default_staging_dir,
                 default_source_timezone_input,
+                languages,
             } = state.as_mut();
             close = show_dialog_window(
                 ctx,
                 "peach_settings_dialog",
-                "Settings",
+                &crate::fl!("settings-title"),
                 [520.0, 420.0],
                 true,
                 |ui, close| {
                     help_row(
                         ui,
-                        "Sessions directory:",
-                        "New sessions only — the current session stays put.",
+                        &crate::fl!("settings-language"),
+                        &crate::fl!("settings-language-help"),
+                    );
+                    language_row(ui, &mut draft.language, languages);
+
+                    ui.separator();
+                    help_row(
+                        ui,
+                        &crate::fl!("settings-sessions-dir"),
+                        &crate::fl!("settings-sessions-dir-help"),
                     );
                     directory_row(ui, &mut draft.sessions_dir, default_sessions_dir);
 
                     ui.separator();
                     help_row(
                         ui,
-                        "Rules directory:",
-                        "Where new rules get saved, and auto-loaded from on startup.",
+                        &crate::fl!("settings-rules-dir"),
+                        &crate::fl!("settings-rules-dir-help"),
                     );
                     directory_row(ui, &mut draft.rules_dir, default_rules_dir);
 
                     ui.separator();
                     help_row(
                         ui,
-                        "Staging directory:",
-                        "Working space for --ephemeral-session and Portable Case export/\
-                         import — can hold a full copy of the bulk timeline.",
+                        &crate::fl!("settings-staging-dir"),
+                        &crate::fl!("settings-staging-dir-help"),
                     );
                     directory_row(ui, &mut draft.staging_dir, default_staging_dir);
 
                     ui.separator();
                     help_row(
                         ui,
-                        "Parse threads for folder loads:",
-                        "Only matters for multi-file EVTX/journald/Text loads.",
+                        &crate::fl!("settings-load-threads"),
+                        &crate::fl!("settings-load-threads-help"),
                     );
                     ui.horizontal(|ui| {
                         let mut automatic = draft.load_threads.is_none();
-                        if ui.checkbox(&mut automatic, "Automatic").changed() {
+                        if ui
+                            .checkbox(
+                                &mut automatic,
+                                crate::fl!("settings-load-threads-automatic"),
+                            )
+                            .changed()
+                        {
                             draft.load_threads = (!automatic).then(config::default_load_threads);
                         }
                         if let Some(mut value) = draft.load_threads {
@@ -147,9 +167,9 @@ impl SettingsDialog {
                                 draft.load_threads = Some(value);
                             }
                         } else {
-                            ui.weak(format!(
-                                "({} on this machine)",
-                                config::default_load_threads()
+                            ui.weak(crate::fl!(
+                                "settings-load-threads-on-this-machine",
+                                count = config::default_load_threads()
                             ));
                         }
                     });
@@ -157,14 +177,15 @@ impl SettingsDialog {
                     ui.separator();
                     help_row(
                         ui,
-                        "Database memory limit (MB):",
-                        "RAM the timeline database may use. Beyond it, data spills to a \
-                         temp folder next to the session file. Raising it rarely speeds \
-                         up loading.",
+                        &crate::fl!("settings-memory-limit"),
+                        &crate::fl!("settings-memory-limit-help"),
                     );
                     ui.horizontal(|ui| {
                         let mut default = draft.duckdb_memory_limit_mb.is_none();
-                        if ui.checkbox(&mut default, "Default").changed() {
+                        if ui
+                            .checkbox(&mut default, crate::fl!("settings-memory-limit-default"))
+                            .changed()
+                        {
                             draft.duckdb_memory_limit_mb =
                                 (!default).then_some(config::DEFAULT_DUCKDB_MEMORY_LIMIT_MB);
                         }
@@ -180,19 +201,22 @@ impl SettingsDialog {
                                 draft.duckdb_memory_limit_mb = Some(value);
                             }
                         } else {
-                            ui.weak(format!("({} MB)", config::DEFAULT_DUCKDB_MEMORY_LIMIT_MB));
+                            ui.weak(crate::fl!(
+                                "settings-memory-limit-default-value",
+                                mb = config::DEFAULT_DUCKDB_MEMORY_LIMIT_MB
+                            ));
                         }
                     });
 
                     ui.separator();
                     help_row(
                         ui,
-                        "Assume timezone for logs with no timezone of their own:",
-                        "Fallback when a text source's own \"Assume offset\" isn't set.",
+                        &crate::fl!("settings-source-timezone"),
+                        &crate::fl!("settings-source-timezone-help"),
                     );
                     ui.add(
                         egui::TextEdit::singleline(default_source_timezone_input)
-                            .hint_text("+0100, +02:00, UTC, or Europe/Berlin — blank to disable"),
+                            .hint_text(crate::fl!("settings-source-timezone-hint")),
                     );
                     let default_source_timezone_error =
                         parse_timezone_field(default_source_timezone_input).err();
@@ -204,7 +228,7 @@ impl SettingsDialog {
                     let can_save = default_source_timezone_error.is_none();
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(can_save, egui::Button::new("Save"))
+                            .add_enabled(can_save, egui::Button::new(crate::fl!("common-save")))
                             .clicked()
                         {
                             draft.default_source_timezone =
@@ -213,7 +237,7 @@ impl SettingsDialog {
                             outcome = Some(SettingsOutcome::Save(draft.clone()));
                             *close = true;
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(crate::fl!("common-cancel")).clicked() {
                             *close = true;
                         }
                     });
@@ -273,6 +297,54 @@ fn help_row(ui: &mut egui::Ui, label: &str, text: &str) {
     }
 }
 
+/// The language picker. English is stored as `None`, so a config that
+/// never touched this setting and one explicitly set back to English are
+/// the same thing. A broken translation is listed (greyed out) rather than
+/// hidden, so a translator sees their file was picked up but needs fixing.
+fn language_row(ui: &mut egui::Ui, language: &mut Option<String>, languages: &[LanguageInfo]) {
+    let current_code = language
+        .clone()
+        .unwrap_or_else(|| i18n::FALLBACK_LANGUAGE.to_string());
+    let current = languages.iter().find(|l| l.code == current_code);
+    let selected_text = current.map_or_else(|| current_code.clone(), language_label);
+    egui::ComboBox::from_id_salt("peach_settings_language")
+        .selected_text(selected_text)
+        .show_ui(ui, |ui| {
+            for info in languages {
+                let value = (info.code != i18n::FALLBACK_LANGUAGE).then(|| info.code.clone());
+                ui.add_enabled_ui(info.is_selectable(), |ui| {
+                    ui.selectable_value(language, value, language_label(info));
+                });
+            }
+        });
+    if !current.is_some_and(LanguageInfo::is_selectable) {
+        ui.colored_label(
+            ui.visuals().error_fg_color,
+            crate::fl!("settings-language-unavailable", code = current_code),
+        );
+    }
+}
+
+fn language_label(info: &LanguageInfo) -> String {
+    if !info.is_selectable() {
+        return crate::fl!("settings-language-entry-broken", code = info.code.clone());
+    }
+    let percent = info.report.coverage_percent();
+    match &info.name {
+        Some(name) => crate::fl!(
+            "settings-language-entry",
+            name = name.clone(),
+            code = info.code.clone(),
+            percent = percent
+        ),
+        None => crate::fl!(
+            "settings-language-entry-unnamed",
+            code = info.code.clone(),
+            percent = percent
+        ),
+    }
+}
+
 /// One directory-override row (Sessions/Rules): the effective path — the
 /// override if set, `default_dir` otherwise, always shown in full rather
 /// than hidden behind a bare "(default)" — plus Choose/Reset/Open folder.
@@ -282,18 +354,21 @@ fn directory_row(ui: &mut egui::Ui, override_dir: &mut Option<PathBuf>, default_
     ui.horizontal(|ui| {
         let label = match override_dir {
             Some(dir) => dir.display().to_string(),
-            None => format!("(default) {}", default_dir.display()),
+            None => crate::fl!(
+                "common-default-path",
+                path = default_dir.display().to_string()
+            ),
         };
         ui.label(label);
-        if ui.button("Choose...").clicked()
+        if ui.button(crate::fl!("common-choose")).clicked()
             && let Some(picked) = rfd::FileDialog::new().pick_folder()
         {
             *override_dir = Some(picked);
         }
-        if override_dir.is_some() && ui.button("Reset to default").clicked() {
+        if override_dir.is_some() && ui.button(crate::fl!("common-reset-to-default")).clicked() {
             *override_dir = None;
         }
-        if ui.button("Open folder").clicked() {
+        if ui.button(crate::fl!("common-open-folder")).clicked() {
             // Owned, computed fresh here rather than held across the
             // buttons above: `override_dir` needs a mutable borrow for
             // Choose/Reset, which a live reference derived from it earlier

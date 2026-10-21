@@ -106,7 +106,7 @@ impl RulesReferenceDialog {
             close = show_dialog_window(
                 ctx,
                 "peach_rules_reference_dialog",
-                "Rules Reference",
+                &crate::fl!("rules-reference-title"),
                 [960.0, 680.0],
                 true,
                 |ui, close| {
@@ -123,7 +123,7 @@ impl RulesReferenceDialog {
                     // window's actual (bounded) height.
                     egui::Panel::bottom("peach_rules_reference_dialog_bottom_bar").show(ui, |ui| {
                         ui.add_space(4.0);
-                        if ui.button("Close").clicked() {
+                        if ui.button(crate::fl!("common-close")).clicked() {
                             *close = true;
                         }
                         ui.add_space(4.0);
@@ -138,24 +138,22 @@ impl RulesReferenceDialog {
                     });
 
                     render_active_pack_line(ui, *active_pack_version);
-                    ui.weak(
-                        "Built from the rules actually active in this session right now, not \
-                         a fixed snapshot — this updates whenever a different rule pack is \
-                         applied. See File \u{2192} Rule packs... to check for updates.",
-                    );
+                    ui.weak(crate::fl!(
+                        "rules-reference-live-note",
+                        menu_path = crate::ui::menu_path::rule_packs()
+                    ));
 
                     search_row(ui, view, focus_search);
                     ui.horizontal(|ui| {
                         source_dropdown(ui, rows, view);
                         let github_button = ui.add_enabled(
                             active_pack_version.is_none(),
-                            egui::Button::new("Open on GitHub..."),
+                            egui::Button::new(crate::fl!("rules-reference-open-github")),
                         );
                         let github_button = if active_pack_version.is_some() {
-                            github_button.on_disabled_hover_text(
-                                "A downloaded rule pack is active — the GitHub copy only \
-                                 matches the built-in baseline, not this pack.",
-                            )
+                            github_button.on_disabled_hover_text(crate::fl!(
+                                "rules-reference-open-github-disabled"
+                            ))
                         } else {
                             github_button
                         };
@@ -166,12 +164,16 @@ impl RulesReferenceDialog {
                     });
 
                     let visible = visible_indices(rows, None, view);
-                    ui.weak(format!("{} of {} rules shown", visible.len(), rows.len()));
+                    ui.weak(crate::fl!(
+                        "rules-reference-shown-count",
+                        shown = visible.len(),
+                        total = rows.len()
+                    ));
                     ui.separator();
 
                     if visible.is_empty() {
                         ui.add_space(6.0);
-                        ui.label("No rules match the current filters.");
+                        ui.label(crate::fl!("rule-list-no-match"));
                     } else {
                         reference_table(ui, rows, &visible, view, selected);
                     }
@@ -188,15 +190,17 @@ impl RulesReferenceDialog {
 fn render_active_pack_line(ui: &mut egui::Ui, active_pack_version: Option<u32>) {
     match active_pack_version {
         Some(version) => {
-            ui.label(format!(
-                "Showing rule pack version {version} (applied via Rule packs...)."
+            ui.label(crate::fl!(
+                "rules-reference-pack-active",
+                version = version,
+                menu_path = crate::ui::menu_path::rule_packs()
             ));
         }
         None => {
-            ui.label(format!(
-                "Showing the built-in baseline — Peach {}, built {}.",
-                env!("CARGO_PKG_VERSION"),
-                env!("PEACH_BUILD_DATE"),
+            ui.label(crate::fl!(
+                "rules-reference-baseline",
+                version = env!("CARGO_PKG_VERSION"),
+                date = env!("PEACH_BUILD_DATE")
             ));
         }
     }
@@ -233,19 +237,34 @@ fn reference_table(
         .column(Column::remainder().at_least(160.0).clip(true))
         .header(22.0, |mut header| {
             header.col(|ui| {
-                sort_header(ui, "Source", SortColumn::Source, view);
+                sort_header(
+                    ui,
+                    &crate::fl!("rule-list-column-source"),
+                    SortColumn::Source,
+                    view,
+                );
             });
             header.col(|ui| {
-                sort_header(ui, "Rule", SortColumn::Rule, view);
+                sort_header(
+                    ui,
+                    &crate::fl!("rule-list-column-rule"),
+                    SortColumn::Rule,
+                    view,
+                );
             });
             header.col(|ui| {
-                ui.strong("Match");
+                ui.strong(crate::fl!("rule-list-column-match"));
             });
             header.col(|ui| {
-                sort_header(ui, "Tag", SortColumn::Tag, view);
+                sort_header(
+                    ui,
+                    &crate::fl!("rule-list-column-tag"),
+                    SortColumn::Tag,
+                    view,
+                );
             });
             header.col(|ui| {
-                ui.strong("Description");
+                ui.strong(crate::fl!("rule-list-column-description"));
             });
         })
         .body(|body| {
@@ -302,12 +321,16 @@ fn reference_table(
 fn detail_panel(ui: &mut egui::Ui, rows: &[RuleRow], selected: Option<&str>) {
     ui.set_min_height(110.0);
     let Some(rule) = selected.and_then(|name| rows.iter().find(|r| r.name == name)) else {
-        ui.weak("Click a rule to see its full match condition and description here.");
+        ui.weak(crate::fl!("rules-reference-detail-hint"));
         return;
     };
     ui.horizontal_wrapped(|ui| {
         ui.strong(&rule.display_name);
-        ui.weak(format!("\u{00B7} {} \u{00B7} tag", rule.source.label()));
+        ui.weak(format!(
+            "\u{00B7} {} \u{00B7} {}",
+            rule.source.label(),
+            crate::fl!("rules-reference-detail-tag")
+        ));
         ui.monospace(&rule.tag);
     });
     if !rule.description.is_empty() {
