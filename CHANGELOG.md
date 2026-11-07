@@ -2,10 +2,11 @@
 
 All notable changes to Peach will be documented in this file.
 
-## Unreleased
+## v0.11.0 - 2026-11-07
 
 ### New Features
 
+- **UI translations** — the user interface can now be translated. **Settings → Language** lists the installed languages and how much of each is translated; anything not yet translated is shown in English. English is the default and the only complete language in this release. Translations are community-maintained Fluent files (`i18n/<code>/peach.ftl`, see `i18n/README.md`); a German file is included but still empty. Only the display is translated: log data, tags, rules, the search syntax, exports, everything stored in the session and error details stay as they are.
 - **Tagging rules — `message_prefix`** — a new match key: matches when the message *starts with* any of a string or list of strings, exact case. For search terms that also occur in the middle of unrelated messages, where `message_contains` would tag those too. An empty prefix never matches.
 
 ### Improvements
