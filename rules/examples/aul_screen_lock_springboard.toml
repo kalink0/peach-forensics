@@ -1,0 +1,35 @@
+# AUL pattern-of-life: SpringBoard's "UILocked: <n>" lines
+# (com.apple.SpringBoard), the UI lock flag SpringBoard logs. Companion to
+# aul_screen_lock_state.toml, same tag value; a separate file because this
+# predicate needs a subsystem condition and an anchored message, while that
+# rule ORs plain substrings across all subsystems.
+#
+# Reading caveats:
+# - The number is reported as stored. What 0 and 1 denote is not
+#   established by the source.
+# - Anchored at the start of the message (message_prefix), as in the source:
+#   iLEAPP found SpringBoard logging volume-control state with "UILocked:"
+#   mid-message on an iOS 14.3 image (20 entries), and SpringBoard entries
+#   under com.apple.UserNotificationsKit with it mid-message too. A substring
+#   match would tag those.
+#
+# Source: iLEAPP `logarchive_lock_status` (commit bf5126a0, 2026-10-13;
+# search term from Hexordia), which saw 3 to 25 such lines per image on
+# iOS 14.3, 17.2.1, 17.3 and 26.6: https://github.com/abrignoni/iLEAPP
+# Observed on one processed iOS 18.0.1 (22A3370) load: 12 lines, all from
+# SpringBoard, subsystem com.apple.SpringBoard, category Common, alternating
+# "UILocked: 0" and "UILocked: 1". Every "UILocked:" line on that load began
+# the message, so the anchoring made no difference there.
+
+[rule]
+name = "aul_screen_lock_springboard"
+description = "SpringBoard UI lock flag (\"UILocked: 0/1\", as logged)"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+subsystem = "com.apple.SpringBoard"
+message_prefix = "UILocked:"
+
+[rule.tag]
+value = "screen_lock_state"

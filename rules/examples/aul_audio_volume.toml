@@ -3,17 +3,33 @@
 # Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
 # (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive audio status".
+#
+# "VolumeDecrement" (v2) is the volume-down counterpart of "VolumeIncrement":
+# both are backboardd hardware events in com.apple.BackBoard:Button, one line
+# on press and one on release, the button named by the usage code (0xE9 up,
+# 0xEA down). iLEAPP's audio status artifact lists only "VolumeIncrement";
+# Tim Korver's "Apple Unified Log search term and process cheatsheet" (v2,
+# published with Thesis Friday #31 on 2026-10-16, CC BY-NC-ND 4.0) and its
+# companion "search term sets" sheet (Thesis Friday #32, 2026-10-23) list
+# both: https://thesisfriday.com/unified-log-search-terms-cheatsheet/
+# https://thesisfriday.com/unified-log-search-term-sets/
+# Observed on one processed iOS 18.0.1 (22A3370) load: 4 "VolumeDecrement"
+# and 8 "VolumeIncrement" lines, e.g. "VolumeDecrement page:0xC usage:0xEA
+# downEvent:1 down", each pair followed within milliseconds by SpringBoard's
+# "RECEIVED rawVolumeDecreasePress down:YES/NO". Two lines per press, so rows
+# are not a press count.
 
 [rule]
 name = "aul_audio_volume"
 description = "Volume button presses and audio playback state changes"
-version = "1"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
 message_contains = [
     "AudioQueueIsPlaying",
     "VolumeIncrement",
+    "VolumeDecrement",
     "rawVolumeIncreasePress",
     "rawVolumeDecreasePress",
     "Volume active",

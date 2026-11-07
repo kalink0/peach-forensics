@@ -32,6 +32,10 @@ def format_match(match: dict) -> str:
         elif key == "event_data" and isinstance(value, dict):
             pairs = "<br>".join(f"&bull; `{k}` = `{v}`" for k, v in value.items())
             parts.append(f"event data has:<br>{pairs}")
+        elif key == "message_prefix":
+            values = value if isinstance(value, list) else [value]
+            items = "<br>".join(f"&bull; `{v}`" for v in values)
+            parts.append(f"message starts with any of:<br>{items}")
         elif key in ("subsystem_prefix", "category_prefix"):
             field = key.removesuffix("_prefix")
             values = value if isinstance(value, list) else [value]

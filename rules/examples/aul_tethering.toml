@@ -2,16 +2,26 @@
 # Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
 # (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive personal hotspot".
+#
+# "Tethering is now disabled with" (v2), the counterpart of the enabled
+# line, follows iLEAPP `logarchive_tethering` (commit 3e238043, 2026-10-08,
+# "Add Tethering Disabled"): https://github.com/abrignoni/iLEAPP
+# Observed on one processed iOS 18.0.1 (22A3370) load: 2 lines from
+# bluetoothd (com.apple.bluetooth, Server.Core), "Tethering is now disabled
+# with 0 out of 5 clients connected", 9 ms apart, next to SpringBoard's
+# "Tethering is currently OFF" modem notification. Two lines for one change,
+# so rows are not a count of toggles. No "enabled" line occurs on that load.
 
 [rule]
 name = "aul_tethering"
 description = "Personal hotspot / tethering enabled or disabled"
-version = "1"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
 message_contains = [
     "Tethering is now enabled with",
+    "Tethering is now disabled with",
     "Received notification that wireless modem state changed",
     "Previous tethering state was",
 ]

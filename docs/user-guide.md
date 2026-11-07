@@ -220,6 +220,20 @@ category_prefix = "SystemGesture"
 message_contains = "gestureRecognizerShouldBegin"
 ```
 
+`message_prefix` is the anchored form of `message_contains`: a string or array
+of strings, matching if the message *starts with* any of them (exact case).
+Use it when the text also occurs in the middle of unrelated messages, so a
+substring match would catch those too:
+
+```toml
+[rule.match]
+sourcetype = "aul"
+subsystem = "com.apple.SpringBoard"
+message_prefix = "UILocked:"
+```
+
+An empty prefix never matches.
+
 `event_data` matches fields of an EVTX record's payload — its `EventData`, or
 the single `UserData` element for providers that log there (Terminal Services
 does) — with an inline table whose pairs must all be equal:

@@ -35,6 +35,16 @@ use thiserror::Error;
 /// such as iLEAPP's `category LIKE 'SystemGesture%'` for SpringBoard's
 /// system gesture recognizers.
 ///
+/// `message_prefix` is the anchored counterpart of `message_contains`: a
+/// string or array of strings, matching if `message` *starts with* any of
+/// them. It exists for search terms whose source anchors them at the start
+/// of the message because the same text also occurs mid-message in
+/// unrelated lines — iLEAPP's `event_message LIKE 'UILocked:%'`, for
+/// example, where SpringBoard also logs volume-control state containing
+/// `UILocked:` further into the line. A substring test would sweep those
+/// lines in. Exact case, no whitespace trimming; an empty prefix is dropped
+/// like the other prefix keys.
+///
 /// `event_data` is an inline table of field/value pairs that must all equal
 /// the same-named field of an EVTX record's payload — its `EventData`, or the
 /// `UserData` element for providers that log there (see
@@ -58,6 +68,9 @@ pub struct Rule {
     /// `category_prefix` values, prepared exactly like `subsystem_prefixes`.
     #[serde(skip)]
     category_prefixes: Vec<String>,
+    /// `message_prefix` values, prepared exactly like `subsystem_prefixes`.
+    #[serde(skip)]
+    message_prefixes: Vec<String>,
     /// `message_contains` needles, precomputed once from
     /// `rule.match_fields` here at parse time rather than rebuilt on every
     /// [`Rule::matches`] call. Import-time tagging runs `matches()` once per
@@ -106,6 +119,7 @@ impl Rule {
             non_empty_match_strings(&rule.rule.match_fields, "subsystem_prefix");
         rule.category_prefixes =
             non_empty_match_strings(&rule.rule.match_fields, "category_prefix");
+        rule.message_prefixes = non_empty_match_strings(&rule.rule.match_fields, "message_prefix");
         Ok(rule)
     }
 
@@ -131,6 +145,11 @@ impl Rule {
                     self.message_contains_needles
                         .iter()
                         .any(|needle| actual.contains(needle.as_str()))
+                }),
+                "message_prefix" => message.is_some_and(|actual| {
+                    self.message_prefixes
+                        .iter()
+                        .any(|prefix| actual.starts_with(prefix.as_str()))
                 }),
                 "subsystem_prefix" => normalized_field("subsystem", sourcetype, fields)
                     .or_else(|| fields.get("subsystem"))
@@ -345,8 +364,8 @@ fn non_empty_match_strings(match_fields: &toml::Table, key: &str) -> Vec<String>
         .collect()
 }
 
-/// Reads a `match` value (`message_contains`, `subsystem_prefix`,
-/// `category_prefix`) as a list
+/// Reads a `match` value (`message_contains`, `message_prefix`,
+/// `subsystem_prefix`, `category_prefix`) as a list
 /// of strings to search for, accepting either a bare string or an array of
 /// strings. Any other shape (e.g. an integer) yields an empty list, so a
 /// malformed rule simply never matches rather than panicking.
@@ -1451,6 +1470,72 @@ value = "airplane_mode"
         .unwrap();
         assert!(!rule.matches("aul", None, None, &serde_json::json!({})));
         assert!(!rule.matches("aul", None, None, &serde_json::json!({"category": 7})));
+    }
+
+    #[test]
+    fn message_prefix_matches_only_at_the_start_and_is_case_sensitive() {
+        let single = Rule::from_toml_str(
+            "[rule]\nname = \"l\"\n[rule.match]\nsourcetype = \"aul\"\nmessage_prefix = \"UILocked:\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        let list = Rule::from_toml_str(
+            "[rule]\nname = \"l\"\n[rule.match]\nsourcetype = \"aul\"\nmessage_prefix = [\"wake source:\", \"UILocked:\"]\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        let none = serde_json::json!({});
+
+        assert!(single.matches("aul", None, Some("UILocked: 1"), &none));
+        assert!(!single.matches("aul", None, Some("volume state UILocked: 1"), &none));
+        assert!(!single.matches("aul", None, Some(" UILocked: 1"), &none));
+        assert!(!single.matches("aul", None, Some("uilocked: 1"), &none));
+        assert!(!single.matches("aul", None, None, &none));
+        assert!(list.matches("aul", None, Some("wake source: LockButton"), &none));
+        assert!(list.matches("aul", None, Some("UILocked: 0"), &none));
+        assert!(!list.matches("aul", None, Some("Screen did lock"), &none));
+    }
+
+    #[test]
+    fn message_prefix_with_empty_or_malformed_values_never_matches() {
+        for value in ["\"\"", "[\"\"]", "[]", "42"] {
+            let rule = Rule::from_toml_str(&format!(
+                "[rule]\nname = \"bad\"\n[rule.match]\nmessage_prefix = {value}\n[rule.tag]\nvalue = \"t\"\n"
+            ))
+            .unwrap();
+            assert!(
+                !rule.matches("aul", None, Some("UILocked: 1"), &serde_json::json!({})),
+                "message_prefix = {value} must not match"
+            );
+        }
+    }
+
+    /// The key ANDs with the other conditions like every other key, so a
+    /// prefix can be scoped to the subsystem the source names.
+    #[test]
+    fn message_prefix_combines_with_a_subsystem_condition() {
+        let rule = Rule::from_toml_str(
+            "[rule]\nname = \"w\"\n[rule.match]\nsourcetype = \"aul\"\nsubsystem = \"com.apple.SpringBoard\"\nmessage_prefix = \"wake source:\"\n[rule.tag]\nvalue = \"t\"\n",
+        )
+        .unwrap();
+        let sub = |name: &str| serde_json::json!({ "subsystem": name });
+
+        assert!(rule.matches(
+            "aul",
+            None,
+            Some("wake source: Touch"),
+            &sub("com.apple.SpringBoard")
+        ));
+        assert!(!rule.matches(
+            "aul",
+            None,
+            Some("wake source: Touch"),
+            &sub("com.apple.SpringBoard.buttons")
+        ));
+        assert!(!rule.matches(
+            "evtx",
+            None,
+            Some("wake source: Touch"),
+            &sub("com.apple.SpringBoard")
+        ));
     }
 
     /// `subsystem` resolves EVTX's provider name the same way the plain

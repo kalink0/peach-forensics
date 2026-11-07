@@ -2,6 +2,16 @@
 
 All notable changes to Peach will be documented in this file.
 
+## Unreleased
+
+### New Features
+
+- **Tagging rules — `message_prefix`** — a new match key: matches when the message *starts with* any of a string or list of strings, exact case. For search terms that also occur in the middle of unrelated messages, where `message_contains` would tag those too. An empty prefix never matches.
+
+### Improvements
+
+- **AUL rule pack: 51 → 53 rules** — synced with iLEAPP's unified log artifacts up to 2026-11-04 (including Hexordia's) and Tim Korver's Thesis Friday #32. New: `aul_wake_source` (SpringBoard's `wake source: <name>` — Notification, LockButton, LiftToWake, Touch, ACPowerChange …, tag `wake_source`; the name is reported as logged, that the screen turned on is not established) and `aul_screen_lock_springboard` (SpringBoard's `UILocked: 0/1`, tag `screen_lock_state`). New search terms: `VolumeDecrement` (`aul_audio_volume`, the counterpart of `VolumeIncrement`), `Tethering is now disabled with` (`aul_tethering`) and `Auto join association succeeded` (`aul_wifi_status`, carries the network name). Every new term was checked against one real iOS 18.0.1 archive, where it matched 1 to 33 entries. A re-tag applies them to sessions that are already loaded.
+
 ## v0.10.0 - 2026-10-17
 
 ### New Features

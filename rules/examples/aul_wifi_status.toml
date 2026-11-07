@@ -2,11 +2,21 @@
 # Predicates from "Apple Unified Log Predicates in iLEAPP: The Reference"
 # (Alexis Brignoni): leapps.org/blog-post?post=2026-08-01-unified-log-predicate-reference
 # — "logarchive wifi status".
+#
+# "Auto join association succeeded" (v2) follows iLEAPP
+# `logarchive_wifi_status` (commit bf5126a0, 2026-10-13), whose notes report
+# the network name in clear on iOS 14.3, 17.2.1 and 26.6 images:
+# https://github.com/abrignoni/iLEAPP
+# Observed on one processed iOS 18.0.1 (22A3370) load: 1 line from wifid,
+# "[WiFiPolicy] {AUTOJOIN, ASSOC*} Auto join association succeeded, network:
+# <SSID>", with the SSID in clear. It records the association by auto-join,
+# not a user choosing the network; "Attempting auto join association" above
+# is the attempt that precedes it.
 
 [rule]
 name = "aul_wifi_status"
 description = "WiFi state changes, network joins, and scan activity"
-version = "1"
+version = "2"
 
 [rule.match]
 sourcetype = "aul"
@@ -39,6 +49,7 @@ message_contains = [
     "manual association",
     "Copy password for Network",
     "Attempting auto join association",
+    "Auto join association succeeded",
     "Link went down",
     "Total connection time",
 ]

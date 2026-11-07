@@ -1,0 +1,46 @@
+# AUL pattern-of-life: SpringBoard's "wake source: <name>" lines
+# (com.apple.SpringBoard, category DashBoard), e.g. "wake source:
+# LiftToWake". The name after the colon is the source SpringBoard gave for
+# a wake; it is reported as stored.
+#
+# Reading caveats:
+# - What each name means, and whether an entry marks the screen turning on,
+#   is not established by the source. iLEAPP's own notes say so; Hexordia's
+#   announcement describes the artifact as pinpointing what turned the
+#   screen on, which the notes do not back.
+# - A "Notification" wake does not by itself show user activity. On the
+#   load below 8 of its 15 lines fell on the full second at 10:48:00 or
+#   17:00:00 UTC on five different days, which looks scheduled; the other 7
+#   were spread irregularly over one day. "LockButton", "Touch" and
+#   "LiftToWake" name a physical cause, "ACPowerChange" a power change.
+# - Names seen by iLEAPP across 14 images (iOS 12.4 to 26.6): Notification,
+#   LiftToWake, Touch, ACPowerChange, LockButton, HomeButton (iOS 15.0.2 and
+#   16.5 only), BumpToWake (iOS 18.7 only). The iOS 12.4 and 14.3 images had
+#   no such line. Absence of a line is not evidence that the screen did not
+#   wake.
+# - Lift-to-wake is also tagged by aul_wake_gesture / aul_lift_to_wake (tag
+#   wake_gesture); this rule has its own tag because it covers every wake
+#   source, not only the gesture.
+#
+# Anchored at the start of the message (message_prefix), as in the source.
+#
+# Source: iLEAPP `logarchive_wake_source`, search term from Hexordia
+# research (commit 5b993a46, 2026-10-09; Kevin Pagano):
+# https://github.com/abrignoni/iLEAPP
+# https://www.hexordia.com/blog/ileapp-sysdiagnose-unified-log-parsers
+# Observed on one processed iOS 18.0.1 (22A3370) load: 33 lines, all from
+# SpringBoard, subsystem com.apple.SpringBoard, category DashBoard —
+# Notification 15, LockButton 11, ACPowerChange 5, LiftToWake 1, Touch 1.
+
+[rule]
+name = "aul_wake_source"
+description = "SpringBoard wake source (Notification, LockButton, LiftToWake, Touch, ACPowerChange, ...) — the name as logged; that the screen turned on is not established"
+version = "1"
+
+[rule.match]
+sourcetype = "aul"
+subsystem = "com.apple.SpringBoard"
+message_prefix = "wake source:"
+
+[rule.tag]
+value = "wake_source"
